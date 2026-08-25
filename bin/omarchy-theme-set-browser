@@ -4,21 +4,26 @@
 # omarchy:hidden=true
 
 CHROMIUM_THEME=$HOME/.local/state/omarchy/current/theme/chromium.theme
+POLICY_HELPER=/usr/bin/omarchy-browser-policy
 
+theme_hex_color() {
+  local value="$1" red green blue extra
+  IFS=, read -r red green blue extra <<<"$value"
+  [[ -z $extra && $red =~ ^[0-9]{1,3}$ && $green =~ ^[0-9]{1,3}$ && $blue =~ ^[0-9]{1,3}$ ]] || return 1
+  ((10#$red <= 255 && 10#$green <= 255 && 10#$blue <= 255)) || return 1
+  printf '#%02x%02x%02x' "$((10#$red))" "$((10#$green))" "$((10#$blue))"
+}
+
+THEME_HEX_COLOR="#1c2027"
 if [[ -f $CHROMIUM_THEME ]]; then
-  THEME_RGB_COLOR=$(<$CHROMIUM_THEME)
-  THEME_HEX_COLOR=$(printf '#%02x%02x%02x' ${THEME_RGB_COLOR//,/ })
-else
-  # Use a default, neutral grey if theme doesn't have a color
-  THEME_HEX_COLOR="#1c2027"
+  THEME_RGB_COLOR=$(<"$CHROMIUM_THEME")
+  THEME_HEX_COLOR=$(theme_hex_color "$THEME_RGB_COLOR") || THEME_HEX_COLOR="#1c2027"
 fi
 
-set_browser_policy() {
-  local policy_dir="$1"
-
-  [[ -d $policy_dir ]] || return
-  echo "{\"BrowserThemeColor\": \"$THEME_HEX_COLOR\", \"BrowserColorScheme\": \"device\"}" | tee "$policy_dir/color.json" >/dev/null
-}
+# This is passwordless only for the fixed-schema color action. The packaged,
+# root-owned helper validates the single color argument and owns every policy
+# destination; the theme process never receives directory write access.
+sudo "$POLICY_HELPER" color "$THEME_HEX_COLOR" || exit 1
 
 refresh_running_browser() {
   local process="$1"
@@ -30,16 +35,12 @@ refresh_running_browser() {
   fi
 }
 
-set_browser_policy /etc/chromium/policies/managed
 refresh_running_browser chromium chromium
 
-set_browser_policy /etc/opt/chrome/policies/managed
 refresh_running_browser chrome google-chrome-stable || refresh_running_browser chrome google-chrome
 
-set_browser_policy /etc/opt/edge/policies/managed
 refresh_running_browser msedge microsoft-edge-stable
 
-set_browser_policy /etc/brave/policies/managed
 refresh_running_browser brave brave
 # Match on the binary path: the running process is named plain "brave", and a
 # bare -f brave-origin pattern would also match the installer's own terminal.

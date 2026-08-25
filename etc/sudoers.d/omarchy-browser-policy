@@ -1,0 +1,3 @@
+# Theme changes may only ask this root-owned helper to atomically write one
+# fixed-schema color policy. The helper rejects every other argument and path.
+%wheel ALL=(root) NOPASSWD: /usr/bin/omarchy-browser-policy color *

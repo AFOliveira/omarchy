@@ -7,8 +7,7 @@
 set -e
 
 setup_policy_directory() {
-  sudo mkdir -p "$1"
-  sudo chmod a+rw "$1"
+  sudo install -d -o root -g root -m 0755 "$1"
 }
 
 announce_browser_installed() {
@@ -25,9 +24,13 @@ copy_chromium_flags() {
 
 setup_firefox_preferences() {
   local distribution_dir="$1"
+  local browser="$2"
 
   setup_policy_directory "$distribution_dir"
-  sudo cp -f "$OMARCHY_PATH/default/firefox/policies.json" "$distribution_dir/policies.json"
+  # The root-owned helper reads one fixed packaged source and atomically
+  # replaces policies.json, so a stale symlink in a previously writable
+  # distribution directory can never redirect a privileged write.
+  sudo /usr/bin/omarchy-browser-policy firefox "$browser"
 }
 
 setup_firefox_wayland() {
@@ -85,7 +88,7 @@ firefox)
   echo "Installing Firefox..."
   omarchy-pkg-add firefox || exit 1
 
-  setup_firefox_preferences /usr/lib/firefox/distribution
+  setup_firefox_preferences /usr/lib/firefox/distribution firefox
   setup_firefox_wayland
   announce_browser_installed "Firefox"
   ;;
@@ -93,7 +96,7 @@ zen)
   echo "Installing Zen..."
   omarchy-pkg-aur-add zen-browser-bin || exit 1
 
-  setup_firefox_preferences /opt/zen-browser/distribution
+  setup_firefox_preferences /opt/zen-browser/distribution zen
   setup_firefox_wayland
   announce_browser_installed "Zen"
   ;;

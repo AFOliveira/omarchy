@@ -1,0 +1,242 @@
+#!/bin/bash
+
+# omarchy:summary=Write or repair Omarchy's machine browser policies
+# omarchy:args=<color #RRGGBB|firefox firefox|zen|repair>
+# omarchy:hidden=true
+# omarchy:requires-sudo=true
+
+set -euo pipefail
+
+if ((EUID != 0)); then
+  echo "omarchy-browser-policy must run as root" >&2
+  exit 1
+fi
+
+# This command has a narrow passwordless sudo rule for `color #RRGGBB`, so its
+# privileged half must never resolve helpers from a development checkout.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+
+readonly DEFAULT_COLOR="#1c2027"
+readonly FIREFOX_POLICY_SOURCE="/usr/share/omarchy/default/firefox/policies.json"
+
+chromium_policy_dirs=(
+  /etc/chromium/policies/managed
+  /etc/opt/chrome/policies/managed
+  /etc/opt/edge/policies/managed
+  /etc/brave/policies/managed
+)
+firefox_policy_dirs=(
+  /usr/lib/firefox/distribution
+  /opt/zen-browser/distribution
+)
+
+valid_color() { [[ $1 =~ ^#[0-9a-fA-F]{6}$ ]]; }
+
+assert_root_boundary() {
+  local path="$1" owner mode canonical
+  [[ -d $path && ! -L $path ]] || return 1
+  canonical=$(realpath -e -- "$path" 2>/dev/null) || return 1
+  [[ $canonical == "$path" ]] || return 1
+  owner=$(stat -Lc '%u' "$path") || return 1
+  mode=$(stat -Lc '%a' "$path") || return 1
+  [[ $owner == 0 ]] && ! ((8#$mode & 022))
+}
+
+# The policy directory itself may still be mode 0777 when repair first sees it,
+# but its fixed parent must be a root-owned boundary so an unprivileged writer
+# cannot exchange the directory entry during the repair.
+assert_repairable_policy_dir() {
+  local directory="$1" parent canonical
+  [[ -d $directory && ! -L $directory ]] || return 1
+  canonical=$(realpath -e -- "$directory" 2>/dev/null) || return 1
+  [[ $canonical == "$directory" ]] || return 1
+  parent=$(dirname -- "$directory")
+  assert_root_boundary "$parent"
+}
+
+write_color_policy() {
+  local directory="$1" color="$2" stage
+  stage=$(mktemp "$directory/.color.json.XXXXXX")
+  trap 'rm -f -- "${stage:-}"' RETURN
+  printf '{"BrowserThemeColor": "%s", "BrowserColorScheme": "device"}\n' "$color" >"$stage"
+  chown root:root "$stage"
+  chmod 0644 "$stage"
+  mv -Tf -- "$stage" "$directory/color.json"
+  trap - RETURN
+}
+
+write_firefox_policy() {
+  local directory="$1" stage source_owner source_mode
+  [[ -f $FIREFOX_POLICY_SOURCE && ! -L $FIREFOX_POLICY_SOURCE ]] || {
+    echo "Refusing an unsafe Firefox policy source: $FIREFOX_POLICY_SOURCE" >&2
+    return 1
+  }
+  source_owner=$(stat -Lc '%u' "$FIREFOX_POLICY_SOURCE")
+  source_mode=$(stat -Lc '%a' "$FIREFOX_POLICY_SOURCE")
+  [[ $source_owner == 0 ]] && ! ((8#$source_mode & 022)) || {
+    echo "Refusing an untrusted Firefox policy source: $FIREFOX_POLICY_SOURCE" >&2
+    return 1
+  }
+
+  stage=$(mktemp "$directory/.policies.json.XXXXXX")
+  trap 'rm -f -- "${stage:-}"' RETURN
+  cp -- "$FIREFOX_POLICY_SOURCE" "$stage"
+  chown root:root "$stage"
+  chmod 0644 "$stage"
+  mv -Tf -- "$stage" "$directory/policies.json"
+  trap - RETURN
+}
+
+set_color() {
+  local color="$1" directory
+  valid_color "$color" || {
+    echo "Invalid browser theme color: $color" >&2
+    return 2
+  }
+
+  # Preflight every installed browser before changing any of them.
+  for directory in "${chromium_policy_dirs[@]}"; do
+    [[ -e $directory || -L $directory ]] || continue
+    assert_root_boundary "$directory" || {
+      echo "Refusing unsafe browser policy directory: $directory" >&2
+      return 1
+    }
+  done
+  for directory in "${chromium_policy_dirs[@]}"; do
+    [[ -d $directory ]] || continue
+    write_color_policy "$directory" "$color"
+  done
+}
+
+install_firefox_policy() {
+  local browser="$1" directory
+  case "$browser" in
+  firefox) directory=/usr/lib/firefox/distribution ;;
+  zen) directory=/opt/zen-browser/distribution ;;
+  *)
+    echo "Unknown Firefox-family browser: $browser" >&2
+    return 2
+    ;;
+  esac
+
+  assert_root_boundary "$directory" || {
+    echo "Refusing unsafe browser policy directory: $directory" >&2
+    return 1
+  }
+  write_firefox_policy "$directory"
+}
+
+trusted_managed_entry() {
+  local entry="$1" kind="$2" owner mode content source_owner source_mode
+  local color_pattern='^\{"BrowserThemeColor": "#[0-9a-fA-F]{6}", "BrowserColorScheme": "device"\}$'
+  [[ ! -L $entry ]] || return 1
+  owner=$(stat -Lc '%u' "$entry" 2>/dev/null) || return 1
+  mode=$(stat -Lc '%a' "$entry" 2>/dev/null) || return 1
+  [[ $owner == 0 ]] && ! ((8#$mode & 022)) || return 1
+
+  case "$kind:$(basename -- "$entry")" in
+  chromium:color.json)
+    [[ -f $entry && $mode == 644 ]] || return 1
+    content=$(<"$entry")
+    [[ $content =~ $color_pattern ]]
+    ;;
+  chromium:*.json)
+    # An unknown JSON file is an active Chromium policy even when its current
+    # ownership looks sound. Quarantine it for explicit administrator review.
+    return 1
+    ;;
+  firefox:policies.json)
+    [[ -f $entry && $mode == 644 ]] || return 1
+    [[ -f $FIREFOX_POLICY_SOURCE && ! -L $FIREFOX_POLICY_SOURCE ]] || return 1
+    source_owner=$(stat -Lc '%u' "$FIREFOX_POLICY_SOURCE" 2>/dev/null) || return 1
+    source_mode=$(stat -Lc '%a' "$FIREFOX_POLICY_SOURCE" 2>/dev/null) || return 1
+    [[ $source_owner == 0 ]] && ! ((8#$source_mode & 022)) && cmp -s -- "$FIREFOX_POLICY_SOURCE" "$entry"
+    ;;
+  # Preserve root-owned, non-writable vendor files that are not policy inputs
+  # (Firefox packages may ship other distribution assets).
+  *) return 0 ;;
+  esac
+}
+
+quarantine_policy_entries() {
+  local directory="$1" kind="$2" quarantine entry owner mode
+  local -a entries=() candidates=()
+  mapfile -d '' entries < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
+
+  # Keep quarantines produced by an earlier successful repair. A hostile
+  # lookalike from the previously writable directory is not trusted: only a
+  # real root-owned mode-0700 directory qualifies.
+  for entry in "${entries[@]}"; do
+    if [[ $(basename -- "$entry") == .omarchy-policy-quarantine.* && -d $entry && ! -L $entry ]]; then
+      owner=$(stat -Lc '%u' "$entry" 2>/dev/null || true)
+      mode=$(stat -Lc '%a' "$entry" 2>/dev/null || true)
+      [[ $owner == 0 && $mode == 700 ]] && continue
+    fi
+    trusted_managed_entry "$entry" "$kind" && continue
+    candidates+=("$entry")
+  done
+  ((${#candidates[@]} > 0)) || return 0
+
+  # Keep the quarantine inside the now-protected policy directory. Renames are
+  # therefore guaranteed to stay on one filesystem, and mode 0700 prevents a
+  # browser from reading nested JSON even if its policy loader recurses.
+  quarantine=$(mktemp -d "$directory/.omarchy-policy-quarantine.XXXXXX")
+  chown root:root "$quarantine"
+  chmod 0700 "$quarantine"
+
+  for entry in "${candidates[@]}"; do
+    mv --no-copy -T -- "$entry" "$quarantine/$(basename -- "$entry")" || {
+      echo "Could not quarantine $entry; refusing to restore policies in $directory" >&2
+      return 1
+    }
+  done
+  printf 'Quarantined untrusted browser policies from %s in %s\n' "$directory" "$quarantine"
+}
+
+repair_policies() {
+  local directory
+
+  # Reject a symlinked/non-directory policy path before modifying any browser.
+  for directory in "${chromium_policy_dirs[@]}" "${firefox_policy_dirs[@]}"; do
+    [[ -e $directory || -L $directory ]] || continue
+    assert_repairable_policy_dir "$directory" || {
+      echo "Refusing unsafe browser policy path: $directory" >&2
+      return 1
+    }
+  done
+
+  for directory in "${chromium_policy_dirs[@]}"; do
+    [[ -d $directory ]] || continue
+    chown root:root "$directory"
+    chmod 0755 "$directory"
+    quarantine_policy_entries "$directory" chromium
+    write_color_policy "$directory" "$DEFAULT_COLOR"
+  done
+
+  for directory in "${firefox_policy_dirs[@]}"; do
+    [[ -d $directory ]] || continue
+    chown root:root "$directory"
+    chmod 0755 "$directory"
+    quarantine_policy_entries "$directory" firefox
+    write_firefox_policy "$directory"
+  done
+}
+
+case "${1:-}" in
+color)
+  (($# == 2)) || { echo "Usage: omarchy-browser-policy color #RRGGBB" >&2; exit 2; }
+  set_color "$2"
+  ;;
+firefox)
+  (($# == 2)) || { echo "Usage: omarchy-browser-policy firefox <firefox|zen>" >&2; exit 2; }
+  install_firefox_policy "$2"
+  ;;
+repair)
+  (($# == 1)) || { echo "Usage: omarchy-browser-policy repair" >&2; exit 2; }
+  repair_policies
+  ;;
+*)
+  echo "Usage: omarchy-browser-policy <color #RRGGBB|firefox firefox|zen|repair>" >&2
+  exit 2
+  ;;
+esac

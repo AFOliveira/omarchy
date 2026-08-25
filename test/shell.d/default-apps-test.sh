@@ -205,10 +205,10 @@ OMARCHY_TEST_REAL_BROWSER_INSTALL=true omarchy-default-browser --install chromiu
 [[ $(omarchy-default-browser) == "chromium" ]] || fail "Chromium becomes the default after its full installer succeeds"
 cmp -s "$ROOT/config/chromium-flags.conf" "$test_home/.config/chromium-flags.conf" ||
   fail "Chromium browser installer copies the default flags"
-grep -Fxq 'sudo:mkdir -p /etc/chromium/policies/managed' "$setup_log" ||
-  fail "Chromium browser installer creates its policy directory"
-grep -Fxq 'sudo:chmod a+rw /etc/chromium/policies/managed' "$setup_log" ||
-  fail "Chromium browser installer makes its policy directory writable"
+grep -Fxq 'sudo:install -d -o root -g root -m 0755 /etc/chromium/policies/managed' "$setup_log" ||
+  fail "Chromium browser installer creates a root-owned policy directory"
+grep -Eq 'chmod a\+rw|0777' "$setup_log" &&
+  fail "Chromium browser installer must not make policy directories writable"
 grep -Fxq 'omarchy-install-chromium-copy-url:' "$setup_log" ||
   fail "Chromium browser installer registers the Copy URL host"
 grep -Fxq 'omarchy-install-chromium-ytdlp:' "$setup_log" ||
