@@ -99,7 +99,11 @@ case "$*" in
     printf 'ok\n'
     ;;
   *'lock status')
-    if [[ -f $OMARCHY_TEST_QS_STATE.locked ]]; then
+    if [[ ${OMARCHY_TEST_LOCK_STATUS:-} == "failed" ]]; then
+      exit 1
+    elif [[ ${OMARCHY_TEST_LOCK_STATUS:-} == "malformed" ]]; then
+      printf '{"sessionLocked":"unknown"}\n'
+    elif [[ -f $OMARCHY_TEST_QS_STATE.locked ]]; then
       printf '{"sessionLocked": true, "secure": true, "requested": true}\n'
     elif [[ -f $OMARCHY_TEST_QS_STATE.stranded ]]; then
       printf '{"sessionLocked": false, "secure": true, "requested": true}\n'
@@ -236,6 +240,27 @@ locked_error=$(PATH="$restart_bin:$PATH" \
 [[ $(<"$restart_state") == 303 ]] || fail "locked restart preserves the running shell"
 [[ ! -s $restart_log ]] || fail "locked restart does not stop or launch Quickshell"
 pass "restart preserves the shell while its lock is active"
+
+for status_mode in failed malformed; do
+  : >"$restart_log"
+  unknown_error=$(PATH="$restart_bin:$PATH" \
+    OMARCHY_PATH="$restart_root" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    OMARCHY_TEST_SESSION_LOCKED=1 \
+    OMARCHY_TEST_LOCK_STATUS="$status_mode" \
+    OMARCHY_TEST_QS_STATE="$restart_state" \
+    OMARCHY_TEST_QS_LOG="$restart_log" \
+    OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+    OMARCHY_TEST_IPC_LOG="$ipc_log" \
+    OMARCHY_TEST_SESSION_PATH="$restart_root" \
+    "$ROOT/bin/omarchy-restart-shell" 2>&1) &&
+    fail "restart accepts an indeterminate $status_mode lock status"
+  [[ $unknown_error == "Could not determine whether the running shell owns the session lock; refusing to restart." ]] ||
+    fail "indeterminate lock status lacks a fail-closed diagnostic" "$unknown_error"
+  [[ $(<"$restart_state") == 303 ]] || fail "indeterminate lock status kills the running shell"
+  [[ ! -s $restart_log ]] || fail "indeterminate lock status starts a shell restart"
+done
+pass "restart fails closed when lock ownership status is unavailable or malformed"
 
 # A LOCK session without an active locker — dead shell or a crash-handler
 # relaunch holding no lock — is the failsafe: restart must proceed,
