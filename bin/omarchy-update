@@ -7,6 +7,10 @@
 
 set -e
 
+if [[ -f /etc/omarchy-k3 ]] && [[ $(uname -m) == "riscv64" ]]; then
+  exec "$OMARCHY_PATH/ports/k3/update.sh" "$@"
+fi
+
 # Run the update inside a PTY so pacman/yay keep showing download progress
 # while still logging the full session for later analysis.
 if [[ -z $OMARCHY_UPDATE_LOGGED ]]; then

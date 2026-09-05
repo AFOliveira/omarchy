@@ -1,0 +1,26 @@
+[Unit]
+Description=Omarchy Arch RISC-V userspace on K3
+After=network-online.target display-manager.service
+Wants=network-online.target
+RequiresMountsFor=/var/lib/machines/omarchy-k3
+ConditionPathExists=/var/lib/machines/omarchy-k3/.omarchy-k3-rootfs
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/install -d -m0700 -o1000 -g1000 /run/omarchy-k3-runtime
+ExecStartPre=/usr/local/lib/omarchy-k3/wait-parent-wayland.sh
+ExecStart=/usr/bin/systemd-nspawn --quiet --keep-unit --boot --machine=omarchy-k3 --directory=/var/lib/machines/omarchy-k3 --settings=no --private-users=no --bind=/dev/dri --bind=/dev/fuse --bind-ro=/run/udev --bind-ro=/run/user/1000:/run/host-wayland --bind=/run/omarchy-k3-runtime:/run/user/1000 --bind-ro=/usr/local/share/omarchy-k3:/run/omarchy-port
+KillMode=mixed
+Delegate=yes
+TasksMax=16384
+TimeoutStartSec=120
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+DevicePolicy=closed
+DeviceAllow=char-pts rw
+DeviceAllow=char-drm rw
+DeviceAllow=/dev/fuse rw
+
+[Install]
+WantedBy=multi-user.target

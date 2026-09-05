@@ -1,0 +1,22 @@
+#!/bin/bash
+set -e
+source "$HOME/.config/uwsm/env"
+source /opt/spacemit/env
+export WAYLAND_DISPLAY=/run/host-wayland/wayland-0
+# exec-once waits for an initial frame. The cloud parent may have no active
+# viewer, so create our headless output as soon as the new IPC socket responds.
+(
+  for (( attempt = 0; attempt < 60; attempt++ )); do
+    if signature=$(hyprctl instances -j 2>/dev/null | jq -r --argjson pid "$$" '.[] | select(.pid == $pid) | .instance' 2>/dev/null) && [[ -n $signature ]]; then
+      export HYPRLAND_INSTANCE_SIGNATURE="$signature"
+      if hyprctl monitors all -j >/dev/null 2>&1; then
+        /usr/local/bin/omarchy-k3-output
+        exit
+      fi
+    fi
+    sleep 1
+  done
+  echo "Timed out creating the K3 cloud output." >&2
+  exit 1
+) &
+exec /usr/bin/Hyprland --config "$HOME/.config/hypr/k3.conf"

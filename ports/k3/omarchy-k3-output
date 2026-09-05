@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+
+# The parent Wayland connection supplies the GPU allocator. A separate output
+# keeps cloud rendering independent of the stock desktop's frame callbacks.
+if ! hyprctl monitors all -j | jq -e '.[] | select(.name == "K3-CLOUD")' >/dev/null; then
+  hyprctl output create headless K3-CLOUD
+fi
+hyprctl keyword monitor "K3-CLOUD,1920x1080@60,0x0,1"
+hyprctl keyword monitor "WAYLAND-1,disable"
+hyprctl dispatch focusmonitor K3-CLOUD
+hyprctl dispatch workspace 1

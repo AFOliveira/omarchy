@@ -1,0 +1,51 @@
+pkgname=hyprland
+pkgver=0.55.4
+pkgrel=2.3
+pkgdesc='Hyprland rebuilt for the current Arch RISC-V graphics libraries'
+arch=('riscv64')
+url='https://github.com/hyprwm/Hyprland'
+license=('BSD-3-Clause')
+depends=('aquamarine' 'cairo' 'glib2' 'glslang' 'hyprcursor' 'hyprgraphics'
+  'hyprland-guiutils' 'hyprlang' 'hyprutils' 'hyprwayland-scanner' 'hyprwire'
+  'lcms2' 'libdrm' 'libglvnd' 'libinput' 'libx11' 'libxcb' 'libxcomposite'
+  'libxcursor' 'libxfixes' 'libxkbcommon' 'libxrender' 'lua' 'mesa' 'muparser'
+  'pango' 'pixman' 're2' 'tomlplusplus' 'util-linux-libs' 'wayland'
+  'wayland-protocols' 'xcb-proto' 'xcb-util' 'xcb-util-errors' 'xcb-util-image'
+  'xcb-util-keysyms' 'xcb-util-renderutil' 'xcb-util-wm' 'xorg-xwayland'
+  'libaquamarine.so' 'libhyprutils.so' 'libhyprlang.so' 'libhyprcursor.so'
+  'libhyprgraphics.so' 'libhyprwire.so')
+makedepends=('cmake' 'ninja' 'git' 'python' 'hyprland-protocols')
+provides=('wayland-compositor')
+options=('!debug' '!lto')
+_commit=a0136d8c04687bb36eb8a28eb9d1ff92aea99704
+_udis_commit=5336633af70f3917760a6d441ff02d93477b0c86
+source=("hyprland-a0136d8.tar.gz::$url/archive/$_commit.tar.gz"
+  "udis86-5336633.tar.gz::https://github.com/canihavesomecoffee/udis86/archive/$_udis_commit.tar.gz"
+  'glaze-v7.2.0.tar.gz::https://github.com/stephenberry/glaze/archive/refs/tags/v7.2.0.tar.gz'
+  'hyprutils-014.patch'
+  'pvr-egl-import.patch')
+sha256sums=('29372260c1c758ad167d71d7c5cfe599bfcafe3f769087a4d0b754d57a38c487'
+  '2f459fafa19535ef1be417bf7614e4f92475e5787d7ba76df20287cc29d1b5a9'
+  '17dba19ae63ae48f94994f00d49d5cb3c8f1306db1046c534c4828662490b7d4'
+  '8c212c833e2e0554d732824449570e75298cbf9e69ca2819dca9b24ec5fed67e'
+  '96b8cac72da3df72b29a1ff532a406749dcaa14b8078b3b06ca7cf71fbcbad4c')
+
+prepare() {
+  patch -d "$srcdir/Hyprland-$_commit" -p1 < "$srcdir/hyprutils-014.patch"
+  patch -d "$srcdir/Hyprland-$_commit" -p1 < "$srcdir/pvr-egl-import.patch"
+  cp -a "$srcdir/udis86-$_udis_commit/." "$srcdir/Hyprland-$_commit/subprojects/udis86/"
+}
+
+build() {
+  export GIT_COMMIT_HASH="$_commit"
+  export GIT_BRANCH="v$pkgver"
+  cmake -S "$srcdir/Hyprland-$_commit" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib -DFETCHCONTENT_SOURCE_DIR_GLAZE="$srcdir/glaze-7.2.0"
+  cmake --build build --parallel 8 -- -k 0
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 "$srcdir/Hyprland-$_commit/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

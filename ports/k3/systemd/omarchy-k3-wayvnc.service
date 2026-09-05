@@ -1,0 +1,14 @@
+[Unit]
+Description=Omarchy K3 remote desktop
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/lib/omarchy-k3/wait-cloud-output.sh
+ExecStart=/usr/bin/wayvnc --config=/dev/null --render-cursor --disable-resizing --max-fps=20 --socket=%t/omarchy-k3-wayvncctl.sock --output=K3-CLOUD 127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

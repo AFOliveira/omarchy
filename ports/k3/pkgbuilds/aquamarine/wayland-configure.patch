@@ -1,0 +1,55 @@
+diff --git a/include/aquamarine/backend/Wayland.hpp b/include/aquamarine/backend/Wayland.hpp
+index c9ed136..c49778d 100644
+--- a/include/aquamarine/backend/Wayland.hpp
++++ b/include/aquamarine/backend/Wayland.hpp
+@@ -59,6 +59,9 @@ namespace Aquamarine {
+       private:
+         CWaylandOutput(const std::string& name_, Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend_);
+ 
++        Hyprutils::Math::Vector2D pendingSize = {1280, 720};
++        bool configured = false;
++
+         Hyprutils::Memory::CWeakPointer<CWaylandBackend>  backend;
+ 
+         Hyprutils::Memory::CSharedPointer<CWaylandBuffer> wlBufferFromBuffer(Hyprutils::Memory::CSharedPointer<IBuffer> buffer);
+diff --git a/src/backend/Wayland.cpp b/src/backend/Wayland.cpp
+index 893ce26..c949a21 100644
+--- a/src/backend/Wayland.cpp
++++ b/src/backend/Wayland.cpp
+@@ -524,6 +524,12 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
+     waylandState.xdgSurface->setConfigure([this](CCXdgSurface* r, uint32_t serial) {
+         backend->backend->log(AQ_LOG_DEBUG, std::format("Output {}: configure surface with {}", name, serial));
+         r->sendAckConfigure(serial);
++        configured = true;
++        // xdg_toplevel.configure precedes xdg_surface.configure. Rendering before
++        // this acknowledgement commits a buffer to an unconfigured surface.
++        events.state.emit(SStateEvent{.size = pendingSize});
++        needsFrame = true;
++        sched.frameReady.emit();
+     });
+ 
+     waylandState.xdgToplevel = makeShared<CCXdgToplevel>(waylandState.xdgSurface->sendGetToplevel());
+@@ -543,12 +549,7 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
+             w = 1280;
+             h = 720;
+         }
+-        events.state.emit(SStateEvent{.size = {w, h}});
+-        // Kick off the first frame synchronously: the consumer expects events.frame in
+-        // the same dispatch cycle as the toplevel configure. Deferring via scheduleFrame's
+-        // idle races the first commit and can leave the output blank until the next event.
+-        needsFrame = true;
+-        sched.frameReady.emit();
++        pendingSize = {w, h};
+     });
+ 
+     waylandState.xdgToplevel->setClose([this](CCXdgToplevel* r) { destroy(); });
+@@ -650,6 +651,9 @@ bool Aquamarine::CWaylandOutput::commit() {
+         return true;
+     }
+ 
++    if (!configured)
++        return false;
++
+     auto wlBuffer = wlBufferFromBuffer(state->internalState.buffer);
+ 
+     if (!wlBuffer) {

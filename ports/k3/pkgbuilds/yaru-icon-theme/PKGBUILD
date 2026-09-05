@@ -1,0 +1,26 @@
+pkgname=yaru-icon-theme
+pkgver=26.04.5.1ubuntu
+pkgrel=1.1
+pkgdesc='Yaru icons and cursors for the Omarchy desktop'
+arch=('any')
+url='https://github.com/ubuntu/yaru'
+license=('GPL-3.0-only' 'CC-BY-SA-4.0')
+depends=('hicolor-icon-theme' 'gtk-update-icon-cache' 'librsvg')
+makedepends=('meson' 'ninja' 'python' 'sassc')
+source=("yaru-$pkgver.tar.gz::$url/archive/$pkgver.tar.gz")
+sha256sums=('4e35b71d37aedb44302c811f63d325f4abd7699961f76f130323b361d4c6a7d7')
+
+build() {
+  meson setup "yaru-$pkgver" build --prefix=/usr \
+    -Dicons=true -Dgnome-shell=false -Dgtk=true -Dgtksourceview=false \
+    -Dmetacity=false -Dsounds=false -Dsessions=false
+  meson compile -C build -j 8
+}
+
+package() {
+  # GTK generates the accent colors, but this package installs only the icons.
+  DESTDIR="$srcdir/icon-stage" meson install -C build --no-rebuild
+  install -d "$pkgdir/usr/share/icons"
+  cp -a "$srcdir/icon-stage/usr/share/icons/." "$pkgdir/usr/share/icons/"
+  install -Dm644 "yaru-$pkgver/LICENSE_CCBYSA" "$pkgdir/usr/share/licenses/$pkgname/LICENSE_CCBYSA"
+}
