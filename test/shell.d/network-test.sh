@@ -27,6 +27,10 @@ const openPasswordPrompt = panelSource.match(/function openPasswordPrompt\(ssid\
 assert(openPasswordPrompt, 'network has a passphrase prompt opener')
 assert(/if \(passwordSsid !== ssid\)[\s\S]*passwordVisible = false/.test(openPasswordPrompt[0]), 'network starts each network passphrase prompt masked')
 
+const clearNetworkAction = panelSource.match(/function clearNetworkAction\(\) \{[\s\S]*?\n {2}\}/)
+assert(clearNetworkAction, 'network has an action-success cleanup helper')
+assert(/if \(actionKind === "connect"\) cancelPasswordPrompt\(\)/.test(clearNetworkAction[0]), 'network clears the submitted passphrase and reveal state after connecting')
+
 // Opening from the bar must call open() and nothing else. open() runs
 // refresh(true), which defers the PHY scan; a second bare refresh() defaults
 // scanWifi to false, sets scannerEnabled synchronously, and stalls the open on

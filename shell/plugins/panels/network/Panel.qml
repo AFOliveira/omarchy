@@ -726,7 +726,10 @@ Panel {
 
   function clearNetworkAction() {
     actionTimeout.stop()
-    if (actionKind === "connect") passwordSsid = ""
+    // A successful connection no longer needs the submitted secret. Clear the
+    // backing QML strings as well as hiding the row so a revealed passphrase
+    // does not remain resident until the panel is closed or another SSID opens.
+    if (actionKind === "connect") cancelPasswordPrompt()
     failureSsid = ""
     failureReason = ""
     actionSsid = ""
