@@ -6,7 +6,7 @@ t2_packages=(linux-t2 linux-t2-headers apple-t2-audio-config apple-bcm-firmware 
 
 disable_unsafe_t2_repository() (
   [[ -f $pacman_conf ]] || return 0
-  local section backup
+  local section backup stage=""
 
   section=$(/usr/bin/awk '
     found && /^[[:space:]]*\[/ { exit }
@@ -18,12 +18,19 @@ disable_unsafe_t2_repository() (
 
   backup="$(/usr/bin/dirname "$pacman_conf")/arch-mact2.omarchy-disabled.$(/usr/bin/date +%s).txt"
   sudo /usr/bin/install -T -o root -g root -m 0600 /dev/stdin "$backup" <<<"$section"
+  stage=$(sudo /usr/bin/mktemp \
+    --tmpdir="$(/usr/bin/dirname "$pacman_conf")" \
+    '.pacman.conf.omarchy-t2.XXXXXXXX')
+  trap '[[ -z ${stage:-} ]] || sudo /usr/bin/rm -f -- "$stage"' EXIT
   /usr/bin/awk '
     /^[[:space:]]*\[arch-mact2\][[:space:]]*$/ { drop = 1; next }
     drop && /^[[:space:]]*\[/ { drop = 0 }
     !drop { print }
   ' "$pacman_conf" |
-    sudo /usr/bin/install -T -o root -g root -m 0644 /dev/stdin "$pacman_conf"
+    sudo /usr/bin/install -T -o root -g root -m 0644 /dev/stdin "$stage"
+  sudo /usr/bin/mv -Tf -- "$stage" "$pacman_conf"
+  stage=""
+  trap - EXIT
   echo "Disabled the unsafe arch-mact2 section; preserved it at $backup"
 )
 

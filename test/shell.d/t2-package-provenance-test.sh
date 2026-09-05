@@ -67,6 +67,7 @@ run_t2_scenario() {
   local name="$1" policy="$2" repository="$3"
   local repo_policy="${4-$policy}" global_policy="${5-$policy}"
   local missing_package="${6:-}" transaction_status="${7:-0}"
+  local padding_lines="${8:-0}"
   local dir="$test_tmp/$name"
   mkdir "$dir"
   cat >"$dir/pacman.conf" <<'CONF'
@@ -81,6 +82,15 @@ SigLevel = Required
 [omarchy]
 Server = https://pkgs.omarchy.org/
 CONF
+  if (( padding_lines > 0 )); then
+    /usr/bin/awk -v padding_lines="$padding_lines" '
+      /^\[arch-mact2\]$/ {
+        for (line = 0; line < padding_lines; line++) print "# pipeline-truncation-padding"
+      }
+      { print }
+    ' "$dir/pacman.conf" >"$dir/pacman.conf.padded"
+    /usr/bin/mv "$dir/pacman.conf.padded" "$dir/pacman.conf"
+  fi
   : >"$dir/transactions"
   sed \
     -e "s|^pacman_conf=/etc/pacman.conf$|pacman_conf=$dir/pacman.conf|" \
@@ -132,6 +142,12 @@ HOME="$test_tmp/signed" PATH="$stub_bin:$PATH" \
 [[ ! -s $test_tmp/signed/transactions ]] || fail "completed T2 repair reinstalls packages again"
 run_t2_scenario inherited '' omarchy '' 'PackageRequired PackageTrustedOnly'
 [[ -f $test_tmp/inherited/marker ]] || fail "T2 migration rejects a secure inherited global package policy"
+run_t2_scenario large 'PackageRequired PackageTrustedOnly' omarchy \
+  'PackageRequired PackageTrustedOnly' 'PackageRequired PackageTrustedOnly' '' 0 20000
+grep -q '^\[omarchy\]$' "$test_tmp/large/pacman.conf" ||
+  fail "T2 migration truncated a pacman.conf larger than the pipe buffer"
+[[ -z $(find "$test_tmp/large" -maxdepth 1 -name '.pacman.conf.omarchy-t2.*' -print -quit) ]] ||
+  fail "T2 migration left its root-owned pacman.conf stage behind"
 pass "T2 migration disables unsafe policy first and fails closed until all signed replacements exist"
 
 # Fresh installation cannot recreate the unsigned repository path.
