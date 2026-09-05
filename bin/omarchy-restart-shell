@@ -228,26 +228,34 @@ launch_replacement_shell() {
 # not evidence that it stopped: fail closed until the exact config is confirmed
 # absent, so a still-pingable old shell can never masquerade as its replacement.
 stop_existing_shells() {
-  local instance_state kill_status
+  local drain_attempt instance_state
 
+  # There is deliberately no aggregate deadline here. Quickshell sends its
+  # quit request before waiting for the server to disconnect, so a client
+  # timeout is ambiguous: abandoning the transaction could leave the old
+  # clean-exit supervisor gone with nobody responsible for replacement. Each
+  # individual probe remains bounded and the single serialized recovery keeps
+  # retrying until the registry proves the exact config absent.
   while :; do
     shell_instance_state
     instance_state=$?
     case $instance_state in
       1) return 0 ;;
-      2)
-        echo "Could not determine whether the existing Omarchy shell stopped; refusing to launch a replacement." >&2
-        return 1
-        ;;
+      2) sleep 0.1; continue ;;
     esac
 
     /usr/bin/timeout --kill-after=0.2s 5s \
-      quickshell kill -p "$CONFIG_DIR" --any-display >/dev/null 2>&1
-    kill_status=$?
-    if (( kill_status != 0 )); then
-      echo "Could not stop the existing Omarchy shell; refusing to launch a replacement." >&2
-      return 1
-    fi
+      quickshell kill -p "$CONFIG_DIR" --any-display >/dev/null 2>&1 || true
+
+    # A timed-out client may already have delivered the shutdown request.
+    # Give the independently maintained registry a bounded drain window before
+    # attempting another kill; exact absence transfers ownership to launch.
+    for ((drain_attempt = 0; drain_attempt < 20; drain_attempt++)); do
+      shell_instance_state
+      instance_state=$?
+      (( instance_state == 1 )) && return 0
+      sleep 0.1
+    done
   done
 }
 

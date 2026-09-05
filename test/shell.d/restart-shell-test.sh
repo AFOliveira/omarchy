@@ -126,6 +126,19 @@ printf '%s\n' "$*" >>"$OMARCHY_TEST_QS_LOG"
 
 case " $* " in
   *' list --all -j '*)
+    if [[ -f $OMARCHY_TEST_QS_STATE.delayed-exit ]]; then
+      count=0
+      read -r count <"$OMARCHY_TEST_QS_STATE.delayed-exit"
+      count=$((count + 1))
+      if (( count >= 3 )); then
+        pid=$(head -n 1 "$OMARCHY_TEST_QS_STATE")
+        [[ ! $pid =~ ^[0-9]+$ ]] || kill "$pid" 2>/dev/null || true
+        : >"$OMARCHY_TEST_QS_STATE"
+        rm -f "$OMARCHY_TEST_QS_STATE.delayed-exit"
+      else
+        printf '%s\n' "$count" >"$OMARCHY_TEST_QS_STATE.delayed-exit"
+      fi
+    fi
     if [[ -n ${OMARCHY_TEST_QS_LIST_COUNT:-} ]]; then
       count=0
       [[ ! -s $OMARCHY_TEST_QS_LIST_COUNT ]] || read -r count <"$OMARCHY_TEST_QS_LIST_COUNT"
@@ -144,6 +157,11 @@ case " $* " in
     fi
     ;;
   *' kill -p '*)
+    if [[ ${OMARCHY_TEST_QS_KILL_HANG_AFTER:-0} == 1 ]]; then
+      printf '0\n' >"$OMARCHY_TEST_QS_STATE.delayed-exit"
+      sleep 10
+      exit 0
+    fi
     [[ ${OMARCHY_TEST_QS_KILL_HANG:-0} == 1 ]] && { sleep 10; exit 0; }
     pid=$(head -n 1 "$OMARCHY_TEST_QS_STATE")
     [[ $pid =~ ^[0-9]+$ ]] || exit 1
@@ -441,15 +459,40 @@ kill_error=$(PATH="$restart_bin:$PATH" \
   timeout 7 "$ROOT/bin/omarchy-restart-shell" 2>&1)
 kill_status=$?
 set -e
-(( kill_status == 1 )) || fail "a timed-out shell kill did not fail closed" "$kill_status"
-[[ $kill_error == "Could not stop the existing Omarchy shell; refusing to launch a replacement." ]] ||
-  fail "a timed-out shell kill lacks a fail-closed diagnostic" "$kill_error"
+(( kill_status == 124 )) || fail "a pre-delivery kill wedge was abandoned by the serialized recovery" "$kill_status $kill_error"
 kill -0 "$restart_pid_one" 2>/dev/null || fail "a timed-out kill test did not preserve its old shell"
 [[ ! -s $dispatch_log ]] || fail "a timed-out kill launched a replacement shell"
 kill "$restart_pid_one" 2>/dev/null || true
 wait "$restart_pid_one" 2>/dev/null || true
 restart_pid_one=""
-pass "restart fails closed when stopping the old shell times out"
+pass "restart retains ownership when stopping the old shell remains ambiguous"
+
+# Quickshell can deliver the quit request and then time out waiting for the
+# server to disconnect. Keep polling after that timeout; once the delayed
+# registry removal lands, exactly one replacement must be launched.
+sleep 30 &
+restart_pid_one=$!
+printf '%s\n' "$restart_pid_one" >"$restart_state"
+: >"$restart_log"
+: >"$dispatch_log"
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_QS_KILL_HANG_AFTER=1 \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_QS_ENV_LOG="$restart_env_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 8 "$ROOT/bin/omarchy-restart-shell" ||
+  fail "a kill-after-delivery timeout did not recover"
+wait "$restart_pid_one" 2>/dev/null || true
+restart_pid_one=""
+[[ $(<"$restart_state") == 303 ]] || fail "delayed kill recovery left no fresh shell"
+[[ $(grep -c '^-n -p ' "$restart_log") == 1 ]] ||
+  fail "delayed kill recovery launched duplicate shells" "$(<"$restart_log")"
+pass "restart survives a kill timeout after the old shell accepted shutdown"
 
 # IPC ping and registry discovery can wedge together. Their combined latency
 # is charged to one deadline rather than multiplying a nominal retry count.
