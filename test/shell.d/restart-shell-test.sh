@@ -91,6 +91,7 @@ printf '%s\n' "$*" >>"$OMARCHY_TEST_IPC_LOG"
 
 case "$*" in
   *'shell ping')
+    [[ ${OMARCHY_TEST_QS_HANG:-0} == 1 ]] && { sleep 5; exit 0; }
     [[ $* == *"-p $OMARCHY_TEST_SESSION_PATH/shell"* ]] &&
       grep -Fx '303' "$OMARCHY_TEST_QS_STATE" >/dev/null &&
       printf 'ok\n'
@@ -125,6 +126,17 @@ printf '%s\n' "$*" >>"$OMARCHY_TEST_QS_LOG"
 
 case " $* " in
   *' list --all -j '*)
+    if [[ -n ${OMARCHY_TEST_QS_LIST_COUNT:-} ]]; then
+      count=0
+      [[ ! -s $OMARCHY_TEST_QS_LIST_COUNT ]] || read -r count <"$OMARCHY_TEST_QS_LIST_COUNT"
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$OMARCHY_TEST_QS_LIST_COUNT"
+      if [[ -n ${OMARCHY_TEST_QS_LIST_HANG_AFTER:-} ]] &&
+        (( count > OMARCHY_TEST_QS_LIST_HANG_AFTER )); then
+        sleep 5
+        exit 0
+      fi
+    fi
     if [[ ${OMARCHY_TEST_QS_LIVE:-1} == 1 && -s $OMARCHY_TEST_QS_STATE ]]; then
       printf '[{"config_path":"%s/shell/shell.qml","pid":303}]\n' "$OMARCHY_TEST_SESSION_PATH"
     else
@@ -132,6 +144,7 @@ case " $* " in
     fi
     ;;
   *' kill -p '*)
+    [[ ${OMARCHY_TEST_QS_KILL_HANG:-0} == 1 ]] && { sleep 10; exit 0; }
     pid=$(head -n 1 "$OMARCHY_TEST_QS_STATE")
     [[ $pid =~ ^[0-9]+$ ]] || exit 1
     kill "$pid" 2>/dev/null
@@ -407,6 +420,67 @@ done
 [[ $(<"$test_tmp/dispatch-count") == 2 ]] ||
   fail "a no-launch timeout was not retried inside the serialized restart"
 pass "ambiguous and no-launch dispatch timeouts recover without duplicate shells"
+
+# A timed-out kill is ambiguous: the old process may still answer ping. It
+# must abort the restart instead of accepting that old answer as a replacement.
+sleep 30 &
+restart_pid_one=$!
+printf '%s\n' "$restart_pid_one" >"$restart_state"
+: >"$restart_log"
+: >"$dispatch_log"
+set +e
+kill_error=$(PATH="$restart_bin:$PATH" \
+  OMARCHY_PATH="$restart_root" \
+  XDG_RUNTIME_DIR="$runtime_dir" \
+  OMARCHY_TEST_QS_KILL_HANG=1 \
+  OMARCHY_TEST_QS_STATE="$restart_state" \
+  OMARCHY_TEST_QS_LOG="$restart_log" \
+  OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+  OMARCHY_TEST_IPC_LOG="$ipc_log" \
+  OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 7 "$ROOT/bin/omarchy-restart-shell" 2>&1)
+kill_status=$?
+set -e
+(( kill_status == 1 )) || fail "a timed-out shell kill did not fail closed" "$kill_status"
+[[ $kill_error == "Could not stop the existing Omarchy shell; refusing to launch a replacement." ]] ||
+  fail "a timed-out shell kill lacks a fail-closed diagnostic" "$kill_error"
+kill -0 "$restart_pid_one" 2>/dev/null || fail "a timed-out kill test did not preserve its old shell"
+[[ ! -s $dispatch_log ]] || fail "a timed-out kill launched a replacement shell"
+kill "$restart_pid_one" 2>/dev/null || true
+wait "$restart_pid_one" 2>/dev/null || true
+restart_pid_one=""
+pass "restart fails closed when stopping the old shell times out"
+
+# IPC ping and registry discovery can wedge together. Their combined latency
+# is charged to one deadline rather than multiplying a nominal retry count.
+: >"$restart_state"
+: >"$restart_log"
+: >"$dispatch_log"
+: >"$test_tmp/list-count"
+start_seconds=$SECONDS
+set +e
+deadline_error=$(PATH="$restart_bin:$PATH" \
+  OMARCHY_PATH="$restart_root" \
+  XDG_RUNTIME_DIR="$runtime_dir" \
+  OMARCHY_RESTART_READY_TIMEOUT_SECONDS=2 \
+  OMARCHY_TEST_QS_HANG=1 \
+  OMARCHY_TEST_QS_LIST_COUNT="$test_tmp/list-count" \
+  OMARCHY_TEST_QS_LIST_HANG_AFTER=1 \
+  OMARCHY_TEST_QS_STATE="$restart_state" \
+  OMARCHY_TEST_QS_LOG="$restart_log" \
+  OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+  OMARCHY_TEST_IPC_LOG="$ipc_log" \
+  OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 5 "$ROOT/bin/omarchy-restart-shell" 2>&1)
+deadline_status=$?
+set -e
+elapsed_seconds=$((SECONDS - start_seconds))
+(( deadline_status == 1 )) || fail "combined IPC/registry wedges escaped the readiness deadline" "$deadline_status"
+[[ $deadline_error == "Omarchy shell did not become ready after restart." ]] ||
+  fail "a readiness deadline failure lacks its diagnostic" "$deadline_error"
+(( elapsed_seconds < 5 )) || fail "combined IPC/registry wedges held the restart lock too long" "$elapsed_seconds"
+[[ ! -s $dispatch_log ]] || fail "an unknown registry state dispatched a replacement shell"
+pass "restart uses one absolute deadline across wedged readiness probes"
 
 # Poison recovery is detached and retries, so a wedged compositor probe must
 # remain bounded and later attempts must not form concurrent process trees.

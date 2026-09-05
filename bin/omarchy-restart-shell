@@ -32,12 +32,34 @@ CONFIG_DIR="$session_omarchy_path/shell"
 [[ -f $CONFIG_DIR/shell.qml ]] || { echo "Omarchy shell config not found: $CONFIG_DIR" >&2; exit 1; }
 CONFIG_FILE=$(readlink -e -- "$CONFIG_DIR/shell.qml") || exit 1
 
+# Return Linux's monotonic uptime in milliseconds without spawning a helper.
+# This lets readiness probes share one real deadline instead of multiplying a
+# retry count by several nested timeouts, and wall-clock changes cannot extend
+# the recovery window.
+clock_millis() {
+  local uptime seconds fraction
+  read -r uptime _ </proc/uptime || return 1
+  seconds=${uptime%%.*}
+  fraction=${uptime#*.}000
+  REPLY=$((seconds * 1000 + 10#${fraction:0:3}))
+}
+
+duration_from_millis() {
+  local millis=$1
+  printf -v REPLY '%d.%03ds' "$((millis / 1000))" "$((millis % 1000))"
+}
+
 # Exit 0 when this exact config has a live registry entry, 1 when it has none,
 # and 2 when the registry cannot safely answer. All callers preserve the
 # distinction so an ambiguous launch never creates a duplicate shell.
 shell_instance_state() {
-  local instance_list live_instance
-  if ! instance_list=$(/usr/bin/timeout --kill-after=0.1s 1s quickshell list --all -j 2>/dev/null) ||
+  local budget_millis=${1:-1000} instance_list live_instance timeout_duration
+  (( budget_millis > 1000 )) && budget_millis=1000
+  (( budget_millis > 0 )) || return 2
+  duration_from_millis "$budget_millis"
+  timeout_duration=$REPLY
+
+  if ! instance_list=$(/usr/bin/timeout --kill-after=0.1s "$timeout_duration" quickshell list --all -j 2>/dev/null) ||
     ! live_instance=$(jq -er --arg config "$CONFIG_FILE" '
       if type == "array" then any(.[]; .config_path == $config) | tostring
       else error("invalid instance list") end
@@ -141,20 +163,41 @@ relock_session() {
 }
 
 launch_replacement_shell() {
-  local attempt instance_state
+  local deadline deadline_seconds instance_state ipc_budget remaining timeout_duration
   local dispatch_attempts=0
   local dispatch_cooldown=0
+
+  deadline_seconds=${OMARCHY_RESTART_READY_TIMEOUT_SECONDS:-30}
+  if [[ ! $deadline_seconds =~ ^[1-9][0-9]*$ ]] || (( deadline_seconds > 30 )); then
+    deadline_seconds=30
+  fi
+  clock_millis
+  deadline=$((REPLY + deadline_seconds * 1000))
 
   # A timed-out dispatch is ambiguous: Hyprland may have launched the process
   # before its reply wedged. Gate every retry on both bounded IPC ping and the
   # exact-config registry, with a registration grace period after dispatch.
-  for (( attempt = 0; attempt < 300; attempt++ )); do
-    if OMARCHY_PATH="$session_omarchy_path" OMARCHY_SHELL_IPC_TIMEOUT=0.5s \
+  # Every blocking call consumes the same absolute budget, so simultaneous
+  # IPC and registry wedges still release the serialization lock promptly.
+  while :; do
+    clock_millis
+    remaining=$((deadline - REPLY))
+    (( remaining > 0 )) || return 1
+    ipc_budget=$remaining
+    (( ipc_budget > 500 )) && ipc_budget=500
+    duration_from_millis "$ipc_budget"
+    timeout_duration=$REPLY
+    if OMARCHY_PATH="$session_omarchy_path" \
+      OMARCHY_SHELL_IPC_TIMEOUT="$timeout_duration" \
+      OMARCHY_SHELL_IPC_KILL_AFTER=0.1s \
       omarchy-shell shell ping >/dev/null 2>&1; then
       return 0
     fi
 
-    shell_instance_state
+    clock_millis
+    remaining=$((deadline - REPLY))
+    (( remaining > 0 )) || return 1
+    shell_instance_state "$remaining"
     instance_state=$?
     case $instance_state in
       0)
@@ -173,15 +216,42 @@ launch_replacement_shell() {
     esac
 
     (( dispatch_cooldown == 0 )) || dispatch_cooldown=$((dispatch_cooldown - 1))
-    sleep 0.1
+    clock_millis
+    remaining=$((deadline - REPLY))
+    (( remaining > 0 )) || return 1
+    duration_from_millis "$((remaining < 100 ? remaining : 100))"
+    sleep "$REPLY"
   done
-
-  return 1
 }
 
-# Each kill stops the oldest matching instance and only returns once it has
-# fully exited, so the no-duplicate launch below can't race a dying shell.
-while timeout 5 quickshell kill -p "$CONFIG_DIR" --any-display >/dev/null 2>&1; do :; done
+# Each kill stops the oldest matching instance. A timeout or registry error is
+# not evidence that it stopped: fail closed until the exact config is confirmed
+# absent, so a still-pingable old shell can never masquerade as its replacement.
+stop_existing_shells() {
+  local instance_state kill_status
+
+  while :; do
+    shell_instance_state
+    instance_state=$?
+    case $instance_state in
+      1) return 0 ;;
+      2)
+        echo "Could not determine whether the existing Omarchy shell stopped; refusing to launch a replacement." >&2
+        return 1
+        ;;
+    esac
+
+    /usr/bin/timeout --kill-after=0.2s 5s \
+      quickshell kill -p "$CONFIG_DIR" --any-display >/dev/null 2>&1
+    kill_status=$?
+    if (( kill_status != 0 )); then
+      echo "Could not stop the existing Omarchy shell; refusing to launch a replacement." >&2
+      return 1
+    fi
+  done
+}
+
+stop_existing_shells || exit 1
 
 if launch_replacement_shell; then
   # The session stays compositor-locked after the old lock client died, so
