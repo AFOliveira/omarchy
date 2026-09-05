@@ -95,13 +95,38 @@ assert(
 )
 assert(
   /function finishUnlock\(\)[\s\S]*cleanUnlockInProgress = true[\s\S]*sessionLock\.locked = false/.test(serviceQml) &&
-    /onSecureStateChanged:[\s\S]*if \(!secure\) root\.cleanUnlockInProgress = false/.test(serviceQml),
+    /onSecureStateChanged:[\s\S]*if \(!secure\) \{[\s\S]*root\.cleanUnlockInProgress = false/.test(serviceQml),
   'the expected secure-to-unlocked transition cannot be mistaken for poison'
+)
+const begin = bodyOf(serviceQml, 'beginLock', 'lock request')
+assert(
+  !begin.includes('cleanUnlockInProgress = false'),
+  'an immediate relock keeps the clean-unlock suppressor until secure actually falls'
+)
+assert(
+  /if \(!secure\) \{[\s\S]*cleanUnlockInProgress = false[\s\S]*if \(root\.lockRequested\) root\.queueSessionLock\(\)/.test(serviceQml),
+  'the secure-false transition resumes an immediate relock without poison recovery'
 )
 assert(
   /function lock\(\): string \{[\s\S]*lockStatePoisoned[\s\S]*recoverPoisonedLockState\(\)[\s\S]*return "recovering"/.test(serviceQml),
   'manual lock cannot report success from a poisoned secure flag'
 )
+
+// Model the exact unlock -> immediate lock -> delayed secure=false ordering.
+// Clearing suppression in beginLock would synchronously increment restarts.
+const transition = { secure: true, sessionLocked: false, clean: true, requested: false, restarts: 0, queued: 0 }
+function observePoison() {
+  if (transition.secure && !transition.sessionLocked && !transition.clean) transition.restarts += 1
+}
+transition.requested = true
+observePoison()
+assertEqual(transition.restarts, 0, 'immediate relock does not dispatch poisoned-shell recovery')
+transition.secure = false
+transition.clean = false
+if (transition.requested) transition.queued += 1
+observePoison()
+assertEqual(transition.restarts, 0, 'secure falling cannot poison the latched relock')
+assertEqual(transition.queued, 1, 'secure falling resumes the latched relock')
 
 const mark = bodyOf(serviceQml, 'markSessionLockOwner', 'owner marker')
 assert(

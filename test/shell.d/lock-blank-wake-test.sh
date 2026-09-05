@@ -41,10 +41,47 @@ assert(
   'blank and wake are serialized with the latest wake taking priority'
 )
 assert(
-  /id: wakeProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: root\.drainDisplayRequest\(\)/.test(serviceQml) &&
+  /id: wakeProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: function\(exitCode\) \{ root\.handleWakeExit\(exitCode\) \}/.test(serviceQml) &&
     /id: blankProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: root\.drainDisplayRequest\(\)/.test(serviceQml),
   'both bounded child exits drain a request that arrived during a wedge'
 )
+
+const wakeExit = bodyOf(serviceQml, 'handleWakeExit', 'failed wake recovery')
+assert(
+  wakeExit.includes('!displayBlanked && wakeRetryAttempt < wakeRetryBudget') &&
+    wakeExit.includes('wakePending = true') &&
+    wakeExit.includes('wakeRetryTimer.restart()'),
+  'a failed latest wake is retained and retried after unlock'
+)
+assert(
+  /readonly property int wakeRetryBudget: 3/.test(serviceQml) &&
+    /wakeRetryTimer\.interval = 250 \* Math\.pow\(2, wakeRetryAttempt - 1\)/.test(serviceQml),
+  'wake recovery has a finite exponential-backoff budget'
+)
+assert(
+  /id: wakeRetryTimer[\s\S]*if \(!root\.displayBlanked && root\.wakePending\) root\.drainDisplayRequest\(\)/.test(serviceQml),
+  'wake retry remains active independently of the destroyed lock surface'
+)
+
+// A timed-out wake after finishUnlock has no lock surface or IdleMonitor to
+// generate another request. Model the exit/retry budget directly.
+let displayBlanked = false
+let wakePending = false
+let wakeAttempts = 0
+const wakeBudget = 3
+function failedWake() {
+  if (!displayBlanked && wakeAttempts < wakeBudget) {
+    wakeAttempts += 1
+    wakePending = true
+  }
+}
+failedWake()
+assert(wakePending && wakeAttempts === 1, 'the first timed-out unlock wake is retried')
+while (wakeAttempts < wakeBudget) {
+  wakePending = false
+  failedWake()
+}
+assertEqual(wakeAttempts, wakeBudget, 'wake retries stop at their fixed budget')
 
 assert(
   /IdleMonitor \{[\s\S]*enabled: root\.lockRequested[\s\S]*respectInhibitors: false/.test(serviceQml),

@@ -3,6 +3,26 @@
 # omarchy:summary=Restart the Omarchy shell
 # omarchy:examples=omarchy restart shell
 
+# A poisoned lock service retries from a detached process because the process
+# it replaces cannot remain its parent. Serialize those retries in the session
+# runtime directory so an IPC wedge can never accumulate restart trees.
+restart_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+if [[ ! -d $restart_runtime_dir || -L $restart_runtime_dir ]]; then
+  echo "Omarchy shell runtime directory is unavailable; refusing to restart." >&2
+  exit 1
+fi
+read -r restart_runtime_owner restart_runtime_mode \
+  < <(/usr/bin/stat -Lc '%u %a' -- "$restart_runtime_dir") || exit 1
+if [[ $restart_runtime_owner != "$UID" ]] || (( (8#$restart_runtime_mode & 0022) != 0 )); then
+  echo "Omarchy shell runtime directory is unsafe; refusing to restart." >&2
+  exit 1
+fi
+exec {restart_lock_fd}>>"$restart_runtime_dir/omarchy-restart-shell.lock"
+if ! /usr/bin/flock -n "$restart_lock_fd"; then
+  echo "Another Omarchy shell restart is already in progress." >&2
+  exit 75
+fi
+
 # A caller opened after dev link/unlink may disagree with the still-running
 # desktop. The user manager receives Hyprland's environment at session start.
 session_omarchy_path=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^OMARCHY_PATH=//p' | tail -n 1)

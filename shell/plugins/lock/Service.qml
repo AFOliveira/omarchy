@@ -42,6 +42,8 @@ Item {
   property bool wakePending: false
   property bool blankPending: false
   property bool cleanUnlockInProgress: false
+  property int wakeRetryAttempt: 0
+  readonly property int wakeRetryBudget: 3
 
   readonly property bool lockStatePoisoned: sessionLock.secure && !sessionLock.locked && !cleanUnlockInProgress
   readonly property bool locked: lockRequested || sessionLock.locked
@@ -189,7 +191,6 @@ Item {
     }
 
     resetAuthenticationState()
-    cleanUnlockInProgress = false
     lockRequested = true
     armBlankTimer()
     logEvent("lock-requested")
@@ -228,6 +229,8 @@ Item {
     displayBlanked = false
     focusRequestVersion += 1
     blankPending = false
+    wakeRetryTimer.stop()
+    wakeRetryAttempt = 0
     wakePending = true
     drainDisplayRequest()
     if (lockRequested) armBlankTimer()
@@ -236,6 +239,8 @@ Item {
   function runBlank() {
     displayBlanked = true
     wakePending = false
+    wakeRetryTimer.stop()
+    wakeRetryAttempt = 0
     if (!blankProcess.running) blankPending = true
     drainDisplayRequest()
   }
@@ -252,6 +257,28 @@ Item {
       blankPending = false
       blankProcess.running = true
     }
+  }
+
+  function handleWakeExit(exitCode) {
+    if (exitCode === 0) {
+      wakeRetryAttempt = 0
+      wakeRetryTimer.stop()
+      drainDisplayRequest()
+      return
+    }
+
+    // A later blank supersedes this wake. Otherwise retry the latest wake even
+    // after finishUnlock removed the lock surface and its input monitor.
+    if (!displayBlanked && wakeRetryAttempt < wakeRetryBudget) {
+      wakeRetryAttempt += 1
+      wakePending = true
+      wakeRetryTimer.interval = 250 * Math.pow(2, wakeRetryAttempt - 1)
+      wakeRetryTimer.restart()
+      return
+    }
+
+    wakePending = false
+    drainDisplayRequest()
   }
 
   function submitPassword(value) {
@@ -315,7 +342,10 @@ Item {
 
     onSecureStateChanged: {
       root.logEvent("secure=" + secure)
-      if (!secure) root.cleanUnlockInProgress = false
+      if (!secure) {
+        root.cleanUnlockInProgress = false
+        if (root.lockRequested) root.queueSessionLock()
+      }
       if (secure) {
         root.pendingSessionLock = false
         sessionLockStabilizeTimer.stop()
@@ -489,7 +519,7 @@ Item {
   Process {
     id: wakeProcess
     command: ["timeout", "--kill-after=0.2s", "2s", "bash", "-c", "omarchy-system-wake"]
-    onExited: root.drainDisplayRequest()
+    onExited: function(exitCode) { root.handleWakeExit(exitCode) }
   }
 
   Process {
@@ -520,6 +550,15 @@ Item {
       root.strandedRestartAttempted = false
       if (root.lockStatePoisoned || (root.strandedLock && root.lockOwnerInstance === String(Quickshell.instanceId)))
         root.restartForStrandedLock()
+    }
+  }
+
+  Timer {
+    id: wakeRetryTimer
+    interval: 250
+    repeat: false
+    onTriggered: {
+      if (!root.displayBlanked && root.wakePending) root.drainDisplayRequest()
     }
   }
 

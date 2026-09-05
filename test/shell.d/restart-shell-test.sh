@@ -7,10 +7,12 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 test_tmp=$(mktemp -d)
 restart_pid_one=""
 restart_pid_two=""
+restart_probe_pid=""
 
 cleanup() {
   [[ -n $restart_pid_one ]] && kill "$restart_pid_one" 2>/dev/null || true
   [[ -n $restart_pid_two ]] && kill "$restart_pid_two" 2>/dev/null || true
+  [[ -n $restart_probe_pid ]] && kill "$restart_probe_pid" 2>/dev/null || true
   rm -rf "$test_tmp"
 }
 trap cleanup EXIT
@@ -153,6 +155,7 @@ if [[ ${1:-} == "-j" && ${2:-} == "monitors" ]]; then
     malformed) printf 'not-json\n'; exit 0 ;;
     empty) printf '[]\n'; exit 0 ;;
     workspace-only) printf '[{"name":"eDP-1","solitaryBlockedBy":["WORKSPACE"]}]\n'; exit 0 ;;
+    hang) sleep 5; exit 0 ;;
   esac
   # Hyprland reports an active session lock as a reason the monitor cannot hand
   # a client the whole screen, not as a workspace.
@@ -354,3 +357,44 @@ OMARCHY_TEST_SESSION_PATH="$restart_root" \
 grep -F "list --all -j" "$restart_log" >/dev/null || fail "dead-lock recovery checks the live Quickshell registry"
 grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "dead-lock recovery re-acquires the session lock"
 pass "restart distinguishes a dead locker from a live but unreadable one"
+
+# Poison recovery is detached and retries, so a wedged compositor probe must
+# remain bounded and later attempts must not form concurrent process trees.
+: >"$restart_log"
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_HYPR_MODE=hang \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 3 "$ROOT/bin/omarchy-restart-shell" >"$test_tmp/hung.out" 2>"$test_tmp/hung.err" &
+restart_probe_pid=$!
+sleep 0.1
+
+set +e
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_HYPR_MODE=hang \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 1 "$ROOT/bin/omarchy-restart-shell" >"$test_tmp/concurrent.out" 2>"$test_tmp/concurrent.err"
+concurrent_status=$?
+wait "$restart_probe_pid"
+hung_status=$?
+set -e
+restart_probe_pid=""
+
+(( concurrent_status == 75 )) ||
+  fail "a concurrent poisoned-shell restart was not rejected immediately" "$concurrent_status"
+grep -Fxq 'Another Omarchy shell restart is already in progress.' "$test_tmp/concurrent.err" ||
+  fail "a serialized shell restart did not explain its refusal"
+(( hung_status == 1 )) ||
+  fail "a wedged compositor probe escaped its internal bound" "$hung_status"
+pass "poisoned-shell retries serialize around a bounded compositor probe"
