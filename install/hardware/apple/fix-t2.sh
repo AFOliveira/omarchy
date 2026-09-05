@@ -37,8 +37,19 @@ if lspci -nn | grep "106b:180[12]" >/dev/null; then
   # any installation starts; otherwise leave the machine unchanged and report
   # the packaging prerequisite explicitly.
   for package in "${t2_packages[@]}"; do
-    repository=$(LC_ALL=C /usr/bin/pacman -Si "$package" 2>/dev/null |
-      /usr/bin/awk -F: '/^Repository[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }')
+    if ! repository_metadata=$(LC_ALL=C /usr/bin/pacman -Si "$package" 2>/dev/null); then
+      repository=""
+    else
+      # Consume the complete producer output. Exiting awk after the first field
+      # turns a large successful pacman query into SIGPIPE under pipefail.
+      repository=$(/usr/bin/awk -F: '
+        !found && /^Repository[[:space:]]*:/ {
+          gsub(/[[:space:]]/, "", $2)
+          print $2
+          found = 1
+        }
+      ' <<<"$repository_metadata")
+    fi
     if [[ $repository != "omarchy" ]]; then
       echo "Authenticated T2 package '$package' is unavailable from the Omarchy repository." >&2
       echo "T2 setup cannot continue until all support packages are published there with Omarchy signatures." >&2

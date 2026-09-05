@@ -30,7 +30,8 @@ exec "$@"
 STUB
 cat >"$stub_bin/lspci" <<'STUB'
 #!/bin/bash
-exit 0
+(( ${TEST_T2_HARDWARE:-0} == 1 )) || exit 0
+printf '%s\n' '01:00.0 Bridge [0680]: Apple Inc. T2 Security Chip [106b:1801]'
 STUB
 cat >"$stub_bin/pacman-conf" <<'STUB'
 #!/bin/bash
@@ -48,6 +49,10 @@ case $1 in
     repository=${TEST_REPOSITORY:-omarchy}
     [[ ${TEST_MISSING_PACKAGE:-} != "$2" ]] || repository=core
     printf 'Repository      : %s\n' "$repository"
+    for ((line = 0; line < ${TEST_QUERY_PADDING_LINES:-0}; line++)); do
+      printf 'Description     : metadata padding %s\n' "$line"
+    done
+    [[ ${TEST_QUERY_FAIL_PACKAGE:-} != "$2" ]] || exit 44
     ;;
   -S)
     printf 'TRANSACTION %s\n' "$*" >>"${TEST_TRANSACTION_LOG:?}"
@@ -68,6 +73,7 @@ run_t2_scenario() {
   local repo_policy="${4-$policy}" global_policy="${5-$policy}"
   local missing_package="${6:-}" transaction_status="${7:-0}"
   local padding_lines="${8:-0}"
+  local query_fail_package="${9:-}" query_padding_lines="${10:-0}"
   local dir="$test_tmp/$name"
   mkdir "$dir"
   cat >"$dir/pacman.conf" <<'CONF'
@@ -99,7 +105,8 @@ CONF
   HOME="$dir" PATH="$stub_bin:$PATH" TEST_REPO_SIGLEVEL="$repo_policy" \
     TEST_GLOBAL_SIGLEVEL="$global_policy" TEST_REPOSITORY="$repository" \
     TEST_MISSING_PACKAGE="$missing_package" TEST_TRANSACTION_STATUS="$transaction_status" \
-    TEST_TRANSACTION_LOG="$dir/transactions" bash "$dir/t2-migration.sh" >"$dir/output" 2>&1
+    TEST_QUERY_FAIL_PACKAGE="$query_fail_package" TEST_QUERY_PADDING_LINES="$query_padding_lines" \
+    TEST_TRANSACTION_LOG="$dir/transactions" bash -euo pipefail "$dir/t2-migration.sh" >"$dir/output" 2>&1
 }
 
 if run_t2_scenario insecure 'PackageOptional PackageTrustAll' omarchy; then
@@ -121,6 +128,36 @@ if run_t2_scenario partial 'PackageRequired PackageTrustedOnly' omarchy \
   fail "T2 migration accepts a partial signed replacement set"
 fi
 ! grep -q '^TRANSACTION' "$test_tmp/partial/transactions" || fail "partial T2 artifacts reach pacman transaction"
+
+# A real unavailable package makes `pacman -Si` nonzero. Emit more than a pipe
+# buffer in a successful query too: the old early-exiting parser converted its
+# producer into status 141 under pipefail.
+run_t2_scenario large-query 'PackageRequired PackageTrustedOnly' omarchy \
+  'PackageRequired PackageTrustedOnly' 'PackageRequired PackageTrustedOnly' '' 0 0 '' 20000
+[[ -f $test_tmp/large-query/marker ]] || fail "large T2 repository metadata aborts a valid replacement"
+
+# On a nonzero query, production errexit used to skip the promised recovery
+# text. Combining both conditions proves failure is captured before parsing.
+if run_t2_scenario query-failure 'PackageRequired PackageTrustedOnly' omarchy \
+  'PackageRequired PackageTrustedOnly' 'PackageRequired PackageTrustedOnly' '' 0 0 linux-t2 20000; then
+  fail "T2 migration accepts a failed repository query"
+fi
+grep -q "Authenticated replacement 'linux-t2' is unavailable" "$test_tmp/query-failure/output" ||
+  fail "failed T2 repository query skips its recovery guidance"
+grep -q 'Publish all signed T2 artifacts, then retry this migration' "$test_tmp/query-failure/output" ||
+  fail "failed T2 repository query omits retry guidance"
+! grep -q '^TRANSACTION' "$test_tmp/query-failure/transactions" ||
+  fail "failed T2 repository query reaches a package transaction"
+! grep -q '^\[arch-mact2\]' "$test_tmp/query-failure/pacman.conf" ||
+  fail "failed T2 repository query leaves the unsafe repository enabled"
+[[ ! -e $test_tmp/query-failure/marker ]] || fail "failed T2 repository query publishes completion"
+HOME="$test_tmp/query-failure" PATH="$stub_bin:$PATH" \
+  TEST_REPO_SIGLEVEL='PackageRequired PackageTrustedOnly' \
+  TEST_GLOBAL_SIGLEVEL='PackageRequired PackageTrustedOnly' TEST_REPOSITORY=omarchy \
+  TEST_TRANSACTION_LOG="$test_tmp/query-failure/transactions" \
+  bash -euo pipefail "$test_tmp/query-failure/t2-migration.sh" >/dev/null
+[[ -f $test_tmp/query-failure/marker ]] || fail "T2 repository query failure is not retryable"
+pass "failed and large T2 repository queries fail with guidance and retry cleanly"
 
 if run_t2_scenario reinstall-failure 'PackageRequired PackageTrustedOnly' omarchy \
   'PackageRequired PackageTrustedOnly' 'PackageRequired PackageTrustedOnly' '' 33; then
@@ -155,7 +192,23 @@ pass "T2 migration disables unsafe policy first and fails closed until all signe
   "$ROOT/install/hardware/pacman.sh" "$ROOT/install/post-install/pacman.sh" >/dev/null ||
   fail "fresh installer retains unauthenticated T2 repository configuration"
 grep -F '/usr/bin/pacman-conf --repo omarchy SigLevel' "$ROOT/install/hardware/apple/fix-t2.sh" >/dev/null
-pass "fresh T2 setup independently requires Omarchy's trusted-only package policy"
+
+mapped_fresh_setup="$test_tmp/fix-t2.mapped.sh"
+sed -e "s#/usr/bin/pacman-conf#$stub_bin/pacman-conf#g" \
+  -e "s#/usr/bin/pacman#$stub_bin/pacman#g" \
+  "$ROOT/install/hardware/apple/fix-t2.sh" >"$mapped_fresh_setup"
+if TEST_T2_HARDWARE=1 TEST_REPO_SIGLEVEL='PackageRequired PackageTrustedOnly' \
+  TEST_GLOBAL_SIGLEVEL='PackageRequired PackageTrustedOnly' TEST_REPOSITORY=omarchy \
+  TEST_QUERY_FAIL_PACKAGE=linux-t2 TEST_QUERY_PADDING_LINES=20000 \
+  PATH="$stub_bin:$PATH" bash -euo pipefail -c 'source "$1"' bash "$mapped_fresh_setup" \
+  >"$test_tmp/fresh-query-failure.output" 2>&1; then
+  fail "fresh T2 setup accepts a failed repository query"
+fi
+grep -q "Authenticated T2 package 'linux-t2' is unavailable" "$test_tmp/fresh-query-failure.output" ||
+  fail "fresh T2 repository query skips its recovery guidance"
+grep -q 'cannot continue until all support packages are published' "$test_tmp/fresh-query-failure.output" ||
+  fail "fresh T2 repository query omits release guidance"
+pass "fresh T2 setup independently enforces policy and reports failed large queries"
 
 # A minimal unsigned local package under the final policy must be rejected by
 # real pacman. DatabaseOptional permits the unsigned database, never a package.

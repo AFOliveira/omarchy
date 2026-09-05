@@ -82,8 +82,19 @@ fi
 # pinned-key Omarchy repository by name. The repository itself inherits the
 # effective package-required/trusted-only policy verified above.
 for package in "${t2_packages[@]}"; do
-  repository=$(LC_ALL=C /usr/bin/pacman -Si "$package" 2>/dev/null |
-    /usr/bin/awk -F: '/^Repository[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }')
+  if ! repository_metadata=$(LC_ALL=C /usr/bin/pacman -Si "$package" 2>/dev/null); then
+    repository=""
+  else
+    # Consume the complete producer output. Exiting awk after the first field
+    # turns a large successful pacman query into SIGPIPE under pipefail.
+    repository=$(/usr/bin/awk -F: '
+      !found && /^Repository[[:space:]]*:/ {
+        gsub(/[[:space:]]/, "", $2)
+        print $2
+        found = 1
+      }
+    ' <<<"$repository_metadata")
+  fi
   if [[ $repository != "omarchy" ]]; then
     echo "Authenticated replacement '$package' is unavailable from the Omarchy repository." >&2
     echo "The unsafe repository is disabled. Publish all signed T2 artifacts, then retry this migration." >&2
