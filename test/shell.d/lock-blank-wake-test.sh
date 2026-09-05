@@ -42,7 +42,7 @@ assert(
 )
 assert(
   /id: wakeProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: function\(exitCode\) \{ root\.handleWakeExit\(exitCode\) \}/.test(serviceQml) &&
-    /id: blankProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: root\.drainDisplayRequest\(\)/.test(serviceQml),
+    /id: blankProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: function\(exitCode\) \{ root\.handleBlankExit\(exitCode\) \}/.test(serviceQml),
   'both bounded child exits drain a request that arrived during a wedge'
 )
 
@@ -82,6 +82,46 @@ while (wakeAttempts < wakeBudget) {
   failedWake()
 }
 assertEqual(wakeAttempts, wakeBudget, 'wake retries stop at their fixed budget')
+
+const blankExit = bodyOf(serviceQml, 'handleBlankExit', 'failed blank recovery')
+assert(
+  blankExit.includes('lockRequested && displayBlanked && blankRetryAttempt < blankRetryBudget') &&
+    blankExit.includes('blankPending = true') &&
+    blankExit.includes('blankRetryTimer.restart()'),
+  'a failed blank is retained and retried without later input'
+)
+assert(
+  /readonly property int blankRetryBudget: 3/.test(serviceQml) &&
+    /blankRetryTimer\.interval = 250 \* Math\.pow\(2, blankRetryAttempt - 1\)/.test(serviceQml),
+  'blank recovery has a finite exponential-backoff budget'
+)
+assert(
+  /function runWake\(\)[\s\S]*blankRetryTimer\.stop\(\)[\s\S]*blankRetryAttempt = 0/.test(serviceQml),
+  'a later wake cancels pending blank retries'
+)
+
+let lockRequested = true
+displayBlanked = true
+let blankPending = false
+let blankAttempts = 0
+const blankBudget = 3
+function failedBlank() {
+  if (lockRequested && displayBlanked && blankAttempts < blankBudget) {
+    blankAttempts += 1
+    blankPending = true
+  }
+}
+failedBlank()
+assert(blankPending && blankAttempts === 1, 'the first timed-out blank retries without input')
+while (blankAttempts < blankBudget) {
+  blankPending = false
+  failedBlank()
+}
+assertEqual(blankAttempts, blankBudget, 'blank retries stop at their fixed budget')
+displayBlanked = false
+blankPending = false
+failedBlank()
+assert(!blankPending, 'a later wake supersedes failed blank recovery')
 
 assert(
   /IdleMonitor \{[\s\S]*enabled: root\.lockRequested[\s\S]*respectInhibitors: false/.test(serviceQml),

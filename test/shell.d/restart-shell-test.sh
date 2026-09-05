@@ -166,8 +166,21 @@ if [[ ${1:-} == "-j" && ${2:-} == "monitors" ]]; then
   fi
 elif [[ ${1:-} == "dispatch" && ${2:-} == hl.dsp.exec_cmd* ]]; then
   printf '%s\n' "${2:-}" >>"$OMARCHY_TEST_DISPATCH_LOG"
+  if [[ -n ${OMARCHY_TEST_DISPATCH_COUNT:-} ]]; then
+    count=0
+    [[ ! -s $OMARCHY_TEST_DISPATCH_COUNT ]] || read -r count <"$OMARCHY_TEST_DISPATCH_COUNT"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$OMARCHY_TEST_DISPATCH_COUNT"
+  fi
+  if [[ ${OMARCHY_TEST_DISPATCH_MODE:-ok} == hang-before-once && ${count:-0} == 1 ]]; then
+    sleep 5
+    exit 0
+  fi
   OMARCHY_PATH="$OMARCHY_TEST_SESSION_PATH" \
     env -u OMARCHY_TEST_TRANSIENT_ENV omarchy-launch-shell
+  if [[ ${OMARCHY_TEST_DISPATCH_MODE:-ok} == hang-after-launch ]]; then
+    sleep 5
+  fi
   printf 'ok\n'
 elif [[ ${1:-} == "dispatch" ]]; then
   exit 1
@@ -357,6 +370,43 @@ OMARCHY_TEST_SESSION_PATH="$restart_root" \
 grep -F "list --all -j" "$restart_log" >/dev/null || fail "dead-lock recovery checks the live Quickshell registry"
 grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "dead-lock recovery re-acquires the session lock"
 pass "restart distinguishes a dead locker from a live but unreadable one"
+
+for dispatch_mode in hang-after-launch hang-before-once; do
+  sleep 30 &
+  restart_pid_one=$!
+  printf '%s\n' "$restart_pid_one" >"$restart_state"
+  rm -f "$restart_state.locked" "$restart_state.stranded"
+  : >"$restart_log"
+  : >"$ipc_log"
+  : >"$test_tmp/dispatch-count"
+
+  PATH="$restart_bin:$PATH" \
+  OMARCHY_PATH="$restart_root" \
+  XDG_RUNTIME_DIR="$runtime_dir" \
+  OMARCHY_TEST_DISPATCH_MODE="$dispatch_mode" \
+  OMARCHY_TEST_DISPATCH_COUNT="$test_tmp/dispatch-count" \
+  OMARCHY_TEST_QS_STATE="$restart_state" \
+  OMARCHY_TEST_QS_LOG="$restart_log" \
+  OMARCHY_TEST_QS_ENV_LOG="$restart_env_log" \
+  OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+  OMARCHY_TEST_IPC_LOG="$ipc_log" \
+  OMARCHY_TEST_SESSION_PATH="$restart_root" \
+    timeout 8 "$ROOT/bin/omarchy-restart-shell" ||
+    fail "$dispatch_mode did not recover a replacement shell"
+
+  if kill -0 "$restart_pid_one" 2>/dev/null; then
+    fail "$dispatch_mode left the stale shell running"
+  fi
+  wait "$restart_pid_one" 2>/dev/null || true
+  restart_pid_one=""
+  [[ $(<"$restart_state") == 303 ]] ||
+    fail "$dispatch_mode did not leave exactly one registered shell"
+  [[ $(grep -c '^-n -p ' "$restart_log") == 1 ]] ||
+    fail "$dispatch_mode launched duplicate replacement shells" "$(cat "$restart_log")"
+done
+[[ $(<"$test_tmp/dispatch-count") == 2 ]] ||
+  fail "a no-launch timeout was not retried inside the serialized restart"
+pass "ambiguous and no-launch dispatch timeouts recover without duplicate shells"
 
 # Poison recovery is detached and retries, so a wedged compositor probe must
 # remain bounded and later attempts must not form concurrent process trees.

@@ -44,6 +44,8 @@ Item {
   property bool cleanUnlockInProgress: false
   property int wakeRetryAttempt: 0
   readonly property int wakeRetryBudget: 3
+  property int blankRetryAttempt: 0
+  readonly property int blankRetryBudget: 3
 
   readonly property bool lockStatePoisoned: sessionLock.secure && !sessionLock.locked && !cleanUnlockInProgress
   readonly property bool locked: lockRequested || sessionLock.locked
@@ -229,6 +231,8 @@ Item {
     displayBlanked = false
     focusRequestVersion += 1
     blankPending = false
+    blankRetryTimer.stop()
+    blankRetryAttempt = 0
     wakeRetryTimer.stop()
     wakeRetryAttempt = 0
     wakePending = true
@@ -241,6 +245,8 @@ Item {
     wakePending = false
     wakeRetryTimer.stop()
     wakeRetryAttempt = 0
+    blankRetryTimer.stop()
+    blankRetryAttempt = 0
     if (!blankProcess.running) blankPending = true
     drainDisplayRequest()
   }
@@ -278,6 +284,28 @@ Item {
     }
 
     wakePending = false
+    drainDisplayRequest()
+  }
+
+  function handleBlankExit(exitCode) {
+    if (exitCode === 0) {
+      blankRetryAttempt = 0
+      blankRetryTimer.stop()
+      drainDisplayRequest()
+      return
+    }
+
+    // Input or unlock may have requested a newer wake while blanking. Retry
+    // only while this same lock still wants a blank display.
+    if (lockRequested && displayBlanked && blankRetryAttempt < blankRetryBudget) {
+      blankRetryAttempt += 1
+      blankPending = true
+      blankRetryTimer.interval = 250 * Math.pow(2, blankRetryAttempt - 1)
+      blankRetryTimer.restart()
+      return
+    }
+
+    blankPending = false
     drainDisplayRequest()
   }
 
@@ -525,7 +553,7 @@ Item {
   Process {
     id: blankProcess
     command: ["timeout", "--kill-after=0.2s", "2s", "bash", "-c", "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
-    onExited: root.drainDisplayRequest()
+    onExited: function(exitCode) { root.handleBlankExit(exitCode) }
   }
 
   // Keyboard activity still reaches the compositor when no lock surface has
@@ -559,6 +587,16 @@ Item {
     repeat: false
     onTriggered: {
       if (!root.displayBlanked && root.wakePending) root.drainDisplayRequest()
+    }
+  }
+
+  Timer {
+    id: blankRetryTimer
+    interval: 250
+    repeat: false
+    onTriggered: {
+      if (root.lockRequested && root.displayBlanked && root.blankPending)
+        root.drainDisplayRequest()
     }
   }
 
