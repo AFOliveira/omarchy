@@ -1,0 +1,3 @@
+[submodule "k3-packages"]
+  path = ports/k3/packages
+  url = https://github.com/AFOliveira/omarchy-pkgs.git

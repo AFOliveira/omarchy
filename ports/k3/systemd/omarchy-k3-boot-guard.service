@@ -1,0 +1,15 @@
+[Unit]
+Description=Temporary recovery timer for the Omarchy host boot trial
+DefaultDependencies=no
+SurviveFinalKillSignal=yes
+IgnoreOnIsolate=yes
+After=basic.target
+Conflicts=reboot.target kexec.target poweroff.target halt.target
+Before=shutdown.target
+ConditionPathExists=/usr/local/lib/omarchy-k3/boot-guard
+
+[Service]
+Type=exec
+ExecStart=/usr/local/lib/omarchy-k3/boot-guard 180 reboot
+WorkingDirectory=/run
+Restart=no

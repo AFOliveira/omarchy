@@ -1,0 +1,2 @@
+# Unified diffs preserve upstream whitespace and blank context-line markers.
+ports/k3/pkgbuilds/**/*.patch -whitespace

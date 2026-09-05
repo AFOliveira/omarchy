@@ -1,0 +1,24 @@
+#!/bin/bash
+# Start Hyprland directly on the K3 display device under Arch's logind seat.
+set -e
+source "$HOME/.config/uwsm/env"
+source /opt/spacemit/env
+unset WAYLAND_DISPLAY DISPLAY
+export LIBSEAT_BACKEND=logind
+export AQ_DRM_DEVICES=/dev/dri/card1
+
+(
+  for (( attempt = 0; attempt < 60; attempt++ )); do
+    if signature=$(hyprctl instances -j 2>/dev/null | jq -r --argjson pid "$$" '.[] | select(.pid == $pid) | .instance' 2>/dev/null) && [[ -n $signature ]]; then
+      export HYPRLAND_INSTANCE_SIGNATURE="$signature"
+      if hyprctl monitors all -j >/dev/null 2>&1; then
+        /usr/local/bin/omarchy-k3-output
+        exit
+      fi
+    fi
+    sleep 1
+  done
+  echo "Timed out creating the K3 cloud output." >&2
+  exit 1
+) &
+exec /usr/bin/Hyprland --config "$HOME/.config/hypr/k3.conf"

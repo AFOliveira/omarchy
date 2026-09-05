@@ -1,0 +1,31 @@
+[Unit]
+Description=Omarchy K3 desktop on the physical Arch host
+After=systemd-user-sessions.service user@1000.service
+Wants=user@1000.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=exec
+User=afonso
+PAMName=login
+Environment=XDG_SEAT=seat0
+Environment=XDG_VTNR=1
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XDG_SESSION_DESKTOP=Hyprland
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+WorkingDirectory=/home/afonso
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+ExecStart=/usr/bin/uwsm start -e -D Hyprland -g -1 /usr/local/bin/omarchy-k3-host-session
+ExecStop=/usr/bin/uwsm stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Confirm a healthy physical Omarchy K3 boot
+ConditionKernelCommandLine=omarchy.host_trial=1
+After=omarchy-k3-host-desktop.service systemd-networkd.service sshd.service
+Wants=omarchy-k3-host-desktop.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-k3/confirm-host-boot.sh
+TimeoutStartSec=300
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

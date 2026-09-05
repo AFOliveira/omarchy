@@ -16,7 +16,15 @@ for candidate in amdgpu_bl* intel_backlight acpi_video*; do
 done
 
 if [[ $step == "off" ]]; then
-  hyprctl dispatch dpms off >/dev/null 2>&1
+  if [[ -f /etc/omarchy-k3 ]]; then
+    # K3-CLOUD is virtual, with no panel to power down. Keep its capture stream
+    # active while the remote desktop is locked.
+    while IFS= read -r monitor; do
+      hyprctl dispatch dpms "off $monitor" >/dev/null 2>&1
+    done < <(hyprctl monitors -j | jq -r '.[] | select(.name != "K3-CLOUD") | .name')
+  else
+    hyprctl dispatch dpms off >/dev/null 2>&1
+  fi
   exit 0
 elif [[ $step == "on" ]]; then
   hyprctl dispatch dpms on >/dev/null 2>&1

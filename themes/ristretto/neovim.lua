@@ -1,6 +1,7 @@
 return {
   {
-    "gthelding/monokai-pro.nvim",
+    "loctvl842/monokai-pro.nvim",
+    commit = "a68e38b8e55d69a215d0f02598900a79c356da9d",
     config = function()
       require("monokai-pro").setup({
         filter = "ristretto",
