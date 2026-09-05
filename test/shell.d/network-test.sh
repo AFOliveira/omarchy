@@ -36,6 +36,9 @@ assert(/passwordVisible = false/.test(cancelPasswordPrompt[0]), 'network masks t
 const openPasswordPrompt = panelSource.match(/function openPasswordPrompt\(ssid\) \{[\s\S]*?\n {2}\}/)
 assert(openPasswordPrompt, 'network has a passphrase prompt opener')
 assert(/if \(passwordSsid !== ssid\)[\s\S]*passwordVisible = false/.test(openPasswordPrompt[0]), 'network starts each network passphrase prompt masked')
+const passwordSsidChanged = panelSource.match(/onPasswordSsidChanged: \{[\s\S]*?\n  \}/)
+assert(passwordSsidChanged, 'network handles prompted SSID changes')
+assert(/credentialAbsenceTimer\.stop\(\)/.test(passwordSsidChanged[0]), 'switching from absent SSID A to SSID B cancels A expiry so B gets its own full grace')
 
 const clearNetworkAction = panelSource.match(/function clearNetworkAction\(\) \{[\s\S]*?\n {2}\}/)
 assert(clearNetworkAction, 'network has an action-success cleanup helper')

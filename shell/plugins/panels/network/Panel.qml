@@ -354,7 +354,9 @@ Panel {
   // The KeyboardPanel's focusTarget covers initial popup-open; this handles
   // the inline-editor case where focus was handed off to a child.
   onPasswordSsidChanged: {
-    if (passwordSsid === "") credentialAbsenceTimer.stop()
+    // Expiry belongs to the exact prompted SSID. Switching from an absent
+    // network to another prompt must give the new secret its own full grace.
+    credentialAbsenceTimer.stop()
     if (passwordSsid === "" && opened) {
       passwordText = ""
       Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
