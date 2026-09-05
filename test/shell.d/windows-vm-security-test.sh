@@ -59,6 +59,21 @@ valid_password "$PASSWORD" || fail "blank password input produces a valid genera
 generated_from_prompt=$PASSWORD
 pass "blank password input generates a fresh private credential"
 
+password_generation_marker="$test_dir/password-generation-after-cancel"
+gum() { return 1; }
+generate_password() {
+  : >"$password_generation_marker"
+  printf 'generated-after-cancel\n'
+}
+set +e
+prompt_windows_password >"$test_dir/cancel.output" 2>&1
+prompt_status=$?
+set -e
+(( prompt_status != 0 )) || fail "cancelled Windows password prompt succeeds"
+[[ ! -e $password_generation_marker ]] ||
+  fail "cancelled Windows password prompt silently generates a credential"
+pass "cancelled Windows password prompt aborts without generating a credential"
+
 CREDENTIALS_FILE="$HOME/.config/windows/credentials"
 write_credentials generated-user "$generated_from_prompt"
 [[ $(stat -c '%a' "${CREDENTIALS_FILE%/*}") == 700 ]] || fail "credential directory is private"
@@ -71,7 +86,13 @@ stub_bin="$test_dir/bin"
 mkdir -p "$stub_bin"
 cat >"$stub_bin/xfreerdp3" <<'STUB'
 #!/bin/bash
-printf '%s\0' "$@" >"$FREERDP_ARGV_FILE"
+if [[ $# == 1 && $1 == /args-from:stdin ]]; then
+  while IFS= read -r argument; do
+    printf '%s\0' "$argument"
+  done >"$FREERDP_ARGV_FILE"
+else
+  printf '%s\0' "$@" >"$FREERDP_ARGV_FILE"
+fi
 STUB
 cat >"$stub_bin/hyprctl" <<'STUB'
 #!/bin/bash

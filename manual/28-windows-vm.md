@@ -6,6 +6,8 @@ Your machine needs KVM virtualization for this, which most do — but it's somet
 
 The installer asks how much RAM, how many CPU cores, and how much disk to hand over (64GB or more is the sensible floor), then for a Windows username and password. Leaving the username blank uses `docker`; leaving the password blank generates a fresh high-entropy password instead of a shared default. Omarchy stores it in the private mode-0600 file `~/.config/windows/credentials`, which you can consult when the browser asks for the same credentials. Invalid explicit passwords are rejected and prompted again. The download takes a while — 10-15 minutes is normal — and you can follow the progress in the browser at `http://127.0.0.1:8006`.
 
+Existing guests are not rotated automatically. If an older VM still uses the public `docker` / `admin` credentials, another local account can use them against its localhost-only RDP or web-console ports until you replace the password. Inside Windows, press `Ctrl + Alt + End`, choose **Change a password**, and set a new 1-64 character printable password. Shut the VM down, rerun `omarchy windows vm install`, enter the existing resource settings and username, and supply that same new password. This preserves the existing virtual disk while synchronizing the root-owned compose configuration and `~/.config/windows/credentials`. Do not update only the host credential file: the Windows account, RDP client, and protected web console must agree.
+
  ![windows-vm](images/windows-vm.webp)
 
 ## Using it

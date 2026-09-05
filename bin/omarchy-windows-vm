@@ -153,7 +153,9 @@ generate_password() {
 
 prompt_windows_password() {
   while :; do
-    PASSWORD=$(gum input --placeholder="Password (leave blank to generate a secure password)" --password --header="Enter Windows password:")
+    if ! PASSWORD=$(gum input --placeholder="Password (leave blank to generate a secure password)" --password --header="Enter Windows password:"); then
+      return 1
+    fi
     if [[ -z $PASSWORD ]]; then
       PASSWORD=$(generate_password) || {
         echo "Could not generate a secure Windows password." >&2
