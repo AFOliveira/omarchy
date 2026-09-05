@@ -101,6 +101,8 @@ case "$*" in
   *'lock status')
     if [[ ${OMARCHY_TEST_LOCK_STATUS:-} == "failed" ]]; then
       exit 1
+    elif [[ ${OMARCHY_TEST_LOCK_STATUS:-} == "failed-until-lock" && ! -f $OMARCHY_TEST_QS_STATE.locked ]]; then
+      exit 1
     elif [[ ${OMARCHY_TEST_LOCK_STATUS:-} == "malformed" ]]; then
       printf '{"sessionLocked":"unknown"}\n'
     elif [[ -f $OMARCHY_TEST_QS_STATE.locked ]]; then
@@ -120,6 +122,13 @@ cat >"$restart_bin/quickshell" <<'SH'
 printf '%s\n' "$*" >>"$OMARCHY_TEST_QS_LOG"
 
 case " $* " in
+  *' list --all -j '*)
+    if [[ ${OMARCHY_TEST_QS_LIVE:-1} == 1 && -s $OMARCHY_TEST_QS_STATE ]]; then
+      printf '[{"config_path":"%s/shell/shell.qml","pid":303}]\n' "$OMARCHY_TEST_SESSION_PATH"
+    else
+      printf '[]\n'
+    fi
+    ;;
   *' kill -p '*)
     pid=$(head -n 1 "$OMARCHY_TEST_QS_STATE")
     [[ $pid =~ ^[0-9]+$ ]] || exit 1
@@ -139,6 +148,12 @@ cat >"$restart_bin/hyprctl" <<'SH'
 #!/bin/bash
 
 if [[ ${1:-} == "-j" && ${2:-} == "monitors" ]]; then
+  case ${OMARCHY_TEST_HYPR_MODE:-ok} in
+    unreachable) exit 1 ;;
+    malformed) printf 'not-json\n'; exit 0 ;;
+    empty) printf '[]\n'; exit 0 ;;
+    workspace-only) printf '[{"name":"eDP-1","solitaryBlockedBy":["WORKSPACE"]}]\n'; exit 0 ;;
+  esac
   # Hyprland reports an active session lock as a reason the monitor cannot hand
   # a client the whole screen, not as a workspace.
   if [[ ${OMARCHY_TEST_SESSION_LOCKED:-0} == 1 ]]; then
@@ -258,9 +273,29 @@ for status_mode in failed malformed; do
   [[ $unknown_error == "Could not determine whether the running shell owns the session lock; refusing to restart." ]] ||
     fail "indeterminate lock status lacks a fail-closed diagnostic" "$unknown_error"
   [[ $(<"$restart_state") == 303 ]] || fail "indeterminate lock status kills the running shell"
-  [[ ! -s $restart_log ]] || fail "indeterminate lock status starts a shell restart"
+  ! grep -Eq '(^| )kill -p |(^| )-n -p ' "$restart_log" || fail "indeterminate lock status starts a shell restart"
 done
 pass "restart fails closed when lock ownership status is unavailable or malformed"
+
+for hypr_mode in unreachable malformed empty workspace-only; do
+  : >"$restart_log"
+  unknown_error=$(PATH="$restart_bin:$PATH" \
+    OMARCHY_PATH="$restart_root" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    OMARCHY_TEST_HYPR_MODE="$hypr_mode" \
+    OMARCHY_TEST_QS_STATE="$restart_state" \
+    OMARCHY_TEST_QS_LOG="$restart_log" \
+    OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+    OMARCHY_TEST_IPC_LOG="$ipc_log" \
+    OMARCHY_TEST_SESSION_PATH="$restart_root" \
+    "$ROOT/bin/omarchy-restart-shell" 2>&1) &&
+    fail "restart accepts an undetermined compositor state ($hypr_mode)"
+  [[ $unknown_error == "Could not determine the compositor session-lock state; refusing to restart." ]] ||
+    fail "undetermined compositor state lacks a fail-closed diagnostic" "$unknown_error"
+  [[ $(<"$restart_state") == 303 ]] || fail "undetermined compositor state kills the running shell"
+  [[ ! -s $restart_log ]] || fail "undetermined compositor state launches a shell"
+done
+pass "restart distinguishes unlocked from every undetermined compositor answer"
 
 # A LOCK session without an active locker — dead shell or a crash-handler
 # relaunch holding no lock — is the failsafe: restart must proceed,
@@ -294,3 +329,28 @@ restart_pid_one=""
 grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "dead-lock recovery re-acquires the session lock"
 grep -F "ipc -n -p $restart_root/shell call -- lock status" "$ipc_log" >/dev/null || fail "dead-lock recovery waits for the lock to become secure"
 pass "restart recovers a locked session whose stale service no longer owns a lock surface"
+
+# A truly dead locker has neither IPC nor a live Quickshell registry entry.
+# That is distinct from the failed-IPC live process above and must remain
+# recoverable from Hyprland's stranded LOCK failsafe.
+: >"$restart_state"
+: >"$restart_log"
+: >"$ipc_log"
+rm -f "$restart_state.locked" "$restart_state.stranded"
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_SESSION_LOCKED=1 \
+OMARCHY_TEST_LOCK_STATUS=failed-until-lock \
+OMARCHY_TEST_QS_LIVE=0 \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_QS_ENV_LOG="$restart_env_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 5 "$ROOT/bin/omarchy-restart-shell" || fail "locked restart recovers a truly dead lock client"
+[[ $(<"$restart_state") == 303 ]] || fail "dead-lock recovery launches exactly one fresh shell"
+grep -F "list --all -j" "$restart_log" >/dev/null || fail "dead-lock recovery checks the live Quickshell registry"
+grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "dead-lock recovery re-acquires the session lock"
+pass "restart distinguishes a dead locker from a live but unreadable one"

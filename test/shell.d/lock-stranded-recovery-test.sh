@@ -82,7 +82,25 @@ assert(
 )
 assert(
   restart.includes('strandedRestartAttempted = true'),
-  'a poisoned service dispatches at most one restart'
+  'a poisoned service serializes each restart attempt'
+)
+assert(
+  /id: strandedRestartRetryTimer[\s\S]*strandedRestartAttempted = false[\s\S]*restartForStrandedLock\(\)/.test(serviceQml),
+  'a transiently refused detached restart is retried while poison remains'
+)
+assert(
+  /readonly property bool lockStatePoisoned: sessionLock\.secure && !sessionLock\.locked && !cleanUnlockInProgress/.test(serviceQml) &&
+    /onLockStatePoisonedChanged: if \(lockStatePoisoned\) recoverPoisonedLockState\(\)/.test(serviceQml),
+  'the real stale-secure tuple triggers recovery without trusting the wider locked state'
+)
+assert(
+  /function finishUnlock\(\)[\s\S]*cleanUnlockInProgress = true[\s\S]*sessionLock\.locked = false/.test(serviceQml) &&
+    /onSecureStateChanged:[\s\S]*if \(!secure\) root\.cleanUnlockInProgress = false/.test(serviceQml),
+  'the expected secure-to-unlocked transition cannot be mistaken for poison'
+)
+assert(
+  /function lock\(\): string \{[\s\S]*lockStatePoisoned[\s\S]*recoverPoisonedLockState\(\)[\s\S]*return "recovering"/.test(serviceQml),
+  'manual lock cannot report success from a poisoned secure flag'
 )
 
 const mark = bodyOf(serviceQml, 'markSessionLockOwner', 'owner marker')

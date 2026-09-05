@@ -28,15 +28,22 @@ const wake = bodyOf(serviceQml, 'runWake', 'display wake')
 assert(wake.includes('displayBlanked = false'), 'a wake clears the blanked state')
 assert(wake.includes('focusRequestVersion += 1'), 'a wake re-arms password focus')
 assert(
-  wake.includes('if (!blankProcess.running && !wakeProcess.running)'),
-  'a wake waits for an in-flight blank instead of racing its DPMS off'
+  wake.includes('wakePending = true') && wake.includes('drainDisplayRequest()'),
+  'a wake is latched behind any in-flight display operation'
 )
 
 const blank = bodyOf(serviceQml, 'runBlank', 'display blank')
-assert(blank.indexOf('displayBlanked = true') < blank.indexOf('blankProcess.running = true'), 'blanked state is published before DPMS off starts')
+assert(blank.includes('displayBlanked = true') && blank.includes('blankPending = true'), 'blanked state and its pending operation are published together')
+const drain = bodyOf(serviceQml, 'drainDisplayRequest', 'display request drain')
 assert(
-  /id: blankProcess[\s\S]*onExited: if \(!root\.displayBlanked && !wakeProcess\.running\) wakeProcess\.running = true/.test(serviceQml),
-  'a wake held behind DPMS off is dispatched when the blank finishes'
+  drain.includes('if (blankProcess.running || wakeProcess.running) return') &&
+    drain.includes('if (wakePending)') && drain.includes('else if (blankPending)'),
+  'blank and wake are serialized with the latest wake taking priority'
+)
+assert(
+  /id: wakeProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: root\.drainDisplayRequest\(\)/.test(serviceQml) &&
+    /id: blankProcess[\s\S]*command: \["timeout", "--kill-after=0\.2s", "2s"[\s\S]*onExited: root\.drainDisplayRequest\(\)/.test(serviceQml),
+  'both bounded child exits drain a request that arrived during a wedge'
 )
 
 assert(

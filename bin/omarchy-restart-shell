@@ -10,6 +10,7 @@ session_omarchy_path=$(systemctl --user show-environment 2>/dev/null | sed -n 's
 
 CONFIG_DIR="$session_omarchy_path/shell"
 [[ -f $CONFIG_DIR/shell.qml ]] || { echo "Omarchy shell config not found: $CONFIG_DIR" >&2; exit 1; }
+CONFIG_FILE=$(readlink -e -- "$CONFIG_DIR/shell.qml") || exit 1
 
 # Allow running from outside the session (e.g. over ssh) by deriving the
 # Hyprland instance signature from the newest instance runtime dir.
@@ -27,35 +28,61 @@ fi
 # that owns a session-lock surface and reports it secure or in progress is
 # worth preserving. `secure` alone can come from a destroyed lock object.
 relock=0
-if omarchy-hyprland-session-locked; then
+omarchy-hyprland-session-locked
+compositor_lock_state=$?
+case $compositor_lock_state in
+0)
   if ! lock_status=$(OMARCHY_PATH="$session_omarchy_path" OMARCHY_SHELL_IPC_TIMEOUT=0.5s omarchy-shell lock status 2>/dev/null); then
-    echo "Could not determine whether the running shell owns the session lock; refusing to restart." >&2
-    exit 1
-  fi
-  if ! locking=$(jq -er '
-    if (.sessionLocked | type) == "boolean" and (.secure | type) == "boolean" and (.requested | type) == "boolean" then
-      ((.sessionLocked == true) and (.secure == true or .requested == true)) | tostring
-    else
-      error("invalid lock status")
-    end
-  ' <<<"$lock_status" 2>/dev/null); then
-    echo "Could not determine whether the running shell owns the session lock; refusing to restart." >&2
-    exit 1
-  fi
-  case "$locking" in
-    true)
-      echo "Refusing to restart Omarchy shell while the session is locked." >&2
-      exit 1
-      ;;
-    false)
-      relock=1
-      ;;
-    *)
+    # A dead locker has no IPC by definition. Distinguish it from a live but
+    # unreadable shell using Quickshell's process registry, bounded so a stale
+    # registry service cannot hold this decision open.
+    if ! instance_list=$(timeout --kill-after=0.1s 1s quickshell list --all -j 2>/dev/null) ||
+      ! live_instance=$(jq -er --arg config "$CONFIG_FILE" '
+        if type == "array" then any(.[]; .config_path == $config) | tostring
+        else error("invalid instance list") end
+      ' <<<"$instance_list" 2>/dev/null); then
       echo "Could not determine whether the running shell owns the session lock; refusing to restart." >&2
       exit 1
-      ;;
-  esac
-fi
+    fi
+    if [[ $live_instance == true ]]; then
+      echo "Could not determine whether the running shell owns the session lock; refusing to restart." >&2
+      exit 1
+    fi
+    relock=1
+  else
+    if ! locking=$(jq -er '
+      if (.sessionLocked | type) == "boolean" and (.secure | type) == "boolean" and (.requested | type) == "boolean" then
+        if .secure and (.sessionLocked | not) then "poisoned"
+        elif .sessionLocked or .requested then "owned"
+        else "idle" end
+      else
+        error("invalid lock status")
+      end
+    ' <<<"$lock_status" 2>/dev/null); then
+      echo "Could not determine whether the running shell owns the session lock; refusing to restart." >&2
+      exit 1
+    fi
+    case "$locking" in
+      owned)
+        echo "Refusing to restart Omarchy shell while the session is locked." >&2
+        exit 1
+        ;;
+      poisoned|idle)
+        relock=1
+        ;;
+      *)
+        echo "Could not determine whether the running shell owns the session lock; refusing to restart." >&2
+        exit 1
+        ;;
+    esac
+  fi
+  ;;
+1) ;;
+*)
+  echo "Could not determine the compositor session-lock state; refusing to restart." >&2
+  exit 1
+  ;;
+esac
 
 # The lock plugin loads asynchronously, so a fresh shell answers ping before
 # it can lock, and may even refuse early lock requests while its plugins or

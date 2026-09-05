@@ -39,8 +39,12 @@ Item {
   property bool lockOwnerReady: false
   property string lockOwnerInstance: ""
   property bool strandedRestartAttempted: false
+  property bool wakePending: false
+  property bool blankPending: false
+  property bool cleanUnlockInProgress: false
 
-  readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
+  readonly property bool lockStatePoisoned: sessionLock.secure && !sessionLock.locked && !cleanUnlockInProgress
+  readonly property bool locked: lockRequested || sessionLock.locked
   // This is the deterministic ownership signal used by the shell reload guard.
   // `secure` is deliberately excluded: after an in-process lock teardown it
   // reads through Quickshell's stale process-global session-lock pointer.
@@ -71,6 +75,10 @@ Item {
   }
 
   function requestSessionLock() {
+    if (lockStatePoisoned) {
+      recoverPoisonedLockState()
+      return
+    }
     if (!lockRequested || sessionLock.locked || sessionLock.secure) return
     if (sessionLockStabilizeTimer.running) return
 
@@ -121,14 +129,21 @@ Item {
   }
 
   function restartForStrandedLock() {
-    if (strandedRestartAttempted || sessionLockOwned) return
+    if (strandedRestartAttempted || sessionLock.locked) return
 
     strandedRestartAttempted = true
-    strandedLock = false
     sessionLockStabilizeTimer.stop()
     pendingSessionLockTimer.stop()
     logEvent("lock-stranded: restarting-poisoned-shell")
     Quickshell.execDetached(["omarchy-restart-shell"])
+    strandedRestartRetryTimer.restart()
+  }
+
+  function recoverPoisonedLockState() {
+    if (!lockStatePoisoned) return
+    strandedLock = true
+    strandedLockResolved = true
+    restartForStrandedLock()
   }
 
   function markSessionLockOwner() {
@@ -174,6 +189,7 @@ Item {
     }
 
     resetAuthenticationState()
+    cleanUnlockInProgress = false
     lockRequested = true
     armBlankTimer()
     logEvent("lock-requested")
@@ -196,6 +212,7 @@ Item {
     pendingSessionLockTimer.stop()
     resetAuthenticationState()
     idleBlankTimer.stop()
+    cleanUnlockInProgress = true
     sessionLock.locked = false
     clearSessionLockOwner()
     logEvent("unlocked")
@@ -210,16 +227,31 @@ Item {
   function runWake() {
     displayBlanked = false
     focusRequestVersion += 1
-    // A wake dispatched while the blank is still running can observe a lit
-    // display, no-op, and then lose the race to the pending DPMS off. Let the
-    // blank land first and dispatch the wake from its completion handler.
-    if (!blankProcess.running && !wakeProcess.running) wakeProcess.running = true
+    blankPending = false
+    wakePending = true
+    drainDisplayRequest()
     if (lockRequested) armBlankTimer()
   }
 
   function runBlank() {
     displayBlanked = true
-    if (!blankProcess.running) blankProcess.running = true
+    wakePending = false
+    if (!blankProcess.running) blankPending = true
+    drainDisplayRequest()
+  }
+
+  // Blank and wake are one ordered state machine. Each child is bounded, and
+  // both exits drain the latest request, so a wedged process cannot suppress
+  // display control forever or let a late DPMS-off win after a wake.
+  function drainDisplayRequest() {
+    if (blankProcess.running || wakeProcess.running) return
+    if (wakePending) {
+      wakePending = false
+      wakeProcess.running = true
+    } else if (blankPending) {
+      blankPending = false
+      blankProcess.running = true
+    }
   }
 
   function submitPassword(value) {
@@ -283,6 +315,7 @@ Item {
 
     onSecureStateChanged: {
       root.logEvent("secure=" + secure)
+      if (!secure) root.cleanUnlockInProgress = false
       if (secure) {
         root.pendingSessionLock = false
         sessionLockStabilizeTimer.stop()
@@ -455,13 +488,14 @@ Item {
 
   Process {
     id: wakeProcess
-    command: ["bash", "-c", "omarchy-system-wake"]
+    command: ["timeout", "--kill-after=0.2s", "2s", "bash", "-c", "omarchy-system-wake"]
+    onExited: root.drainDisplayRequest()
   }
 
   Process {
     id: blankProcess
-    command: ["bash", "-c", "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
-    onExited: if (!root.displayBlanked && !wakeProcess.running) wakeProcess.running = true
+    command: ["timeout", "--kill-after=0.2s", "2s", "bash", "-c", "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
+    onExited: root.drainDisplayRequest()
   }
 
   // Keyboard activity still reaches the compositor when no lock surface has
@@ -475,6 +509,17 @@ Item {
       if (isIdle) return
       root.focusRequestVersion += 1
       if (root.displayBlanked) root.runWake()
+    }
+  }
+
+  Timer {
+    id: strandedRestartRetryTimer
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      root.strandedRestartAttempted = false
+      if (root.lockStatePoisoned || (root.strandedLock && root.lockOwnerInstance === String(Quickshell.instanceId)))
+        root.restartForStrandedLock()
     }
   }
 
@@ -587,10 +632,13 @@ Item {
     checkStrandedLock()
   }
 
+  onLockStatePoisonedChanged: if (lockStatePoisoned) recoverPoisonedLockState()
+
   Component.onCompleted: {
     refreshBackground()
     refreshFingerprintStatus()
     checkStrandedLock()
+    recoverPoisonedLockState()
   }
 
   IpcHandler {
@@ -598,6 +646,10 @@ Item {
 
     function lock(): string {
       if (!root.passwordPamConfigured) return "missing-pam"
+      if (root.lockStatePoisoned) {
+        root.recoverPoisonedLockState()
+        return "recovering"
+      }
       if (!root.locked && !root.beginLock()) return "failed"
       return "ok"
     }
