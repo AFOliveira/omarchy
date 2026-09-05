@@ -354,6 +354,7 @@ Panel {
   // The KeyboardPanel's focusTarget covers initial popup-open; this handles
   // the inline-editor case where focus was handed off to a child.
   onPasswordSsidChanged: {
+    if (passwordSsid === "") credentialAbsenceTimer.stop()
     if (passwordSsid === "" && opened) {
       passwordText = ""
       Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
@@ -371,8 +372,15 @@ Panel {
     } else if (passwordSsid !== "") {
       var passwordIndex = wifiIndexForSsid(passwordSsid)
       if (passwordIndex >= 0) {
+        credentialAbsenceTimer.stop()
         selectedIndex = passwordIndex
         focusSection = "wifi"
+      } else {
+        // A scan can transiently remove a row. Never leave its secret
+        // revealed while the editor is unmounted, and expire the retained
+        // correction text if the network does not return promptly.
+        passwordVisible = false
+        credentialAbsenceTimer.restart()
       }
     } else if (selectedIndex >= wifiNetworks.length) {
       selectedIndex = wifiNetworks.length - 1
@@ -956,6 +964,16 @@ Panel {
       root.actionSsid = ""
       root.actionKind = ""
       root.refresh()
+    }
+  }
+
+  Timer {
+    id: credentialAbsenceTimer
+    interval: 5000
+    repeat: false
+    onTriggered: {
+      if (root.passwordSsid !== "" && root.wifiIndexForSsid(root.passwordSsid) < 0)
+        root.cancelPasswordPrompt()
     }
   }
 
@@ -1625,6 +1643,10 @@ Panel {
 
     function submitCredentials() {
       if (!net || root.busy || root.passwordText.length === 0) return
+      // Submission may hide this editor for the whole connection attempt.
+      // Re-mask immediately so failure, timeout, or row remount cannot reveal
+      // a value the user had chosen to show before pressing Connect.
+      root.passwordVisible = false
       if (!isEnterprise) return root.connectWithPassphrase(net.ssid, root.passwordText)
       if (root.identityText.length > 0) root.connectEnterprise(net.ssid, root.identityText, root.passwordText)
     }
@@ -1895,6 +1917,10 @@ Panel {
           anchors.verticalCenter: parent.verticalCenter
           iconText: root.passwordVisible ? "\uf070" : "\uf06e"
           tooltipText: root.passwordVisible ? "Hide password" : "Show password"
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: tooltipText
+          Accessible.description: root.passwordVisible ? "Password is visible" : "Password is hidden"
           foreground: root.bar.foreground
           fontFamily: root.bar.fontFamily
           onClicked: {
