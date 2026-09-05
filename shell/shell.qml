@@ -329,14 +329,23 @@ ShellRoot {
       if (!Array.isArray(m.kinds) || m.kinds.indexOf("service") === -1) continue
       if (!m.entryPoints || !m.entryPoints.service) continue
       if (!pluginRegistry.isEnabled(id)) continue
-      if (_services[id]) continue
+      if (_services[id]) {
+        // A kept instance outlives the rescan; hand it the fresh manifest.
+        var kept = _services[id]
+        if (kept && "manifest" in kept) kept.manifest = m
+        continue
+      }
       ensureService(id)
     }
-    // Drop services for plugins that have been disabled or removed.
+    // Drop services for plugins that have been disabled or removed, or that
+    // no longer declare a service entry point.
     for (var existingId in _services) {
       var stillThere = plugins[existingId]
+      var stillService = stillThere && Array.isArray(stillThere.kinds)
+        && stillThere.kinds.indexOf("service") !== -1
+        && stillThere.entryPoints && stillThere.entryPoints.service
       var stillEnabled = stillThere && pluginRegistry.isEnabled(existingId)
-      if (stillThere && stillEnabled) continue
+      if (stillService && stillEnabled) continue
       var inst = _services[existingId]
       // Never destroy a service that owns ext-session-lock. Its Wayland lock
       // outlives the QML object and strands the session without an auth UI.
@@ -353,9 +362,22 @@ ShellRoot {
     }
   }
 
+  function serviceKeepLoaded(pluginId) {
+    var plugins = pluginRegistry && pluginRegistry.installedPlugins
+    var manifest = plugins ? plugins[pluginId] : null
+    return !!(manifest && manifest.keepLoaded === true)
+  }
+
+  // keepLoaded services (lock, idle, polkit) must survive plugin hot-reload.
+  // Destroying omarchy.lock drops the ext-session-lock client while Hyprland
+  // still holds the lock, which surfaces the crashed-lockscreen fallback.
   function unloadPluginServices() {
     var next = ({})
     for (var existingId in _services) {
+      if (serviceKeepLoaded(existingId)) {
+        next[existingId] = _services[existingId]
+        continue
+      }
       var inst = _services[existingId]
       if (inst && inst.sessionLockOwned === true) {
         next[existingId] = inst
