@@ -365,22 +365,25 @@ Panel {
   // If the list empties (station gone, e.g. wifi off), bounce the cursor
   // back to the DNS row so the panel doesn't end up with no cursor at all.
   onWifiNetworksChanged: {
+    var passwordIndex = passwordSsid !== "" ? wifiIndexForSsid(passwordSsid) : -1
+    if (passwordSsid !== "" && passwordIndex < 0) {
+      // An empty result and repeated refreshes are both ordinary during a
+      // scan. Mask on the first disappearance and start one fixed expiry;
+      // later updates must not extend how long the secret remains resident.
+      passwordVisible = false
+      if (!credentialAbsenceTimer.running) credentialAbsenceTimer.start()
+    } else if (passwordIndex >= 0) {
+      credentialAbsenceTimer.stop()
+    }
+
     if (wifiNetworks.length === 0) {
       selectedIndex = -1
       wifiActionFocused = false
       if (focusSection === "wifi") focusSection = "dns"
     } else if (passwordSsid !== "") {
-      var passwordIndex = wifiIndexForSsid(passwordSsid)
       if (passwordIndex >= 0) {
-        credentialAbsenceTimer.stop()
         selectedIndex = passwordIndex
         focusSection = "wifi"
-      } else {
-        // A scan can transiently remove a row. Never leave its secret
-        // revealed while the editor is unmounted, and expire the retained
-        // correction text if the network does not return promptly.
-        passwordVisible = false
-        credentialAbsenceTimer.restart()
       }
     } else if (selectedIndex >= wifiNetworks.length) {
       selectedIndex = wifiNetworks.length - 1
@@ -1921,6 +1924,7 @@ Panel {
           Accessible.role: Accessible.Button
           Accessible.name: tooltipText
           Accessible.description: root.passwordVisible ? "Password is visible" : "Password is hidden"
+          Accessible.onPressAction: passwordVisibilityBtn.clicked()
           foreground: root.bar.foreground
           fontFamily: root.bar.fontFamily
           onClicked: {
