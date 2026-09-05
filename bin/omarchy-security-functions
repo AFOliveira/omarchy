@@ -12,7 +12,7 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
 fi
 
 omarchy_security_require_privileged_bash_startup() {
-  local pid=${1:-$$}
+  local expected_script=${1:-} pid=${2:-$$}
 
   [[ $- == *p* && $pid =~ ^[1-9][0-9]*$ ]] || return 1
   /usr/bin/env -i /usr/bin/bash -p -c '
@@ -21,7 +21,12 @@ omarchy_security_require_privileged_bash_startup() {
     [[ $executable == /usr/bin/bash ]]
     [[ ${argv[0]:-} == /bin/bash || ${argv[0]:-} == /usr/bin/bash ]]
     [[ ${argv[1]:-} == -p ]]
-  ' omarchy-bash-startup "$pid"
+    if [[ -n $2 ]]; then
+      script=$(/usr/bin/readlink -e -- "${argv[2]:-}") || exit 1
+      expected=$(/usr/bin/readlink -e -- "$2") || exit 1
+      [[ $script == "$expected" ]]
+    fi
+  ' omarchy-bash-startup "$pid" "$expected_script"
 }
 
 omarchy_security_sudo_supports_no_update() {
@@ -37,7 +42,8 @@ omarchy_security_exit_with_revoked_sudo() {
   local status=$1
   local message=${2:-Could not invalidate cached sudo authorization.}
 
-  trap - EXIT HUP INT TERM
+  trap - EXIT
+  trap '' HUP INT TERM
   if ! omarchy_security_revoke_sudo_timestamp; then
     echo "$message" >&2
     (( status != 0 )) || status=1

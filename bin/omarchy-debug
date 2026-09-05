@@ -5,13 +5,29 @@
 # omarchy:examples=omarchy debug --print --no-sudo
 # omarchy:requires-sudo=true
 
-source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+# The privileged shebang prevents Bash startup hooks from running before this
+# boundary. Run this as its own script (a clean `bash -p script` is equivalent),
+# never by sourcing it into -c, stdin, an interactive shell, or another script.
+# An ordinary interpreter launch can turn privileged mode on from BASH_ENV or
+# exported SHELLOPTS, so inspect those immutable initial-environment traces
+# with shell syntax alone, before trusting a function or command. Bash strips
+# NUL separators in command substitution; an unusual unrelated name or value
+# containing `BASH_ENV=` therefore fails closed, while common `VIRTUAL_ENV`
+# state does not collide.
+if [[ $- == *p* && $- != *[cis]* && ${BASH_SOURCE[0]} == "$0" && -r /proc/$$/environ ]] &&
+  (( ${#BASH_SOURCE[@]} == 1 )) && {
+    case $(</proc/$$/environ) in
+      *BASH_ENV=* | *BASH_FUNC_*%%=* | *SHELLOPTS=*privileged*) [[ 1 == 0 ]] ;;
+      *) [[ 1 == 1 ]] ;;
+    esac
+  } 2>/dev/null; then
+  source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
 
-omarchy_security_require_privileged_bash_startup || {
-  echo "Refusing an unsafe Bash startup for debug collection." >&2
-  exit 126
-}
-unset BASH_ENV ENV
+  omarchy_security_require_privileged_bash_startup "${BASH_SOURCE[0]}" || {
+    echo "Refusing an unsafe Bash startup for debug collection." >&2
+    exit 126
+  }
+unset BASH_ENV ENV PS4 CDPATH GLOBIGNORE
 
 set -uo pipefail
 
@@ -36,20 +52,12 @@ while (( $# > 0 )); do
   esac
 done
 
-# OM-SEC-06 owns this private staging change in #8370. Keep the same shape so
-# this stacked branch can focus on the later sudo-credential boundary.
-log_dir="${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy}"
-LOG_FILE="$log_dir/omarchy-debug.log"
-if ! mkdir -p "$log_dir" || ! install -m 600 /dev/null "$LOG_FILE"; then
-  echo "Error: Failed to create $LOG_FILE" >&2
-  exit 1
-fi
-
 SUDO_BOUNDARY_ACTIVE=false
 cleanup_debug_authorization() {
   local status=$?
 
-  trap - EXIT HUP INT TERM
+  trap - EXIT
+  trap '' HUP INT TERM
   if [[ $SUDO_BOUNDARY_ACTIVE == true ]]; then
     omarchy_security_exit_with_revoked_sudo "$status"
   fi
@@ -57,6 +65,15 @@ cleanup_debug_authorization() {
 }
 trap cleanup_debug_authorization EXIT
 omarchy_security_install_signal_exit_traps
+SUDO_BOUNDARY_ACTIVE=true
+
+# Invalidate before any caller-selected path is consumed or any PATH-resolved
+# collector runs. Cleanup owns another invalidation from this point onward,
+# including if this first attempt is interrupted.
+omarchy_security_revoke_sudo_timestamp || {
+  echo "Could not invalidate cached sudo authorization." >&2
+  exit 1
+}
 
 if [[ $NO_SUDO == true ]]; then
   DMESG_OUTPUT="(skipped - --no-sudo flag used)"
@@ -65,11 +82,6 @@ else
     echo "This sudo does not support --no-update; refusing privileged debug collection." >&2
     exit 1
   }
-  omarchy_security_revoke_sudo_timestamp || {
-    echo "Could not invalidate cached sudo authorization." >&2
-    exit 1
-  }
-  SUDO_BOUNDARY_ACTIVE=true
   if ! DMESG_OUTPUT=$(/usr/bin/sudo -N -- /usr/bin/dmesg); then
     echo "Could not collect the kernel log through command-scoped sudo." >&2
     exit 1
@@ -78,6 +90,15 @@ else
     echo "Could not invalidate cached sudo authorization." >&2
     exit 1
   }
+fi
+
+# OM-SEC-06 owns this private staging change in #8370. Keep its -T guard so a
+# directory at the fixed log name is rejected rather than accepted by install.
+log_dir="${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy}"
+LOG_FILE="$log_dir/omarchy-debug.log"
+if ! /usr/bin/mkdir -p "$log_dir" || ! /usr/bin/install -T -m 600 /dev/null "$LOG_FILE"; then
+  echo "Error: Failed to create $LOG_FILE" >&2
+  exit 1
 fi
 
 cat >"$LOG_FILE" <<EOF
@@ -139,3 +160,9 @@ case "$ACTION" in
     echo "✓ Log saved to $(pwd)/omarchy-debug.log"
     ;;
 esac
+else
+  # In a noninteractive script this expansion terminates Bash. In a sourced
+  # interactive shell it only reports the failure, but the workflow is wholly
+  # contained in the safe branch above and cannot continue afterward.
+  ${BASH_VERSINFO[999999]:?Refusing an unsafe Bash startup for debug collection.}
+fi
