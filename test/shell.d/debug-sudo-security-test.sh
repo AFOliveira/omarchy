@@ -8,6 +8,7 @@ require_command unshare
 require_command setpriv
 require_command cc
 require_command readelf
+require_command script
 
 if [[ ${OMARCHY_DEBUG_SUDO_SECURITY_NS:-0} != 1 ]]; then
   outer_uid=$(id -u)
@@ -79,6 +80,7 @@ static void event(const char *message) {
 
 int main(int argc, char **argv) {
   const char *token = need("TEST_SUDO_TOKEN");
+  const char *prompt_marker;
   int index = 1, no_update = 0, noninteractive = 0, fd;
 
   if (argc == 2 && !strcmp(argv[1], "-h")) {
@@ -113,6 +115,21 @@ int main(int argc, char **argv) {
     if (fd < 0) return 123;
     close(fd);
     usleep(200000);
+  }
+  prompt_marker = getenv("TEST_PROMPT_MARKER");
+  if (prompt_marker && *prompt_marker) {
+    char response[64];
+    int tty;
+
+    fd = open(prompt_marker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || dprintf(fd, "%ld %ld\n", (long)getppid(), (long)getpid()) < 0) return 118;
+    close(fd);
+    tty = open("/dev/tty", O_RDWR);
+    if (tty < 0 || dprintf(tty, "Password: ") < 0 || read(tty, response, sizeof(response)) <= 0) {
+      return 117;
+    }
+    close(tty);
+    event("prompt-complete");
   }
   if (index >= argc || setgid(0) || setuid(0)) return 124;
   if (!strcmp(argv[index], "/usr/bin/dmesg")) {
@@ -251,6 +268,63 @@ run_debug() {
       TEST_REAL_SUDO="$stub_bin/sudo" TEST_PAYLOAD="$test_home/payload" TEST_VICTIM="$victim" \
       "$@" "$command" --print >/dev/null
 }
+
+pty_debug_command() {
+  local prompt_marker=$1
+  local -a command=(
+    setpriv --reuid=1000 --regid=1000 --clear-groups
+    env -i HOME="$test_home" XDG_RUNTIME_DIR="$test_home/runtime"
+    PATH="$stub_bin:/usr/bin:/bin" VIRTUAL_ENV="$test_home/venv"
+    TEST_SUDO_TOKEN="$token" TEST_EVENT_LOG="$event_log" TEST_WAITER_ARMED="$armed"
+    TEST_PROMPT_MARKER="$prompt_marker" TEST_COLLECTOR_RAN="$test_home/collector"
+    TEST_STAGING_MARKER="$staging_marker" TEST_REAL_SUDO="$stub_bin/sudo"
+    TEST_PAYLOAD="$test_home/payload" TEST_VICTIM="$victim" "$launcher" --print
+  )
+
+  printf '%q ' "${command[@]}"
+}
+
+prompt_marker="$test_home/prompt-ready"
+: >"$event_log"
+rm -f "$armed" "$prompt_marker" "$test_home/collector" "$token"
+prompt_command=$(pty_debug_command "$prompt_marker")
+if ! printf 'test password\n' | /usr/bin/timeout 5 /usr/bin/script -qefc "$prompt_command" /dev/null \
+  >/dev/null; then
+  fail "cold sudo authentication could not complete through the foreground PTY"
+fi
+[[ -e $prompt_marker && -e $test_home/collector && ! -e $token ]] ||
+  fail "PTY authentication did not reach collection or retained authorization"
+grep -qxF prompt-complete "$event_log" || fail "PTY authentication did not read its password"
+pass "cold sudo authentication reads and completes in the foreground PTY"
+
+: >"$event_log"
+rm -f "$armed" "$prompt_marker" "$test_home/collector" "$token"
+prompt_command=$(pty_debug_command "$prompt_marker")
+pty_input="$test_home/prompt-input"
+mkfifo "$pty_input"
+exec 9<>"$pty_input"
+/usr/bin/timeout 5 /usr/bin/script -qefc "$prompt_command" /dev/null \
+  <"$pty_input" >/dev/null &
+pty_supervisor=$!
+for attempt in {1..200}; do
+  [[ ! -s $prompt_marker ]] || break
+  sleep 0.005
+done
+[[ -s $prompt_marker ]] || fail "sudo did not begin its foreground PTY prompt"
+read -r prompt_launcher_pid prompt_worker_pid <"$prompt_marker"
+kill -TERM "$prompt_launcher_pid"
+kill -TERM "$prompt_launcher_pid"
+set +e
+wait "$pty_supervisor"
+prompt_status=$?
+set -e
+exec 9>&-
+[[ $prompt_status == 143 && ! -e $test_home/collector && $(tail -n 1 "$event_log") == invalidate ]] ||
+  fail "termination during the password prompt did not reap and revoke" "status=$prompt_status"
+if kill -0 "$prompt_worker_pid" 2>/dev/null; then
+  fail "password-prompting sudo worker survived launcher termination"
+fi
+pass "termination during a foreground sudo prompt reaps and revokes"
 
 : >"$event_log"
 : >"$token"

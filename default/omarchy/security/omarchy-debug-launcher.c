@@ -55,7 +55,7 @@ static void handle_signal(int signo) {
   pid_t child = active_child;
 
   if (!caught_signal) caught_signal = signo;
-  if (child_phase == CHILD_WORKER && child > 0) kill(-child, signo);
+  if (child_phase == CHILD_WORKER && child > 0) kill(child, signo);
 }
 
 static int install_signal_handlers(void) {
@@ -71,15 +71,17 @@ static int install_signal_handlers(void) {
   return 0;
 }
 
-static void restore_signal_defaults(void) {
+static int restore_signal_defaults(void) {
   struct sigaction action = {
     .sa_handler = SIG_DFL,
   };
 
   sigemptyset(&action.sa_mask);
-  sigaction(SIGHUP, &action, NULL);
-  sigaction(SIGINT, &action, NULL);
-  sigaction(SIGTERM, &action, NULL);
+  if (sigaction(SIGHUP, &action, NULL) || sigaction(SIGINT, &action, NULL) ||
+      sigaction(SIGTERM, &action, NULL)) {
+    return -1;
+  }
+  return 0;
 }
 
 static int prepare_exec_signals(void) {
@@ -95,7 +97,10 @@ static int prepare_exec_signals(void) {
     sigprocmask(SIG_SETMASK, &previous, NULL);
     return -1;
   }
-  restore_signal_defaults();
+  if (restore_signal_defaults()) {
+    sigprocmask(SIG_SETMASK, &previous, NULL);
+    return -1;
+  }
   return sigprocmask(SIG_SETMASK, &previous, NULL);
 }
 
@@ -155,7 +160,7 @@ static char **sudo_environment(void) {
   static const char *const test_names[] = {
     "TEST_DELAY_INVALIDATE_MARKER", "TEST_DMESG_BYTES", "TEST_DMESG_DELAY_MARKER",
     "TEST_DMESG_STATUS", "TEST_EVENT_LOG", "TEST_SUDO_NO_N", "TEST_SUDO_TOKEN",
-    "TEST_WAITER_ARMED",
+    "TEST_PROMPT_MARKER", "TEST_WAITER_ARMED",
   };
   static char *clean[sizeof(test_names) / sizeof(test_names[0]) + 3];
   size_t kept = 0;
@@ -216,10 +221,10 @@ static pid_t spawn_command(char *const argv[], int stdout_fd, bool merge_stderr,
     return -1;
   }
   if (!child) {
-    if (setpgid(0, 0)) _exit(127);
     if (phase == CHILD_WORKER) {
       if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() == 1) _exit(127);
     }
+    if (restore_signal_defaults()) _exit(127);
     if (sigprocmask(SIG_SETMASK, &previous, NULL)) _exit(127);
     if (stdout_fd >= 0 && dup2(stdout_fd, STDOUT_FILENO) < 0) _exit(127);
     if (merge_stderr && dup2(STDOUT_FILENO, STDERR_FILENO) < 0) _exit(127);
@@ -227,7 +232,6 @@ static pid_t spawn_command(char *const argv[], int stdout_fd, bool merge_stderr,
     _exit(127);
   }
 
-  setpgid(child, child);
 #ifdef OMARCHY_DEBUG_TESTING
   {
     const char *marker = getenv("TEST_POST_FORK_DELAY_MARKER");
@@ -240,7 +244,7 @@ static pid_t spawn_command(char *const argv[], int stdout_fd, bool merge_stderr,
 #endif
   active_child = child;
   child_phase = phase;
-  if (caught_signal && phase == CHILD_WORKER) kill(-child, caught_signal);
+  if (caught_signal && phase == CHILD_WORKER) kill(child, caught_signal);
   sigprocmask(SIG_SETMASK, &previous, NULL);
   return child;
 }
@@ -288,17 +292,17 @@ static int capture_command(char *const argv[], int output_fd, size_t limit,
     ssize_t received = read(pipefd[0], buffer, sizeof(buffer));
     if (received < 0 && errno == EINTR) continue;
     if (received < 0) {
-      kill(-child, SIGKILL);
+      kill(child, SIGKILL);
       break;
     }
     if (!received) break;
     if (total > limit || (size_t)received > limit - total) {
       *overflowed = true;
-      kill(-child, SIGKILL);
+      kill(child, SIGKILL);
       break;
     }
     if (write_all(output_fd, buffer, (size_t)received)) {
-      kill(-child, SIGKILL);
+      kill(child, SIGKILL);
       break;
     }
     total += (size_t)received;
