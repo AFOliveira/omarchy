@@ -136,14 +136,10 @@ kill -0 "$inhibitor_pid" 2>/dev/null &&
 pass "omarchy-update waits for its sleep inhibitor to stop"
 
 if (( EUID != 0 )); then
-  sudo_log="$test_tmp/sudo.log"
+  sudo_log="$SUDO_TEST_LOG"
+  : >"$sudo_log"
   pkexec_marker="$test_tmp/pkexec-used"
   terminal_inhibit_pid_file="$test_tmp/terminal-inhibit-pid"
-  write_stub sudo '
-printf "%s\n" "$*" >>"$SUDO_LOG"
-[[ $1 == "-N" && $2 == "-b" && $3 == "--" ]] || exit 90
-shift 3
-"$@" &'
   write_stub pkexec '[[ -z ${PKEXEC_MARKER:-} ]] || touch "$PKEXEC_MARKER"; exec "$@"'
 
   # start leaves the inhibitor running on purpose, but script tears the pty down
@@ -154,7 +150,7 @@ shift 3
 #!/bin/bash
 omarchy-update-stay-awake start
 for _ in {1..200}; do
-  grep -q -- '^-N -b -- ' "$SUDO_LOG" && break
+  grep -q -- '^sudo -N -b -- ' "$SUDO_LOG" && break
   sleep 0.05
 done
 SH
@@ -163,8 +159,7 @@ SH
   SUDO_LOG="$sudo_log" PKEXEC_MARKER="$pkexec_marker" INHIBIT_PID_FILE="$terminal_inhibit_pid_file" \
     run_with_lock_env script -qefc "$terminal_driver" /dev/null >/dev/null
 
-  grep -q -- '^-N -b -- ' "$sudo_log" || fail "terminal inhibition authenticates its background command without a reusable timestamp"
-  grep -q -- '^-N -b -- ' "$sudo_log" || fail "terminal sleep inhibition runs through sudo"
+  grep -q -- '^sudo -N -b -- ' "$sudo_log" || fail "terminal inhibition authenticates its background command without a reusable timestamp"
   [[ ! -e $pkexec_marker ]] || fail "terminal sleep inhibition does not use pkexec"
   run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
   pass "terminal updates use sudo instead of Polkit for sleep inhibition"
@@ -229,3 +224,19 @@ kill -0 "$unrelated_pid" 2>/dev/null ||
 kill "$unrelated_pid"
 wait "$unrelated_pid" 2>/dev/null || true
 pass "stale inhibitor state does not terminate a reused PID"
+
+# The hidden helper also establishes its own boundary when invoked directly.
+reset_boundary
+touch "$SUDO_TEST_CACHE"
+run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
+[[ $(head -1 "$SUDO_TEST_LOG") == "sudo -k" ]] || fail "standalone inhibitor cleanup did not start cold"
+assert_boundary_cold "standalone inhibitor cleanup"
+pass "standalone inhibitor cleanup revokes before and after session work"
+
+reset_boundary
+export SUDO_TEST_REVOKE_FAIL=1
+if run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" start; then
+  fail "inhibitor started after failed initial revocation"
+fi
+[[ ! -e $stay_awake_helper_state/inhibit-pid ]] || fail "failed revocation started an inhibitor"
+pass "failed initial revocation prevents standalone inhibition"
