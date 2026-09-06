@@ -93,6 +93,7 @@ stop() {
 
 start() {
   local idle_owner="$$:$RANDOM:$RANDOM"
+  local launcher_pid=""
 
   stop
   mkdir -p "$state_dir"
@@ -116,16 +117,19 @@ start() {
   if (( EUID == 0 )); then
     ( [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
       exec "${hold_command[@]}" ) &
+    launcher_pid=$!
   elif [[ -t 0 ]]; then
     /usr/bin/sudo -N -b -- "${hold_command[@]}"
   else
     ( [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
       exec pkexec "${hold_command[@]}" ) &
+    launcher_pid=$!
   fi
 
   # For graphical authentication the launcher may wait for a password. Wait for
   # either the user-owned held command to become ready or the launcher to fail.
-  local launcher_pid=${!:-}
+  # sudo -b backgrounds internally, so Bash has no launcher PID in the TTY path;
+  # $! there can still refer to a completed startup process substitution.
   local readiness_attempts=0
   while [[ ! -s $inhibit_pid_file ]]; do
     if [[ -n $launcher_pid ]] && ! kill -0 "$launcher_pid" 2>/dev/null; then

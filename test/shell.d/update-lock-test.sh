@@ -141,18 +141,18 @@ if (( EUID != 0 )); then
   pkexec_marker="$test_tmp/pkexec-used"
   terminal_inhibit_pid_file="$test_tmp/terminal-inhibit-pid"
   write_stub pkexec '[[ -z ${PKEXEC_MARKER:-} ]] || touch "$PKEXEC_MARKER"; exec "$@"'
+  write_stub systemd-inhibit 'sleep 0.2; while [[ $1 == --* ]]; do shift; done; exec "$@"'
 
-  # start leaves the inhibitor running on purpose, but script tears the pty down
-  # the moment its command returns, which SIGHUPs that inhibitor before it can
-  # exec. Keep the session open from the inside until the stub has logged.
+  # sudo -b returns before its child is ready. Require start to wait for the
+  # delayed child and succeed, then stop it before script tears down the PTY.
   terminal_driver="$test_tmp/terminal-stay-awake"
   cat >"$terminal_driver" <<'SH'
 #!/bin/bash
+set -euo pipefail
 omarchy-update-stay-awake start
-for _ in {1..200}; do
-  grep -q -- '^sudo -N -b -- ' "$SUDO_LOG" && break
-  sleep 0.05
-done
+[[ -s $XDG_RUNTIME_DIR/omarchy-update-stay-awake/inhibit-pid ]]
+omarchy-update-stay-awake stop
+[[ ! -e $XDG_RUNTIME_DIR/omarchy-update-stay-awake/inhibit-pid ]]
 SH
   chmod +x "$terminal_driver"
 
