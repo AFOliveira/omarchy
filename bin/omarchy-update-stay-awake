@@ -1,10 +1,21 @@
-#!/bin/bash
+#!/bin/bash -p
 
 # omarchy:summary=Manage sleep and idle inhibition during an update
 # omarchy:args=<start|stop>
 # omarchy:hidden=true
 
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
 set -e
+omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_revoke_sudo_timestamp || exit 1
+omarchy_security_install_sudo_cleanup_traps
+omarchy_security_enable_no_update_sudo
 
 state_dir="${XDG_RUNTIME_DIR:-/tmp/omarchy-$UID}/omarchy-update-stay-awake"
 idle_owner_file="$state_dir/idle-owner"
@@ -106,7 +117,7 @@ start() {
     ( [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
       exec "${hold_command[@]}" ) &
   elif [[ -t 0 ]]; then
-    sudo -N -b -- "${hold_command[@]}"
+    /usr/bin/sudo -N -b -- "${hold_command[@]}"
   else
     ( [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
       exec pkexec "${hold_command[@]}" ) &

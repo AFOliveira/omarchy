@@ -36,6 +36,12 @@ for step in omarchy-update-system-pkgs yay omarchy-hook omarchy-update-mise; do
   export SUDO_TEST_FAIL_STEP=$step
   if run_update -y; then fail "$step failure must fail the update"; fi
   assert_boundary_cold "failed $step"
+  python3 - "$SUDO_TEST_LOG" <<'PY'
+import sys
+s=open(sys.argv[1]).read().splitlines()
+for i,line in enumerate(s):
+ if line=='step:omarchy-update-stay-awake stop': assert i>0 and s[i-1]=='sudo -k',s
+PY
   pass "update revokes credentials after $step fails"
 done
 
