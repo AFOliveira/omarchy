@@ -18,9 +18,9 @@ require_privileged_bash_startup() {
     [[ $1 =~ ^[1-9][0-9]*$ ]] || exit 1
     mapfile -d "" -t argv <"/proc/$1/cmdline" || exit 1
     executable=$(/usr/bin/readlink -e -- "/proc/$1/exe") || exit 1
-    [[ $executable == /usr/bin/bash ]]
-    [[ ${argv[0]:-} == /bin/bash || ${argv[0]:-} == /usr/bin/bash ]]
-    [[ ${argv[1]:-} == -p ]]
+    [[ $executable == "/usr/bin/bash" &&
+      ( ${argv[0]:-} == "/bin/bash" || ${argv[0]:-} == "/usr/bin/bash" ) &&
+      ${argv[1]:-} == "-p" ]]
   ' omarchy-bash-startup "$$"
 }
 if ! require_privileged_bash_startup; then
@@ -32,23 +32,30 @@ unset -f require_privileged_bash_startup
 # BASH_FUNC_* entries in the environment, where a later packaged #!/bin/bash
 # child would import them. Re-exec only from this already-safe interpreter with
 # those entries removed, preserving every unrelated environment variable.
-if /usr/bin/env -0 | /usr/bin/grep -zq '^BASH_FUNC_.*%%='; then
+clean_environment=(/usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u CDPATH -u GLOBIGNORE)
+exported_functions=0
+exec {environment_fd}< <(/usr/bin/env -0)
+environment_pid=$!
+while IFS= read -r -d '' environment_line <&"$environment_fd"; do
+  if [[ $environment_line == BASH_FUNC_*%%=* ]]; then
+    clean_environment+=(-u "${environment_line%%=*}")
+    exported_functions=1
+  fi
+done
+exec {environment_fd}<&-
+wait "$environment_pid" || exit 1
+
+if (( exported_functions )); then
   if [[ -z ${BASH_SOURCE[0]:-} || ! -r ${BASH_SOURCE[0]} ]]; then
     /usr/bin/printf '%s\n' 'Error: exported Bash functions require running this upgrade from its script file.' >&2
     exit 1
   fi
-
-  clean_environment=(/usr/bin/env -u BASH_ENV -u ENV)
-  while IFS= read -r -d '' environment_line; do
-    if [[ $environment_line == BASH_FUNC_*%%=* ]]; then
-      clean_environment+=(-u "${environment_line%%=*}")
-    fi
-  done < <(/usr/bin/env -0)
   exec "${clean_environment[@]}" /usr/bin/bash -p -- "${BASH_SOURCE[0]}" "$@"
 fi
 
-# These startup hooks were ignored by -p; remove them before any child shell.
-unset BASH_ENV ENV
+# Also discard ignored shell-option state before ordinary child interpreters.
+unset BASH_ENV ENV PS4 CDPATH GLOBIGNORE
+export -n SHELLOPTS BASHOPTS
 
 set -euo pipefail
 
@@ -432,8 +439,6 @@ open_privilege_window() {
 close_privilege_window() {
   local invalidation_status=0
 
-  (( ! privilege_boundary_crossed )) || return 0
-
   # Defense in depth: no command above updates a timestamp, but invalidate the
   # desktop user's ticket again before any user-controlled upgrade step.
   if [[ -x /usr/bin/sudo ]]; then
@@ -450,15 +455,19 @@ close_privilege_window() {
 
 cleanup_on_exit() {
   local exit_status=$?
+  trap - EXIT HUP INT TERM
 
   # Revoke sudo before any best-effort session/user cleanup. This also covers
   # failures and signals in the privileged phase, and invalidates a credential
-  # that predated this invocation. If
-  # invalidation itself fails, do not cross into user-controlled cleanup code.
-  close_privilege_window >/dev/null 2>&1 || true
-
-  if (( privilege_boundary_crossed && hyprland_config_reload_suppressed )); then
-    restore_hyprland_config_reload >/dev/null 2>&1 || true
+  # that predated this invocation. If invalidation itself fails, do not cross
+  # into user-controlled cleanup code.
+  if close_privilege_window; then
+    if (( hyprland_config_reload_suppressed )); then
+      restore_hyprland_config_reload >/dev/null 2>&1 || true
+    fi
+  else
+    warn "Could not invalidate cached sudo authorization during upgrade cleanup."
+    (( exit_status != 0 )) || exit_status=1
   fi
 
   # set -e aborts without a word, and the last thing on screen is a green
@@ -472,6 +481,9 @@ cleanup_on_exit() {
   exit "$exit_status"
 }
 trap cleanup_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 backup_suffix=$(/usr/bin/date +%Y%m%d%H%M%S)
 
@@ -2479,17 +2491,15 @@ refresh_current_theme_after_upgrade() {
     warn "Could not apply browser theme colour. Run 'omarchy theme set \"$theme_name\"' after reboot if Chromium's theme looks stale."
 }
 
-# Everything below begins the upgrade lifecycle. Suppress live Hyprland reloads
-# before anything touches the legacy config
-# trees. This path executes only fixed /usr/bin session plumbing and hyprctl,
-# before any sudo credential exists.
+# Begin the upgrade lifecycle by invalidating credentials before session
+# plumbing or changes to the legacy configuration trees.
 upgrade_started=1
-suppress_hyprland_config_reload
 
 # Cold-invalidate any older ticket, then authorize each trusted system/package
 # command with sudo --no-update. No reusable credential exists at any point,
 # even if caller startup code already spawned a detached waiter.
 open_privilege_window
+suppress_hyprland_config_reload
 create_pre_upgrade_snapshot ||
   warn "Continuing the upgrade without a pre-upgrade snapshot."
 configure_pacman_channel
@@ -2537,6 +2547,7 @@ refresh_current_theme_after_upgrade
 # Omarchy quattro Lua-config cutover.
 restore_hyprland_config_reload
 
+close_privilege_window || fail "Could not invalidate sudo after running user upgrade steps."
 upgrade_completed=1
 
 cat <<EOF

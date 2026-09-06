@@ -1,0 +1,19 @@
+#!/bin/bash -p
+
+# Preserve sudo options while preventing authentication from refreshing the
+# credential cache. Timestamp maintenance and informational modes stand alone.
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup for the sudo boundary." >&2
+  exit 126
+fi
+source "${BASH_SOURCE[0]%/*}/../../../bin/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
+
+if (( $# == 1 )); then
+  case "$1" in
+    -k|--reset-timestamp|-K|--remove-timestamp|-h|--help|-V|--version)
+      exec /usr/bin/sudo "$@"
+      ;;
+  esac
+fi
+exec /usr/bin/sudo -N "$@"
