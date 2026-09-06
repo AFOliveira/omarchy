@@ -48,7 +48,7 @@ if [[ ${1:-} == "-h" ]]; then
 fi
 if [[ ${1:-} == "-k" || ${1:-} == "-K" ]]; then
   [[ ${SUDO_TEST_REVOKE_FAIL:-0} != "1" ]] || exit 1
-  rm -f "$SUDO_TEST_CACHE"
+  /usr/bin/rm -f "$SUDO_TEST_CACHE"
   exit 0
 fi
 if [[ ${1:-} == "-N" ]]; then
@@ -115,7 +115,7 @@ ln -s ../bin/test-step "$SUDO_TEST_ROOT/mock/pacman"
 
 reset_boundary() {
   : >"$SUDO_TEST_LOG"
-  rm -f "$SUDO_TEST_CACHE"
+  /usr/bin/rm -f "$SUDO_TEST_CACHE"
   unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED
 }
 assert_boundary_cold() {
