@@ -233,8 +233,10 @@ target_home=$(/usr/bin/getent passwd "$target_user" | /usr/bin/cut -d: -f6)
 [[ -n $target_home && -d $target_home ]] || fail "Home directory for '$target_user' was not found."
 target_uid=$(/usr/bin/id -u "$target_user")
 target_runtime_dir="/run/user/$target_uid"
-trusted_package_path="/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin"
-package_path="/usr/share/omarchy/bin:/usr/local/bin:/usr/bin:/bin:$target_home/.local/bin"
+# User-local commands are needed only after dropping to the target user. Never
+# expose their search path to commands run through as_root.
+root_path=/usr/share/omarchy/bin:/usr/local/bin:/usr/bin:/bin
+package_path="$root_path:$target_home/.local/bin"
 
 as_root() {
   if (( privilege_boundary_crossed )); then
@@ -276,7 +278,7 @@ run_as_user_session() {
 # assuming a live session. Extra NAME=VALUE args extend the environment.
 run_as_user_omarchy() {
   local command_path="$package_path"
-  [[ ${OMARCHY_TRUSTED_COMMAND_PATH:-0} == 1 ]] && command_path="$trusted_package_path"
+  [[ ${OMARCHY_TRUSTED_COMMAND_PATH:-0} == 1 ]] && command_path="$root_path"
 
   run_as_user /usr/bin/env \
     HOME="$target_home" \
@@ -762,7 +764,7 @@ configure_lock_authentication() {
   as_root /usr/bin/env \
     OMARCHY_INSTALL_USER="$target_user" \
     OMARCHY_PATH=/usr/share/omarchy \
-    PATH="$trusted_package_path" \
+    PATH="$root_path" \
     "$apply_lock"
 }
 
@@ -1436,7 +1438,7 @@ apply_firewall_defaults() {
   fi
 
   log "Applying Omarchy firewall defaults"
-  as_root /usr/bin/env OMARCHY_PATH=/usr/share/omarchy PATH="$trusted_package_path" \
+  as_root /usr/bin/env OMARCHY_PATH=/usr/share/omarchy PATH="$root_path" \
     /usr/bin/bash -euo pipefail "$firewall_script" ||
     warn "Could not apply firewall defaults; run 'sudo bash $firewall_script' after reboot."
 }
@@ -2227,7 +2229,10 @@ for file in \
 done
 ln -snf "$HOME/.local/state/omarchy/current/theme/btop.theme" "$HOME/.config/btop/themes/current.theme"
 if [[ ! -e $HOME/.local/state/omarchy/current/background && -d $HOME/.local/state/omarchy/current/theme/backgrounds ]]; then
-  background=$(find "$HOME/.local/state/omarchy/current/theme/backgrounds" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | sort | head -n1)
+  background=$(find "$HOME/.local/state/omarchy/current/theme/backgrounds" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
+       -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.avi' \) \
+    | sort | head -n1)
   [[ -n ${background:-} ]] && ln -snf "$background" "$HOME/.local/state/omarchy/current/background"
 fi
 
