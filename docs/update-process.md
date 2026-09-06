@@ -56,6 +56,8 @@ privileged work should invoke the appropriate helper or privilege prompt.
 Migrations must be idempotent; if one user already applied a machine-wide repair,
 the migration should no-op for other users.
 
+Both the update and standalone migration runner start with a cold credential state and use the no-update sudo wrapper. The runner revokes again on success, failure, and catchable termination signals. Historical migrations remain strictly ordered, and failed migrations remain pending.
+
 For watchers and diagnostics, `omarchy-migrate --pending` prints pending
 migration names and exits `0` when any are pending. When no migrations are
 pending, it prints nothing and exits non-zero.
@@ -125,18 +127,28 @@ omarchy-update
   │  installed but unconfigured fails the snapshot loudly, pointing at
   │  install/config/snapper.sh, and the update continues without one)
   ├─ omarchy-update-stay-awake start
-  ├─ run package updates, migrations, hooks, and log analysis
+  ├─ run system-package updates
+  ├─ invalidate sudo, then run migrations and all later privileged work with
+  │  no-update authentication
+  ├─ run orphan review and log analysis
   ├─ omarchy-update-status
   │    └─ refresh or clear the shell update indicator
+  ├─ restart marked services and the shell
   ├─ omarchy-update-stay-awake stop
   │    └─ release the sleep inhibitor and restore shell idle state, if changed
-  └─ omarchy-update-restart
+  ├─ update AUR packages
+  ├─ invalidate sudo credentials
+  ├─ run the post-update hook, invalidate again, then update mise tools
+  └─ offer the unprivileged reboot prompt
 ```
 
 Important behavior:
 
-- In dev-link mode, `omarchy update` fast-forwards the active checkout from its
-  configured upstream before changing system packages or running migrations.
+- `omarchy update` uses the session’s `OMARCHY_PATH` and a fixed command search path for its system phases. User PATH is restored behind the sudo wrapper for hooks and mise.
+- Mixed-trust update entrypoints start Bash in privileged mode, discard `BASH_ENV`, `ENV`, and exported-function records before launching helpers, and reject an ordinary `bash path/to/command` invocation. Run them as executables (normally through the `omarchy` CLI); `/usr/bin/bash -p path/to/command` is the explicit interpreter form. This keeps shell startup injection from replacing the no-update sudo boundary.
+- In dev-link mode, `omarchy update` fast-forwards the active checkout from its configured upstream before changing system packages or running migrations.
+- Migrations remain in chronological order even though historical entries mix user-controlled code with later privileged repairs. Before entering that mixed-trust tail, Omarchy invalidates its timestamp and forces every later sudo call—including AUR's configurable sudo command—to use `--no-update`; prompts authorize one command without publishing a reusable timestamp. Yay's credential loop is disabled for the update.
+- User-controlled post-update hooks and mise tools run only after every sudo-capable update stage. Omarchy invalidates its sudo timestamp before each boundary and on every exit; detached children therefore have no later reusable update authorization to wait for.
 - `-y` exports `OMARCHY_UPDATE_UNATTENDED=1` — a promise not to ask anything.
   Steps that would prompt (orphan removal, conflict handoff) report and skip
   instead of blocking.
@@ -251,6 +263,9 @@ which pacman repo the mirrorlist points at (and swap between the `omarchy` and
 `omarchy-dev` packages through a guard-allowed pacman run), while `dev` links
 the runtime to a git checkout via the dev-link mechanism, after which
 `omarchy update` fast-forwards that checkout instead of upgrading a package.
+Channel switching defers the legacy `pre-refresh-pacman` hook across the package
+swap and the complete update. The hook runs exactly once at the final cold
+credential boundary; it is skipped if the composite operation fails earlier.
 
 There is no version file at runtime. `omarchy-version` derives the version from
 `pacman -Q` on whichever package is installed, or reports `dev (<hash>)` for a
@@ -285,7 +300,7 @@ scripts.
 | `omarchy-update-mise` | Runs `MISE_MINIMUM_RELEASE_AGE=0 mise up` for mise-managed tools — the override of mise's release-age cooldown is the point. | **Keep.** Mise-managed tools are intentionally part of the blessed update path. |
 | `omarchy-update-orphan-pkgs` | Lists orphans and prompts before removal; noninteractive mode never removes. | **Keep for now.** Safe because it is prompt-only. |
 | `omarchy-update-analyze-logs` | Scans `/tmp/omarchy-update.log` for known failure patterns, currently initramfs generation. | **Keep/expand.** Useful safety net; should grow only for high-signal checks. |
-| `omarchy-update-restart` | Prompts for reboot after kernel/Hyprland updates, restarts components with `restart-*-required` markers, and always restarts the shell. | **Keep.** Important final step; may eventually include service-restart checks. |
+| `omarchy-update-restart` | Restarts components selected by `restart-*-required` markers, always restarts the shell, and prompts for reboot after kernel/Hyprland updates. Internal phase flags let the update finish sudo-capable restarts before user hooks and defer only the unprivileged reboot prompt. | **Keep.** Important final step; may eventually include service-restart checks. |
 | `omarchy-update-firmware` | Manual firmware update command using fwupd. Not part of the normal update pipeline. | **Keep separate.** Firmware is not a routine system update step. |
 | `omarchy-update-time` | Restarts `systemd-timesyncd`. | **Question.** Not really an update command. Consider renaming/moving under system/time maintenance. |
 

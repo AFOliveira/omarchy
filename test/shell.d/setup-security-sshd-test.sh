@@ -4,11 +4,10 @@ set -euo pipefail
 
 source "$(dirname "$0")/base-test.sh"
 
-test_dir=$(mktemp -d)
-trap 'rm -rf "$test_dir"' EXIT
-
-stub_bin="$test_dir/bin"
-mkdir -p "$stub_bin"
+source "$SHELL_TEST_DIR/fixtures/sudo-boundary-test.sh"
+test_dir="$boundary_tmp"
+stub_bin="$SUDO_TEST_ROOT/bin"
+copy_boundary_file bin/omarchy-setup-security-sshd
 
 cat >"$stub_bin/omarchy-pkg-add" <<'STUB'
 #!/bin/bash
@@ -43,21 +42,15 @@ case $1 in
   ;;
 esac
 STUB
-cat >"$stub_bin/sudo" <<'STUB'
+cat >"$stub_bin/install" <<'STUB'
 #!/bin/bash
-case $1 in
-install)
-  destination="${TEST_ROOT:?}${4:?}"
-  /usr/bin/mkdir -p "${destination%/*}"
-  /usr/bin/install -Dm644 /dev/stdin "$destination"
-  ;;
-rm)
-  /usr/bin/rm -f "${TEST_ROOT:?}${3:?}"
-  ;;
-*)
-  exec "$@"
-  ;;
-esac
+destination="${TEST_ROOT:?}${3:?}"
+/usr/bin/mkdir -p "${destination%/*}"
+/usr/bin/install -Dm644 /dev/stdin "$destination"
+STUB
+cat >"$stub_bin/rm" <<'STUB'
+#!/bin/bash
+/usr/bin/rm -f "${TEST_ROOT:?}${2:?}"
 STUB
 chmod +x "$stub_bin"/*
 
@@ -66,18 +59,18 @@ public_key=$(<"$test_dir/key.pub")
 
 run_setup() {
   local scenario="$1"
-  local home="$test_dir/$scenario/home"
+  local scenario_home="$test_dir/$scenario/home"
   local root="$test_dir/$scenario/root"
 
-  mkdir -p "$home" "$root"
+  mkdir -p "$scenario_home" "$root"
   : >"$test_dir/$scenario.calls"
 
-  HOME="$home" TEST_ROOT="$root" CALL_LOG="$test_dir/$scenario.calls" \
+  SUDO_TEST_HOME="$scenario_home" TEST_ROOT="$root" CALL_LOG="$test_dir/$scenario.calls" \
     SSHD_SYNTAX_VALID="${SSHD_SYNTAX_VALID:-1}" \
     SSHD_PASSWORD_AUTH="${SSHD_PASSWORD_AUTH:-no}" \
     SSHD_KBD_AUTH="${SSHD_KBD_AUTH:-no}" \
     PATH="$stub_bin:$PATH" \
-    bash "$ROOT/bin/omarchy-setup-security-sshd" --key="$public_key"
+    "$SUDO_TEST_ROOT/bin/omarchy-setup-security-sshd" --key="$public_key"
 }
 
 output=$(run_setup success)
@@ -115,3 +108,20 @@ fi
 ! grep -q "Password logins are off" "$test_dir/invalid.output" ||
   fail "SSH setup must not claim rejected hardening succeeded"
 pass "SSH setup fails safely when sshd rejects the config"
+
+reset_boundary
+if /usr/bin/bash "$SUDO_TEST_ROOT/bin/omarchy-setup-security-sshd" -p >"$test_dir/decoy.out" 2>&1; then
+  fail "SSH setup accepted an ordinary Bash launch"
+fi
+[[ ! -s $SUDO_TEST_LOG ]] || fail "unsafe SSH interpreter reached sudo"
+pass "SSH setup rejects a decoy privileged-mode argument"
+
+reset_boundary
+printf '%s\n' 'touch "$SUDO_TEST_ROOT/ssh-startup"' >"$test_dir/startup-env"
+BASH_ENV="$test_dir/startup-env" ENV="$test_dir/startup-env" run_setup startup >"$test_dir/startup.out"
+[[ ! -e $SUDO_TEST_ROOT/ssh-startup ]] || fail "SSH setup propagated inherited startup code"
+assert_boundary_cold "SSH setup"
+if grep -E '^sudo ' "$SUDO_TEST_LOG" | grep -Ev '^sudo (-N |-k$|-h$)'; then
+  fail "SSH setup published reusable sudo authorization"
+fi
+pass "SSH setup and its helpers start cold, use no-update authentication, and revoke at exit"

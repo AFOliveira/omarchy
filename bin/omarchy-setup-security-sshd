@@ -1,11 +1,21 @@
-#!/bin/bash
+#!/bin/bash -p
 
 # omarchy:summary=Set up the OpenSSH server, open the firewall, and authorize an SSH key
 # omarchy:args=[--key=<public-key>] [--gh-keys <github-username>]
 # omarchy:examples=omarchy-setup-security-sshd | omarchy-setup-security-sshd --gh-keys dhh | omarchy-setup-security-sshd --key="ssh-ed25519 AAAA... user@host"
 # omarchy:requires-sudo=true
 
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup for SSH setup." >&2
+  exit 126
+fi
+source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
 set -e
+omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_revoke_sudo_timestamp || exit 1
+omarchy_security_install_sudo_cleanup_traps
+omarchy_security_enable_no_update_sudo
 
 AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
 KEY=""
