@@ -103,7 +103,7 @@ case "$step" in
   pacman) exit 0 ;;
   yay)
     [[ $* == *"--sudo $OMARCHY_PATH/default/omarchy/sudo-no-update/sudo"* ]] || exit 92
-    [[ $* == *"--nosudoloop"* ]] || exit 93
+    [[ $* == *"--sudoloop=false"* ]] || exit 93
     ;;
 esac
 STUB

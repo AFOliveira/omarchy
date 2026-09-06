@@ -6,7 +6,7 @@ sudo_options=()
 if [[ ${OMARCHY_SUDO_NO_UPDATE:-0} == "1" ]]; then
   sudo_wrapper="$OMARCHY_PATH/default/omarchy/sudo-no-update/sudo"
   [[ -x $sudo_wrapper ]] || exit 1
-  sudo_options=(--sudo "$sudo_wrapper" --nosudoloop)
+  sudo_options=(--sudo "$sudo_wrapper" --sudoloop=false)
 fi
 
 if pacman -Qem >/dev/null; then
