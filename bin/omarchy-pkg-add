@@ -17,10 +17,8 @@ omarchy_security_require_privileged_bash_startup || {
   exit 126
 }
 
-omarchy_security_sanitize_bash_environment "$0" "$@"
-unset BASH_ENV ENV
-
 set -euo pipefail
+omarchy_security_sanitize_bash_environment "$0" "$@"
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
 

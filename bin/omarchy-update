@@ -23,6 +23,10 @@ update_stay_awake_stopped=0
 cleanup_update() {
   local status=$?
   trap - EXIT HUP INT TERM
+  if ! omarchy_security_revoke_sudo_timestamp; then
+    echo "Could not invalidate sudo before update cleanup." >&2
+    omarchy_security_exit_with_revoked_sudo 1
+  fi
   if (( update_stay_awake_stopped == 0 )); then
     omarchy-update-stay-awake stop || status=1
   fi
@@ -88,6 +92,7 @@ if [[ ${1:-} == "-y" ]] || omarchy-update-confirm; then
   # Release update-owned inhibitors before offering a reboot. A confirmed
   # reboot can terminate this process before its EXIT trap gets a chance to
   # remove the persistent Stay Awake marker.
+  omarchy_security_revoke_sudo_timestamp
   omarchy-update-stay-awake stop
   update_stay_awake_stopped=1
 
