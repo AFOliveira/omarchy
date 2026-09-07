@@ -162,3 +162,52 @@ pass "missing credentials fail closed before VM startup"
   "$ROOT/bin/omarchy-windows-vm" >/dev/null ||
   fail "Windows VM source retains the public password fallback"
 pass "Windows VM source contains no public password fallback"
+
+# Private staging must succeed before compose changes. An interruption after
+# compose succeeds must keep launch away from an older syntactically valid pair.
+write_credentials original-user OriginalPassword1
+compose_update_log="$test_dir/compose-updates"
+(
+  write_credentials() { return 1; }
+  write_compose() { : >"$compose_update_log"; }
+  ! write_configuration 4G 2 64G next-user NextPassword1 UTC
+  [[ ! -e $compose_update_log ]]
+) || fail "private staging failure changes machine configuration"
+pass "private staging failure stops before compose authorization"
+
+committed_credentials=$CREDENTIALS_FILE
+for failure in compose commit; do
+  rm -f "${CREDENTIALS_FILE}.pending"
+  (
+    write_compose() {
+      printf '%s:%s\n' "$4" "$5" >"$compose_update_log"
+      [[ $failure != "compose" ]]
+    }
+    mv() {
+      if [[ $failure == "commit" && ${@: -1} == "$committed_credentials" ]]; then
+        return 1
+      fi
+      /usr/bin/mv "$@"
+    }
+    ! write_configuration 4G 2 64G next-user NextPassword1 UTC
+  ) || fail "configuration $failure failure is not reported"
+  [[ -f ${CREDENTIALS_FILE}.pending && $(read_credential USERNAME) == original-user ]] ||
+    fail "configuration $failure failure loses the recoverable pending state"
+  : >"$lifecycle_log"
+  if (launch_windows --keep-alive) >"$test_dir/pending-$failure.output" 2>&1; then
+    fail "launch uses stale credentials after $failure failure"
+  fi
+  [[ ! -s $lifecycle_log ]] || fail "incomplete configuration starts the VM"
+  grep -q 'configuration is incomplete' "$test_dir/pending-$failure.output" ||
+    fail "incomplete configuration does not explain recovery"
+done
+pass "compose or credential commit failure blocks stale-credential launch"
+
+(
+  write_compose() { printf '%s:%s\n' "$4" "$5" >"$compose_update_log"; }
+  write_configuration 4G 2 64G next-user NextPassword1 UTC
+)
+[[ ! -e ${CREDENTIALS_FILE}.pending && $(read_credential USERNAME) == next-user && $(read_credential PASSWORD) == NextPassword1 ]] ||
+  fail "successful retry does not commit the matching private record"
+[[ $(cat "$compose_update_log") == 'next-user:NextPassword1' ]] || fail "retry uses different machine and private credentials"
+pass "successful retry commits a coherent credential pair and clears pending state"
