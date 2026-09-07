@@ -13,6 +13,10 @@ mkdir -p "$mock_bin" "$test_home"
 
 cat >"$mock_bin/omarchy-pkg-add" <<'SH'
 #!/bin/bash
+if [[ ${OMARCHY_TEST_FONT_BOUNDARY:-0} == 1 ]]; then
+  [[ ${OMARCHY_SUDO_NO_UPDATE:-0} == 1 ]] || exit 99
+  printf 'no-update\n' >>"$OMARCHY_TEST_LOG"
+fi
 printf 'pkg:%s\n' "$*" >>"$OMARCHY_TEST_LOG"
 exit "${OMARCHY_TEST_PKG_STATUS:-0}"
 SH
@@ -45,7 +49,10 @@ if [[ ${1:-} == -h ]]; then
   printf 'usage: sudo [-ABbEHkNnPS] command\n'
   exit 0
 fi
-[[ ${1:-} == -k ]] && exit 0
+if [[ ${1:-} == -k ]]; then
+  printf 'revoke\n' >>"$OMARCHY_TEST_LOG"
+  exit 0
+fi
 exit 90
 SH
 
@@ -131,7 +138,11 @@ fi
 pass "generic installer does not launch after package installation failure"
 
 run_presentation() {
-  bash -c "sleep() { :; }; $(<"$OMARCHY_TEST_PRESENTATION")"
+  if [[ $(<"$OMARCHY_TEST_PRESENTATION") == *omarchy-font-set* ]]; then
+    OMARCHY_TEST_FONT_BOUNDARY=1 bash -c "sleep() { :; }; $(<"$OMARCHY_TEST_PRESENTATION")"
+  else
+    bash -c "sleep() { :; }; $(<"$OMARCHY_TEST_PRESENTATION")"
+  fi
 }
 
 bash "$ROOT/bin/omarchy-install-app" "LM Studio" "lmstudio-bin"
@@ -173,7 +184,9 @@ grep -Fxq 'pkg:alpha' "$OMARCHY_TEST_LOG" ||
   fail "install-app still installs after quoting a hostile display name"
 pass "install-app does not run extra commands from a quote in the display name"
 
+: >"$OMARCHY_TEST_LOG"
 "$font_script" "Cascadia Mono" "ttf-cascadia-mono-nerd" "CaskaydiaMono Nerd Font"
+[[ $(<"$OMARCHY_TEST_LOG") == "revoke" ]] || fail "font installer starts with cold authorization"
 presentation_command=$(<"$OMARCHY_TEST_PRESENTATION")
 [[ $presentation_command == *'echo Installing\ Cascadia\ Mono...;'* ]] ||
   fail "install-font shell-quotes the display name" "$presentation_command"
@@ -186,6 +199,15 @@ grep -Fxq 'pkg:ttf-cascadia-mono-nerd' "$OMARCHY_TEST_LOG" ||
 grep -Fxq 'font:CaskaydiaMono Nerd Font' "$OMARCHY_TEST_LOG" ||
   fail "install-font passes the family name through as one argument"
 pass "install-font shell-quotes the display name and family"
+[[ $(<"$OMARCHY_TEST_LOG") == $'revoke\nno-update\npkg:ttf-cascadia-mono-nerd\nrevoke\nfont:CaskaydiaMono Nerd Font\nrevoke' ]] ||
+  fail "font installation revokes around its no-update package operation and user font selection"
+: >"$OMARCHY_TEST_LOG"
+if OMARCHY_TEST_PKG_STATUS=42 run_presentation; then
+  fail "font installer reports package failure"
+fi
+[[ $(<"$OMARCHY_TEST_LOG") == $'revoke\nno-update\npkg:ttf-cascadia-mono-nerd\nrevoke' ]] ||
+  fail "font package failure skips font selection and retains exit revocation"
+pass "font installation enforces authorization ordering and failure cleanup"
 
 "$font_script" "Foo's App" "alpha" "Foo's Font"
 : >"$OMARCHY_TEST_LOG"

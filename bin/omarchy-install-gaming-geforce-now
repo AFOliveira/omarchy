@@ -9,7 +9,8 @@ if [[ $- != *p* ]]; then
   exit 126
 fi
 
-source "${BASH_SOURCE[0]%/*}/omarchy-install-security-functions" || exit 126
+entrypoint_source=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${entrypoint_source%/*}/omarchy-install-security-functions" || exit 126
 
 omarchy_security_require_privileged_bash_startup || {
   echo "Refusing an unsafe Bash startup for GeForce NOW installation." >&2

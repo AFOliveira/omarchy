@@ -11,7 +11,8 @@ if [[ $- != *p* ]]; then
   exit 126
 fi
 
-source "${BASH_SOURCE[0]%/*}/omarchy-install-security-functions" || exit 126
+entrypoint_source=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${entrypoint_source%/*}/omarchy-install-security-functions" || exit 126
 
 omarchy_security_require_privileged_bash_startup || {
   echo "Refusing an unsafe Bash startup for development-environment installation." >&2
@@ -62,34 +63,13 @@ esac
 echo "Security note: this installer clears cached sudo authorization before running user-level tooling."
 
 install_php() {
-  install_packages php composer php-sqlite xdebug
+  local system_environment=php
+  [[ $environment != "symfony" ]] || system_environment=symfony
 
-  # Enable some extensions
-  local php_ini_path="/etc/php/php.ini"
-  local extensions_to_enable=(
-    "bcmath"
-    "intl"
-    "iconv"
-    "openssl"
-    "pdo_sqlite"
-    "pdo_mysql"
-  )
-
-  # Keep the trusted configuration phase to one command-scoped authorization.
-  # sudo --no-update deliberately cannot reuse or publish a timestamp, so one
-  # sed process avoids prompting once per extension without opening a reusable
-  # credential window.
-  local -a sed_expressions=(
-    -e 's/^;zend_extension=xdebug.so/zend_extension=xdebug.so/'
-    -e 's/^;xdebug.mode=debug/xdebug.mode=debug/'
-  )
-  local ext
-  for ext in "${extensions_to_enable[@]}"; do
-    sed_expressions+=(-e "s/^;extension=${ext}/extension=${ext}/")
-  done
-
-  /usr/bin/sudo -N -- /usr/bin/sed -i "${sed_expressions[@]}" \
-    /etc/php/conf.d/xdebug.ini "$php_ini_path"
+  # One fixed packaged system phase covers both packages and configuration.
+  # No user tools, paths or scripts are accepted by the privileged helper.
+  /usr/bin/sudo -N -- /usr/bin/env -i PATH=/usr/bin:/usr/sbin:/bin:/sbin \
+    /usr/bin/bash -p -- /usr/bin/omarchy-install-dev-env-system "$system_environment"
 }
 
 configure_composer_path() {
@@ -154,7 +134,6 @@ laravel)
 symfony)
   echo -e "Installing PHP and Symfony...\n"
   install_php
-  install_packages symfony-cli
   finish_privileged_phase
   configure_composer_path
   echo -e "\nYou can now run: symfony new --webapp myproject"

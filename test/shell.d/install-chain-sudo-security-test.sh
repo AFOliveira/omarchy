@@ -12,17 +12,22 @@ if [[ ${OMARCHY_INSTALL_CHAIN_SECURITY_NS:-} != 1 ]]; then
   outer_uid=$(id -u)
   outer_gid=$(id -g)
   subuid=$(awk -F: -v user="$(id -un)" '$1 == user { print $2; exit }' /etc/subuid)
-  subgid=$(awk -F: -v group="$(id -gn)" '$1 == group { print $2; exit }' /etc/subgid)
+  subgid=$(awk -F: -v user="$(id -un)" '$1 == user { print $2; exit }' /etc/subgid)
 
   if [[ -z $subuid || -z $subgid ]]; then
     pass "no subordinate uid/gid range; skipping install-chain namespace proof"
     exit 0
   fi
 
-  exec unshare --user --mount \
-    --map-users "0:$outer_uid:1" --map-users "1:$subuid:65536" \
-    --map-groups "0:$outer_gid:1" --map-groups "1:$subgid:65536" \
-    env OMARCHY_INSTALL_CHAIN_SECURITY_NS=1 bash "$0"
+  namespace=(unshare --user --mount
+    --map-users "0:$outer_uid:1" --map-users "1:$subuid:65536"
+    --map-groups "0:$outer_gid:1" --map-groups "1:$subgid:65536")
+  if "${namespace[@]}" true 2>/dev/null; then
+    exec "${namespace[@]}" env OMARCHY_INSTALL_CHAIN_SECURITY_NS=1 bash "$0"
+  else
+    pass "requested user/mount namespace unavailable; skipping install-chain proof"
+    exit 0
+  fi
 fi
 
 [[ $(id -u) == 0 ]] || fail "install-chain proof entered its root namespace"
@@ -336,22 +341,16 @@ grep -q '^UNTRUSTED:mise$' "$test_tmp/events-ruby" || fail "Ruby legitimate user
 grep -q '^DENIED$' "$test_tmp/events-ruby" || fail "Ruby tool did not receive an authentication-required result"
 pass "user-owned Ruby tooling cannot reuse the package install credential"
 
-# Exercise every branch, including the PHP/Laravel/Symfony mix. A malicious
-# bashrc would record an event if install_php sourced it.
-branches=(node bun deno go php laravel symfony python elixir phoenix rust java zig ocaml dotnet clojure scala)
+# PHP/Laravel/Symfony now have a separate unprivileged system-phase fixture
+# in install-dev-env-system-test.sh, including total authentication counts.
+branches=(node bun deno go python elixir phoenix rust java zig ocaml dotnet clojure scala)
 for branch in "${branches[@]}"; do
   run_dev_env "$branch" 0
 done
 if grep -q '^UNTRUSTED:bashrc$' "$test_tmp"/events-*; then
   fail "PHP setup executes the user-owned bashrc inside its privileged phase"
 fi
-grep -q '^UNTRUSTED:composer$' "$test_tmp/events-laravel" || fail "Laravel Composer phase did not run"
 grep -q '^AUTH_NO_UPDATE$' "$test_tmp/events-clojure" || fail "Clojure prerequisite did not use command-scoped authentication"
-for branch in php laravel symfony; do
-  config_authorizations=$(grep -c '^PRIVILEGED_CONFIG_NO_UPDATE$' "$test_tmp/events-$branch")
-  (( config_authorizations == 1 )) ||
-    fail "$branch did not consolidate PHP configuration into one command-scoped authorization" "count=$config_authorizations"
-done
 pass "all development branches keep user and downloaded code beyond the sudo boundary"
 
 # A pre-existing timestamp is intentionally revoked by the documented command

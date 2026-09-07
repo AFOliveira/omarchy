@@ -14,24 +14,7 @@ fi
 source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || return 126
 
 omarchy_install_security_sanitize_bash_startup_environment() {
-  local script=$1
-  shift
-  local environment_entry environment_name
-  local needs_reexec=0
-  local -a environment_unsets=(-u BASH_ENV -u ENV)
-
-  [[ -z ${BASH_ENV+x} && -z ${ENV+x} ]] || needs_reexec=1
-  while IFS= read -r -d '' environment_entry; do
-    environment_name=${environment_entry%%=*}
-    if [[ $environment_name == BASH_FUNC_*%% ]]; then
-      environment_unsets+=(-u "$environment_name")
-      needs_reexec=1
-    fi
-  done < <(/usr/bin/env -0)
-
-  if (( needs_reexec )); then
-    exec /usr/bin/env "${environment_unsets[@]}" /usr/bin/bash -p -- "$script" "$@"
-  fi
+  omarchy_security_sanitize_bash_environment "$@"
 }
 
 omarchy_install_security_finish_privileged_phase() {
