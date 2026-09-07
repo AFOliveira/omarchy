@@ -17,27 +17,31 @@ stub_bin="$test_tmp/bin"
 mkdir "$stub_bin"
 cat >"$stub_bin/sudo" <<'STUB'
 #!/bin/bash
-if [[ $1 == /usr/bin/install ]]; then
-  filtered=("$1")
-  shift
-  while (($#)); do
-    case $1 in
-      -o|-g) shift 2 ;;
-      *) filtered+=("$1"); shift ;;
-    esac
-  done
-  exec "${filtered[@]}"
-fi
+printf 'AUTH %s\n' "$*" >>"${TEST_TRANSACTION_LOG:?}"
+[[ $1 != "-N" ]] || shift
+[[ $1 != "--" ]] || shift
 exec "$@"
+STUB
+cat >"$stub_bin/install" <<'STUB'
+#!/bin/bash
+filtered=()
+while (($#)); do
+  case $1 in
+    -o|-g) shift 2 ;;
+    *) filtered+=("$1"); shift ;;
+  esac
+done
+exec /usr/bin/install "${filtered[@]}"
 STUB
 cat >"$stub_bin/lspci" <<'STUB'
 #!/bin/bash
+[[ ${TEST_PCI_STATUS:-0} == 0 ]] || exit "$TEST_PCI_STATUS"
 (( ${TEST_T2_HARDWARE:-0} == 1 )) || exit 0
 printf '%s\n' '01:00.0 Bridge [0680]: Apple Inc. T2 Security Chip [106b:1801]'
 STUB
 cat >"$stub_bin/pacman-conf" <<'STUB'
 #!/bin/bash
-if [[ ${TEST_NATIVE_SIGLEVEL:-0} == 1 || " $* " == *" --repo arch-mact2 "* ]]; then
+if [[ ${TEST_NATIVE_SIGLEVEL:-0} == 1 || " $* " == *" --repo arch-mact2 "* || " $* " == *" --repo-list "* ]]; then
   exec /usr/bin/pacman-conf "$@"
 elif [[ " $* " == *" --repo omarchy "* ]]; then
   printf '%s\n' "${TEST_REPO_SIGLEVEL-${TEST_SIGLEVEL:-PackageRequired PackageTrustedOnly}}"
@@ -49,17 +53,26 @@ cat >"$stub_bin/pacman" <<'STUB'
 #!/bin/bash
 case $1 in
   -Q) [[ $2 == linux-t2 ]] ;;
+  -Qq)
+    [[ ${TEST_PACKAGE_QUERY_STATUS:-0} == 0 ]] || exit "$TEST_PACKAGE_QUERY_STATUS"
+    printf '%s\n' "${TEST_INSTALLED_PACKAGES-linux-t2}"
+    ;;
   -Si)
+    package=${2#omarchy/}
     repository=${TEST_REPOSITORY:-omarchy}
-    [[ ${TEST_MISSING_PACKAGE:-} != "$2" ]] || repository=core
+    [[ ${TEST_MISSING_PACKAGE:-} != "$package" ]] || repository=core
     printf 'Repository      : %s\n' "$repository"
     for ((line = 0; line < ${TEST_QUERY_PADDING_LINES:-0}; line++)); do
       printf 'Description     : metadata padding %s\n' "$line"
     done
-    [[ ${TEST_QUERY_FAIL_PACKAGE:-} != "$2" ]] || exit 44
+    [[ ${TEST_QUERY_FAIL_PACKAGE:-} != "$package" ]] || exit 44
     ;;
   -S)
     printf 'TRANSACTION %s\n' "$*" >>"${TEST_TRANSACTION_LOG:?}"
+    if [[ -n ${TEST_TX_GATE:-} ]]; then
+      touch "$TEST_TX_GATE.entered"
+      while [[ ! -e $TEST_TX_GATE.release ]]; do sleep 0.02; done
+    fi
     exit "${TEST_TRANSACTION_STATUS:-0}"
     ;;
   *) exit 2 ;;
@@ -70,6 +83,9 @@ chmod +x "$stub_bin"/*
 mapped_migration_template="$test_tmp/t2-migration.template.sh"
 sed -e "s#/usr/bin/pacman-conf#$stub_bin/pacman-conf#g" \
   -e "s#/usr/bin/pacman#$stub_bin/pacman#g" \
+  -e "s#/usr/bin/install#$stub_bin/install#g" \
+  -e "s#/usr/bin/sudo#$stub_bin/sudo#g" \
+  -e 's/EUID == 0/${TEST_MACHINE_EUID:-0} == 0/' \
   -e "s#/usr/bin/lspci#$stub_bin/lspci#g" "$t2_migration" >"$mapped_migration_template"
 
 run_t2_scenario() {
@@ -106,6 +122,8 @@ CONF
   sed \
     -e "s|^pacman_conf=/etc/pacman.conf$|pacman_conf=$dir/pacman.conf|" \
     -e "s|^repair_marker=/var/lib/omarchy/t2-package-provenance-repaired$|repair_marker=$dir/marker|" \
+    -e "s|/run/omarchy-t2-package-provenance.lock|$dir/machine.lock|" \
+    -e "s|/usr/share/omarchy/migrations/1788163636.sh|$dir/t2-migration.sh|" \
     "$mapped_migration_template" >"$dir/t2-migration.sh"
   HOME="$dir" PATH="$stub_bin:$PATH" TEST_REPO_SIGLEVEL="$repo_policy" \
     TEST_GLOBAL_SIGLEVEL="$global_policy" TEST_REPOSITORY="$repository" \
@@ -214,8 +232,10 @@ fi
 
 run_t2_scenario signed 'PackageRequired PackageTrustedOnly' omarchy
 transaction=$(<"$test_tmp/signed/transactions")
-[[ $transaction == *'linux-t2 linux-t2-headers apple-t2-audio-config apple-bcm-firmware t2fanrd'* ]] ||
+[[ $transaction == *'omarchy/linux-t2 omarchy/linux-t2-headers omarchy/apple-t2-audio-config omarchy/apple-bcm-firmware omarchy/t2fanrd'* ]] ||
   fail "T2 migration does not reinstall every replacement together"
+(( $(grep -c '^AUTH ' "$test_tmp/signed/transactions") == 1 )) ||
+  fail "T2 repair does not use a single authorized machine phase"
 [[ $transaction != *'--needed'* ]] || fail "T2 migration trusts bytes installed under SigLevel=Never"
 [[ -f $test_tmp/signed/marker ]] || fail "successful authenticated T2 replacement is not recorded"
 : >"$test_tmp/signed/transactions"
@@ -223,7 +243,7 @@ HOME="$test_tmp/signed" PATH="$stub_bin:$PATH" \
   TEST_REPO_SIGLEVEL='PackageRequired PackageTrustedOnly' \
   TEST_GLOBAL_SIGLEVEL='PackageRequired PackageTrustedOnly' TEST_REPOSITORY=omarchy \
   TEST_TRANSACTION_LOG="$test_tmp/signed/transactions" bash "$test_tmp/signed/t2-migration.sh" >/dev/null
-[[ ! -s $test_tmp/signed/transactions ]] || fail "completed T2 repair reinstalls packages again"
+[[ ! -s $test_tmp/signed/transactions ]] || fail "completed T2 repair prompts or reinstalls packages again"
 run_t2_scenario inherited '' omarchy '' 'PackageRequired PackageTrustedOnly'
 [[ -f $test_tmp/inherited/marker ]] || fail "T2 migration rejects a secure inherited global package policy"
 run_t2_scenario large 'PackageRequired PackageTrustedOnly' omarchy \
@@ -234,6 +254,74 @@ grep -q '^\[omarchy\]$' "$test_tmp/large/pacman.conf" ||
   fail "T2 migration left its root-owned pacman.conf stage behind"
 pass "T2 migration disables unsafe policy first and fails closed until all signed replacements exist"
 
+# The lock is the real util-linux implementation, but all filesystem effects
+# remain in the fixture and every privileged command is mapped above.
+gate="$test_tmp/two-users-gate"
+TEST_TX_GATE="$gate" run_t2_scenario two-users 'PackageRequired PackageTrustedOnly' omarchy &
+first_user=$!
+for ((attempt = 0; attempt < 250; attempt++)); do
+  [[ ! -e $gate.entered ]] || break
+  sleep 0.02
+done
+[[ -e $gate.entered ]] || fail "first user's machine transaction did not start"
+TEST_TRANSACTION_LOG="$test_tmp/two-users/transactions" \
+  bash -euo pipefail "$test_tmp/two-users/t2-migration.sh" >"$test_tmp/two-users/second-output" 2>&1 &
+second_user=$!
+for ((attempt = 0; attempt < 250; attempt++)); do
+  (( $(grep -c '^AUTH ' "$test_tmp/two-users/transactions") < 2 )) || break
+  sleep 0.02
+done
+(( $(grep -c '^AUTH ' "$test_tmp/two-users/transactions") == 2 )) ||
+  fail "second user did not reach the shared repair lock"
+(( $(grep -c '^TRANSACTION ' "$test_tmp/two-users/transactions") == 1 )) ||
+  fail "second user entered the transaction before the first finished"
+printf '# administrator edit during replacement\n' >>"$test_tmp/two-users/pacman.conf"
+touch "$gate.release"
+wait "$first_user"
+wait "$second_user"
+(( $(grep -c '^TRANSACTION ' "$test_tmp/two-users/transactions") == 1 )) ||
+  fail "two users ran overlapping T2 replacement transactions"
+grep -q '^# administrator edit during replacement$' "$test_tmp/two-users/pacman.conf" ||
+  fail "waiting migration overwrote the current administrator config"
+pass "two users serialize the machine repair and recheck completion under the lock"
+
+# The native parser discovers repositories whose entire section is included.
+# An unsafe custom layout needs administrator repair, never silent completion.
+included="$test_tmp/included-repository.conf"
+printf '[arch-mact2]\nSigLevel = Never\nServer = https://unsafe.invalid/\n' >"$included"
+printf '[options]\nSigLevel = Required DatabaseOptional\nInclude = %s\n[omarchy]\nSigLevel = Required DatabaseOptional\nServer = https://pkgs.omarchy.org/\n' "$included" >"$test_tmp/signed/pacman.conf"
+rm "$test_tmp/signed/marker"
+if TEST_TRANSACTION_LOG="$test_tmp/signed/transactions" \
+  bash -euo pipefail "$test_tmp/signed/t2-migration.sh" >"$test_tmp/included-repository.output" 2>&1; then
+  fail "unsafe repository in a custom include was silently accepted"
+fi
+grep -q 'defined in an included file' "$test_tmp/included-repository.output" ||
+  fail "custom included repository lacks recovery guidance"
+[[ ! -e $test_tmp/signed/marker ]] || fail "unresolved included repository published completion"
+pass "custom included unsafe repository fails with repair guidance"
+
+printf '[options]\nSigLevel = Required DatabaseOptional\n' >"$test_tmp/signed/pacman.conf"
+: >"$test_tmp/signed/transactions"
+TEST_INSTALLED_PACKAGES='' TEST_TRANSACTION_LOG="$test_tmp/signed/transactions" \
+  bash -euo pipefail "$test_tmp/signed/t2-migration.sh" >/dev/null
+[[ ! -s $test_tmp/signed/transactions ]] || fail "unaffected machine requires authorization"
+if TEST_PACKAGE_QUERY_STATUS=45 TEST_TRANSACTION_LOG="$test_tmp/signed/transactions" \
+  bash -euo pipefail "$test_tmp/signed/t2-migration.sh" >/dev/null 2>&1; then
+  fail "package discovery failure was treated as an unaffected machine"
+fi
+if TEST_INSTALLED_PACKAGES='' TEST_PCI_STATUS=46 TEST_TRANSACTION_LOG="$test_tmp/signed/transactions" \
+  bash -euo pipefail "$test_tmp/signed/t2-migration.sh" >/dev/null 2>&1; then
+  fail "PCI discovery failure was treated as an unaffected machine"
+fi
+[[ ! -s $test_tmp/signed/transactions ]] || fail "failed discovery reaches authorization"
+pass "unaffected machines skip authorization and discovery failures remain pending"
+
+: >"$test_tmp/database-optional/transactions"
+TEST_TRANSACTION_LOG="$test_tmp/database-optional/transactions" \
+  bash -euo pipefail "$test_tmp/database-optional/t2-migration.sh" >/dev/null
+[[ ! -s $test_tmp/database-optional/transactions ]] || fail "completed machine with safe custom repository prompts again"
+pass "completed machines preserve safe custom policy without another prompt"
+
 # Fresh installation cannot recreate the unsigned repository path.
 ! rg -n 'SigLevel[[:space:]]*=[[:space:]]*(Never|Optional)|TrustAll|arch-mact2-mirror' \
   "$ROOT/install/hardware/pacman.sh" "$ROOT/install/post-install/pacman.sh" >/dev/null ||
@@ -243,6 +331,7 @@ grep -F '/usr/bin/pacman-conf --repo omarchy SigLevel' "$ROOT/install/hardware/a
 mapped_fresh_setup="$test_tmp/fix-t2.mapped.sh"
 sed -e "s#/usr/bin/pacman-conf#$stub_bin/pacman-conf#g" \
   -e "s#/usr/bin/pacman#$stub_bin/pacman#g" \
+  -e "s#/usr/bin/lspci#$stub_bin/lspci#g" \
   "$ROOT/install/hardware/apple/fix-t2.sh" >"$mapped_fresh_setup"
 if TEST_T2_HARDWARE=1 TEST_REPO_SIGLEVEL='PackageRequired PackageTrustedOnly' \
   TEST_GLOBAL_SIGLEVEL='PackageRequired PackageTrustedOnly' TEST_REPOSITORY=omarchy \
@@ -256,6 +345,26 @@ grep -q "Authenticated T2 package 'linux-t2' is unavailable" "$test_tmp/fresh-qu
 grep -q 'cannot continue until all support packages are published' "$test_tmp/fresh-query-failure.output" ||
   fail "fresh T2 repository query omits release guidance"
 pass "fresh T2 setup independently enforces policy and reports failed large queries"
+
+mkdir -p "$test_tmp/fresh-system/etc"
+cat >"$stub_bin/systemctl" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+chmod +x "$stub_bin/systemctl"
+sed "s|/etc/|$test_tmp/fresh-system/etc/|g" "$mapped_fresh_setup" >"$test_tmp/fresh-setup.sh"
+TEST_T2_HARDWARE=1 TEST_TRANSACTION_LOG="$test_tmp/fresh-transactions" PATH="$stub_bin:$PATH" \
+  bash -euo pipefail -c 'source "$1"' bash "$test_tmp/fresh-setup.sh" >/dev/null
+grep -Fq 'TRANSACTION -S --noconfirm omarchy/linux-t2 omarchy/linux-t2-headers omarchy/apple-t2-audio-config omarchy/apple-bcm-firmware omarchy/t2fanrd' "$test_tmp/fresh-transactions" ||
+  fail "fresh setup transaction is not bound to the signed Omarchy repository"
+pass "fresh setup pins every transaction target to the verified repository"
+if TEST_PCI_STATUS=46 PATH="$stub_bin:$PATH" \
+  bash -euo pipefail -c 'source "$1"' bash "$test_tmp/fresh-setup.sh" >"$test_tmp/fresh-pci-failure.output" 2>&1; then
+  fail "fresh T2 setup silently ignores PCI discovery failure"
+fi
+grep -q 'Could not inspect PCI devices' "$test_tmp/fresh-pci-failure.output" ||
+  fail "fresh PCI discovery failure lacks guidance"
+pass "fresh setup reports PCI discovery failure instead of skipping T2 support"
 
 # A minimal unsigned local package under the final policy must be rejected by
 # real pacman. DatabaseOptional permits the unsigned database, never a package.
