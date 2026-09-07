@@ -62,9 +62,56 @@ read_private_install_log() {
   /usr/bin/cat -- "$path"
 }
 
-if [[ $LOG_TYPE == __read-private-install-log ]]; then
-  (($# == 2)) || exit 2
-  read_private_install_log "$2"
+same_or_prefix_log() {
+  local a="$1" b="$2" size_a size_b min_size
+  [[ -s $a && -s $b ]] || return 1
+  cmp -s "$a" "$b" && return 0
+
+  size_a=$(stat -c '%s' "$a" 2>/dev/null) || return 1
+  size_b=$(stat -c '%s' "$b" 2>/dev/null) || return 1
+  if (( size_a < size_b )); then
+    min_size=$size_a
+  else
+    min_size=$size_b
+  fi
+  (( min_size > 0 )) || return 1
+
+  cmp -n "$min_size" "$a" "$b" >/dev/null 2>&1
+}
+
+read_private_install_logs() {
+  local status live_found=0 target_found=0
+
+  # Validate both fixed inputs before emitting either. A later validation
+  # error must not turn a partial collection into a successful upload.
+  if read_private_install_log live >/dev/null; then
+    live_found=1
+  else
+    status=$?
+    ((status == 3)) || return 1
+  fi
+  if read_private_install_log target >/dev/null; then
+    target_found=1
+  else
+    status=$?
+    ((status == 3)) || return 1
+  fi
+  ((live_found || target_found)) || return 3
+
+  if ((live_found)); then
+    printf '\n========================================\nOMARCHY INSTALL LOG (/var/log/omarchy-install.log)\n========================================\n\n'
+    read_private_install_log live || return 1
+  fi
+  if ((target_found)) &&
+    { ((!live_found)) || ! same_or_prefix_log /var/log/omarchy-install.log /mnt/var/log/omarchy-install.log; }; then
+    printf '\n========================================\nTARGET OMARCHY INSTALL LOG (/mnt/var/log/omarchy-install.log)\n========================================\n\n'
+    read_private_install_log target || return 1
+  fi
+}
+
+if [[ $LOG_TYPE == __read-private-install-logs ]]; then
+  (($# == 1)) || exit 2
+  read_private_install_logs
   exit
 fi
 
@@ -144,36 +191,19 @@ else
   } >"$SYSTEM_INFO"
 fi
 
-same_or_prefix_log() {
-  local a="$1" b="$2" size_a size_b min_size
-  [[ -s $a && -s $b ]] || return 1
-  cmp -s "$a" "$b" && return 0
-
-  size_a=$(stat -c '%s' "$a" 2>/dev/null) || return 1
-  size_b=$(stat -c '%s' "$b" 2>/dev/null) || return 1
-  if (( size_a < size_b )); then
-    min_size=$size_a
-  else
-    min_size=$size_b
-  fi
-  (( min_size > 0 )) || return 1
-
-  cmp -n "$min_size" "$a" "$b" >/dev/null 2>&1
-}
-
-collect_private_install_log() {
-  local selector="$1" destination="$2" status
+collect_private_install_logs() {
+  local destination="$1" status
   if ((EUID == 0)); then
-    read_private_install_log "$selector" >"$destination"
-    return
-  elif /usr/bin/sudo -N -- /usr/bin/omarchy-upload-log __read-private-install-log "$selector" >"$destination"; then
+    read_private_install_logs >"$destination"
+    return 0
+  elif /usr/bin/sudo -N -- /usr/bin/omarchy-upload-log __read-private-install-logs >"$destination"; then
     return 0
   else
     status=$?
   fi
   /usr/bin/rm -f -- "$destination"
   ((status == 3)) && return 3
-  echo "Could not safely read the private Omarchy install log ($selector)." >&2
+  echo "Could not safely read the private Omarchy install logs." >&2
   return 1
 }
 
@@ -187,10 +217,8 @@ install)
   ARCHINSTALL_LOG="/var/log/archinstall/install.log"
   LIVE_OMARCHY_LOG="/var/log/omarchy-install.log"
   TARGET_OMARCHY_LOG="/mnt/var/log/omarchy-install.log"
-  LIVE_OMARCHY_COPY="$WORK_DIR/live-omarchy-install.log"
-  TARGET_OMARCHY_COPY="$WORK_DIR/target-omarchy-install.log"
-  live_found=0
-  target_found=0
+  PRIVATE_OMARCHY_COPY="$WORK_DIR/omarchy-install-logs.txt"
+  private_logs_found=0
 
   cat "$SYSTEM_INFO" >"$TEMP_LOG"
   if [[ -s $ARCHINSTALL_LOG ]]; then
@@ -198,31 +226,17 @@ install)
     cat "$ARCHINSTALL_LOG" >>"$TEMP_LOG"
   fi
 
-  if collect_private_install_log live "$LIVE_OMARCHY_COPY"; then
-    live_found=1
+  if collect_private_install_logs "$PRIVATE_OMARCHY_COPY"; then
+    private_logs_found=1
   else
     status=$?
     ((status == 3)) || exit 1
   fi
-  if collect_private_install_log target "$TARGET_OMARCHY_COPY"; then
-    target_found=1
-  else
-    status=$?
-    ((status == 3)) || exit 1
+  if ((private_logs_found)) && [[ -s $PRIVATE_OMARCHY_COPY ]]; then
+    cat "$PRIVATE_OMARCHY_COPY" >>"$TEMP_LOG"
   fi
 
-  if ((live_found)) && [[ -s $LIVE_OMARCHY_COPY ]]; then
-    printf '\n========================================\nOMARCHY INSTALL LOG (%s)\n========================================\n\n' "$LIVE_OMARCHY_LOG" >>"$TEMP_LOG"
-    cat "$LIVE_OMARCHY_COPY" >>"$TEMP_LOG"
-  fi
-
-  if ((target_found)) && [[ -s $TARGET_OMARCHY_COPY ]] &&
-    ! same_or_prefix_log "$LIVE_OMARCHY_COPY" "$TARGET_OMARCHY_COPY"; then
-    printf '\n========================================\nTARGET OMARCHY INSTALL LOG (%s)\n========================================\n\n' "$TARGET_OMARCHY_LOG" >>"$TEMP_LOG"
-    cat "$TARGET_OMARCHY_COPY" >>"$TEMP_LOG"
-  fi
-
-  if ((!live_found && !target_found)); then
+  if ((!private_logs_found)); then
     echo "Warning: omarchy install log not found (looked at /var/log and /mnt/var/log)" >&2
   fi
 

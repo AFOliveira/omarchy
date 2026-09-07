@@ -243,13 +243,13 @@ int main(int argc, char **argv) {
     if (fd < 0) return 121;
     close(fd);
   }
-  if (index + 2 < argc && !strcmp(argv[index], "/usr/bin/omarchy-upload-log") &&
-      !strcmp(argv[index + 1], "__read-private-install-log")) {
-    if (!strcmp(argv[index + 2], "live")) {
-      fputs("private install fixture\n", stdout);
-      return 0;
-    }
-    return !strcmp(argv[index + 2], "target") ? 3 : 2;
+  if (index + 1 < argc && !strcmp(argv[index], "/usr/bin/omarchy-upload-log") &&
+      !strcmp(argv[index + 1], "__read-private-install-logs")) {
+    const char *calls = need("TEST_SUDO_READER_CALLS");
+    fd = open(calls, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0 || write(fd, "1", 1) != 1 || close(fd)) return 122;
+    fputs("private install fixture\n", stdout);
+    return 0;
   }
   if (index >= argc) return 2;
   execv(argv[index], &argv[index]);
@@ -298,7 +298,7 @@ chmod 0755 "$proof/bin/omarchy-security-functions" "$proof/bin/omarchy-upload-lo
 
 run_upload() {
   local command=$1 expect_reuse=$2 waiter
-  rm -f "$proof/token" "$proof/root/victim" "$proof/home/"{collector,reused,pid,armed}
+  rm -f "$proof/token" "$proof/root/victim" "$proof/home/"{collector,reused,pid,armed,reader-calls}
   if ((expect_reuse == 0)); then
     : >"$proof/token"
     chown 1:1 "$proof/token"
@@ -310,6 +310,7 @@ run_upload() {
       TEST_SUDO="$proof/bin/sudo" TEST_SUDO_TOKEN="$proof/token" TEST_ROOT_VICTIM="$proof/root/victim" \
       TEST_COLLECTOR_RAN="$proof/home/collector" TEST_REUSED_SUDO="$proof/home/reused" \
       TEST_WAITER_ARMED="$proof/home/armed" TEST_WAITER_PID="$proof/home/pid" \
+      TEST_SUDO_READER_CALLS="$proof/home/reader-calls" \
       TEST_EXPECT_REUSE="$expect_reuse" "$command" install >/dev/null
   rm -f "$proof/home/armed"
   if [[ -s $proof/home/pid ]]; then
@@ -324,12 +325,14 @@ run_upload() {
 
 run_upload "$proof/bin/omarchy-upload-log" 0
 [[ -e $proof/home/collector && ! -e $proof/token && ! -e $proof/root/victim && ! -e $proof/home/reused ]]
+[[ $(wc -c <"$proof/home/reader-calls") == 1 ]]
 
 sed "s#$proof/bin/sudo -N --#$proof/bin/sudo --#" \
   "$proof/bin/omarchy-upload-log" >"$proof/bin/omarchy-upload-log-mutant"
 chmod 0755 "$proof/bin/omarchy-upload-log-mutant"
 run_upload "$proof/bin/omarchy-upload-log-mutant" 1
 [[ -e $proof/home/reused && -e $proof/root/victim ]]
+[[ $(wc -c <"$proof/home/reader-calls") == 1 ]]
 NAMESPACE
 pass "desktop upload uses cold no-update sudo and the mutation reopens the exploit"
 
