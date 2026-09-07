@@ -181,6 +181,9 @@ for db in "${DATABASE_OPTIONS[@]}"; do
   mapfile -d '' -t argv <"$argv_file"
   printf '%s\n' "${argv[@]}" | grep -qxF "${expected_port[$db]}" || fail "$db remains bound to host loopback"
   printf '%s\n' "${argv[@]}" | grep -qxF "$container" || fail "$db uses its stable named container"
+  if [[ $db == "MongoDB" ]]; then
+    [[ ${argv[-1]} == "mongo:7.0-jammy" ]] || fail "MongoDB uses the kernel-compatible maintained image series"
+  fi
   ! file_contains_secret "$argv_file" "$password" || fail "$db exposes its password in Docker argv"
   ! file_contains_secret "$output" "$password" || fail "$db exposes its password in command output"
   ! file_contains_secret "$DOCKER_CALL_LOG" "$password" || fail "$db exposes its password in the Docker call log"

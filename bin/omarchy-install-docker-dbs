@@ -369,7 +369,7 @@ install_database_locked() {
       ensure_env_credentials "$credential" MongoDB || return 1
       CREDENTIAL_READY=true
       run_with_env_credentials "$credential" \
-        -d --restart unless-stopped -p 127.0.0.1:27017:27017 --name mongodb mongo:noble
+        -d --restart unless-stopped -p 127.0.0.1:27017:27017 --name mongodb mongo:7.0-jammy
       ;;
     MariaDB)
       ensure_env_credentials "$credential" MariaDB || return 1
