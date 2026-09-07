@@ -44,6 +44,20 @@ omarchy_security_sanitize_bash_environment() {
   fi
 }
 
+omarchy_security_require_source_root() {
+  local command_source command_name=${1##*/}
+  command_source=$(/usr/bin/readlink -e -- "$1") || return 1
+
+  # A runtime root selects the code used by this invocation. Accept the
+  # canonical checkout containing the entrypoint or the package's bin links.
+  if [[ $OMARCHY_PATH != /* || $(/usr/bin/realpath -e -- "$OMARCHY_PATH") != "$OMARCHY_PATH" ]] ||
+    ! { [[ $command_source == "$OMARCHY_PATH/bin/$command_name" ]] ||
+      [[ $OMARCHY_PATH == "/usr/share/omarchy" && $command_source == "/usr/bin/$command_name" ]]; }; then
+    echo "OMARCHY_PATH does not match this Omarchy command." >&2
+    return 1
+  fi
+}
+
 omarchy_security_sudo_supports_no_update() {
   local help
   help=$(LC_ALL=C /usr/bin/sudo -h 2>&1) || return 1
