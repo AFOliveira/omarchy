@@ -31,7 +31,7 @@ passwd_file=/etc/passwd
 login_defs=/etc/login.defs
 machine_lock=/run/omarchy-sshd-key-only-migration.lock
 eligible_names=()
-usable_key_found=0
+keyed_names=()
 
 runtime_owner_mode=$(/usr/bin/stat -Lc '%u:%a:%F' -- /run) || exit 1
 [[ ! -L /run && $(/usr/bin/readlink -e -- /run) == /run && $runtime_owner_mode == "0:755:directory" ]] || {
@@ -49,13 +49,35 @@ exec {machine_lock_fd}>"$machine_lock"
 /usr/bin/flock -x "$machine_lock_fd"
 [[ $(/usr/bin/stat -Lc '%u:%a:%h' -- "$machine_lock") == "0:600:1" ]] || exit 1
 
-service_affected() {
-  /usr/bin/systemctl is-active --quiet sshd.service 2>/dev/null ||
-    /usr/bin/systemctl is-enabled --quiet sshd.service 2>/dev/null
+service_active_state() {
+  local state
+  state=$(/usr/bin/systemctl is-active sshd.service 2>/dev/null) || true
+  case "$state" in
+    active | activating | reloading | deactivating) return 0 ;;
+    inactive | failed) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+service_enabled_state() {
+  local state
+  state=$(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) || true
+  case "$state" in
+    enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient) return 0 ;;
+    disabled | masked | masked-runtime) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 disable_affected() {
-  service_affected || return 0
+  local active_status enabled_status
+  service_active_state && active_status=0 || active_status=$?
+  service_enabled_state && enabled_status=0 || enabled_status=$?
+  if (( active_status == 2 || enabled_status == 2 )); then
+    echo "Could not determine whether sshd.service is active or enabled; refusing to complete the SSH migration." >&2
+    return 1
+  fi
+  (( active_status == 0 || enabled_status == 0 )) || return 0
   /usr/bin/systemctl disable --now sshd.service || {
     echo "Could not disable SSH after key-only policy verification failed; rerun omarchy-migrate with administrator privileges." >&2
     exit 1
@@ -101,6 +123,56 @@ account_has_usable_key() {
   return 1
 }
 
+valid_account_name() {
+  [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}[$]?$ ]]
+}
+
+account_is_admitted() {
+  local name=$1 dump=$2 directive token status_line status account_groups group admitted
+  local -a values groups
+
+  status_line=$(LC_ALL=C /usr/bin/passwd -S -- "$name" 2>/dev/null) || return 1
+  read -r token status _ <<<"$status_line"
+  [[ $token == "$name" && ( $status == "P" || $status == "NP" ) ]] || return 1
+
+  account_groups=$(/usr/bin/id -Gn -- "$name" 2>/dev/null) || return 1
+  read -r -a groups <<<"$account_groups"
+  ((${#groups[@]} > 0)) || return 1
+  for group in "${groups[@]}"; do valid_account_name "$group" || return 1; done
+
+  for directive in allowusers denyusers allowgroups denygroups; do
+    mapfile -t values < <(/usr/bin/awk -v wanted="$directive" 'tolower($1) == wanted { for (i=2; i<=NF; i++) print $i }' <<<"$dump")
+    case "$directive" in
+      allowusers)
+        ((${#values[@]} == 0)) || {
+          admitted=0
+          for token in "${values[@]}"; do valid_account_name "$token" || return 1; [[ $token != "$name" ]] || admitted=1; done
+          ((admitted)) || return 1
+        }
+        ;;
+      denyusers)
+        for token in "${values[@]}"; do valid_account_name "$token" || return 1; [[ $token != "$name" ]] || return 1; done
+        ;;
+      allowgroups)
+        ((${#values[@]} == 0)) || {
+          admitted=0
+          for token in "${values[@]}"; do
+            valid_account_name "$token" || return 1
+            for group in "${groups[@]}"; do [[ $token != "$group" ]] || admitted=1; done
+          done
+          ((admitted)) || return 1
+        }
+        ;;
+      denygroups)
+        for token in "${values[@]}"; do
+          valid_account_name "$token" || return 1
+          for group in "${groups[@]}"; do [[ $token != "$group" ]] || return 1; done
+        done
+        ;;
+    esac
+  done
+}
+
 enumerate_login_accounts() {
   local uid_min=1000 line name password uid gid gecos home shell extra
   local configured_uid_min
@@ -109,13 +181,14 @@ enumerate_login_accounts() {
 
   while IFS= read -r line || [[ -n $line ]]; do
     IFS=: read -r name password uid gid gecos home shell extra <<<"$line"
-    [[ -z ${extra:-} && $name =~ ^[a-z_][a-z0-9_-]{0,31}$ && $uid =~ ^[0-9]+$ &&
+    [[ -z ${extra:-} && $uid =~ ^[0-9]+$ &&
       $home == /* ]] || return 1
+    valid_account_name "$name" || return 1
     (( uid == 0 || (uid >= uid_min && uid != 65534) )) || continue
     valid_login_shell "$shell" || continue
     eligible_names+=("$name")
     if account_has_usable_key "$name" "$uid" "$home"; then
-      usable_key_found=1
+      keyed_names+=("$name")
     fi
   done <"$passwd_file"
   ((${#eligible_names[@]} > 0))
@@ -150,12 +223,16 @@ dump_is_key_only() {
 }
 
 effective_is_key_only() {
-  local dump name
+  local dump name keyed admitted_key=0
   dump=$(/usr/bin/sshd -T) && dump_is_key_only "$dump" || return 1
   for name in "${eligible_names[@]}"; do
     dump=$(/usr/bin/sshd -T -C "user=$name,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22") || return 1
     dump_is_key_only "$dump" || return 1
+    for keyed in "${keyed_names[@]}"; do
+      if [[ $keyed == "$name" ]] && account_is_admitted "$name" "$dump"; then admitted_key=1; fi
+    done
   done
+  ((admitted_key))
 }
 
 # Only repair the exact two-directive file emitted by old Omarchy. Preserve an
@@ -170,7 +247,7 @@ if [[ -e $key_only_config || -L $key_only_config ]] && [[ ! -f $key_only_config 
   exit 0
 fi
 
-if ! enumerate_login_accounts || (( usable_key_found == 0 )) || ! precedence_is_provable; then
+if ! enumerate_login_accounts || ((${#keyed_names[@]} == 0)) || ! precedence_is_provable; then
   disable_affected
   exit 0
 fi
@@ -200,8 +277,12 @@ if ! /usr/bin/sshd -t || ! effective_is_key_only; then
   exit 0
 fi
 
-if /usr/bin/systemctl is-active --quiet sshd.service 2>/dev/null &&
-  ! /usr/bin/systemctl reload sshd.service; then
+service_active_state && active_status=0 || active_status=$?
+if (( active_status == 2 )); then
+  ((created)) && /usr/bin/rm -f "$key_only_config"
+  echo "Could not determine whether sshd.service is active; refusing to complete the SSH migration." >&2
+  exit 1
+elif (( active_status == 0 )) && ! /usr/bin/systemctl reload sshd.service; then
   disable_affected
   exit 0
 fi
