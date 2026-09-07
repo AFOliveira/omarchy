@@ -50,7 +50,7 @@ omarchy_security_require_source_root() {
 
   # A runtime root selects the code used by this invocation. Accept the
   # canonical checkout containing the entrypoint or the package's bin links.
-  if [[ $OMARCHY_PATH != /* || $(/usr/bin/realpath -e -- "$OMARCHY_PATH") != "$OMARCHY_PATH" ]] ||
+  if [[ ${OMARCHY_PATH:-} != /* || $(/usr/bin/realpath -e -- "$OMARCHY_PATH") != "$OMARCHY_PATH" ]] ||
     ! { [[ $command_source == "$OMARCHY_PATH/bin/$command_name" ]] ||
       [[ $OMARCHY_PATH == "/usr/share/omarchy" && $command_source == "/usr/bin/$command_name" ]]; }; then
     echo "OMARCHY_PATH does not match this Omarchy command." >&2
