@@ -46,8 +46,17 @@ validate_dev_checkout() {
 }
 
 link_dev_checkout() {
-  local checkout="$1"
+  local checkout="$1" required
   [[ -d $checkout/.git ]] || git clone https://github.com/basecamp/omarchy.git "$checkout"
+
+  # Check the destination before changing /etc/omarchy.conf or sudo's path.
+  # An existing checkout is not pulled automatically and may predate this policy.
+  for required in bin/omarchy-security-functions bin/omarchy-update bin/omarchy-refresh-pacman default/omarchy/sudo-no-update/sudo; do
+    if [[ ! -f $checkout/$required || ! -r $checkout/$required ||
+      ( $required != "bin/omarchy-security-functions" && ! -x $checkout/$required ) ]]; then
+      fail "Update the checkout before switching to dev; missing required update support in $required."
+    fi
+  done
 
   omarchy-dev-link "$checkout" --no-reboot
 }
