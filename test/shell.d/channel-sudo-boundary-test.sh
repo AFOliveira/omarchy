@@ -63,6 +63,18 @@ for channel in stable rc edge dev; do
 done
 
 reset_boundary
+wrapper="$SUDO_TEST_HOME/omarchy/default/omarchy/sudo-no-update/sudo"
+mv "$wrapper" "$boundary_tmp/saved-wrapper"
+if run_channel dev; then fail "an old checkout without the wrapper was accepted"; fi
+if grep -Eq '^step:omarchy-(dev-link|state)|^sudo -N ' "$SUDO_TEST_LOG"; then
+  fail "an incompatible dev checkout changed the system before rejection"
+fi
+grep -q 'Update the checkout before switching to dev' "$boundary_tmp/output" || fail "stale checkout rejection lacks recovery guidance"
+assert_boundary_cold "stale checkout"
+mv "$boundary_tmp/saved-wrapper" "$wrapper"
+pass "a stale dev checkout is rejected before linking or privileged work"
+
+reset_boundary
 OMARCHY_PATH="$SUDO_TEST_HOME/omarchy" run_channel stable || fail "leaving dev failed" "$(<"$boundary_tmp/output")"
 assert_scoped_channel "dev to stable"
 pass "leaving dev preserves no-update sudo through unlink and the packaged update"
