@@ -1,10 +1,23 @@
-#!/bin/bash
+#!/bin/bash -p
 
 # omarchy:summary=Manage sleep and idle inhibition during an update
 # omarchy:args=<start|stop>
 # omarchy:hidden=true
 
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
 set -e
+omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_require_source_root "$0"
+omarchy_security_revoke_sudo_timestamp || exit 1
+omarchy_security_install_sudo_cleanup_traps
+omarchy_security_enable_no_update_sudo
 
 stay_awake_state="$HOME/.local/state/omarchy/indicators/stay-awake"
 caller_uid=""
@@ -411,76 +424,99 @@ stop_locked() {
 }
 
 start_locked() {
-  local inhibit_pid=""
-  local inhibit_identity=""
-  local launch_identity=""
-  local launch_start_time=""
-  local launch_owner=""
-  local inhibit_start_time=""
-  local inhibit_owner=""
   local idle_owner="$$:$RANDOM:$RANDOM"
   local token=""
-  local inhibitor_published=0
+  local launcher_pid=""
+  local inhibit_record=""
+  local inhibit_pid=""
+  local inhibit_start_time=""
+  local inhibit_owner=""
+  local readiness_attempts=0
 
   stop_locked || return 1
   ensure_private_directory "$state_dir" || fail_state_boundary
 
-  if omarchy-cmd-present systemd-inhibit; then
-    token=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-    [[ $token =~ ^[0-9a-f]{32}$ ]] || return 1
+  token=$(LC_ALL=C /usr/bin/od -An -N16 -tx1 /dev/urandom | /usr/bin/tr -d ' \n')
+  [[ $token =~ ^[0-9a-f]{32}$ ]] || return 1
 
-    if [[ -n ${OMARCHY_UPDATE_LOCK_FD:-} ]]; then
-      systemd-inhibit \
-        --what=sleep:idle \
-        --who=omarchy-update \
-        --why="Omarchy update in progress [$token]" \
-        --mode=block \
-        sleep infinity >/dev/null 2>&1 {OMARCHY_UPDATE_LOCK_FD}>&- {state_lock_fd}>&- &
-    else
-      systemd-inhibit \
-        --what=sleep:idle \
-        --who=omarchy-update \
-        --why="Omarchy update in progress [$token]" \
-        --mode=block \
-        sleep infinity >/dev/null 2>&1 {state_lock_fd}>&- &
-    fi
-    inhibit_pid=$!
-    launch_identity=$(process_base_identity "$inhibit_pid" 2>/dev/null || true)
-    if [[ -n $launch_identity ]]; then
-      read -r launch_start_time launch_owner <<<"$launch_identity"
-    fi
+  # The unprivileged held process writes its own private identity record. exec -a
+  # preserves the random token in its final argv without retaining an extra shell
+  # or a terminal descriptor merely to make that identity observable.
+  local hold_command=(
+    /usr/bin/systemd-inhibit --what=sleep:idle --who=omarchy-update
+    --why="Omarchy update in progress [$token]" --mode=block
+    /usr/bin/setpriv --reuid "$caller_uid" --regid "$(/usr/bin/id -g)" --clear-groups
+    /usr/bin/bash -p -c '
+      set -e
+      umask 077
+      state_dir=$1
+      token=$2
+      owner=$3
+      expected="--why=Omarchy update in progress [$token]"
+      temporary=""
+      cleanup() { [[ -z $temporary ]] || /usr/bin/rm -f -- "$temporary"; }
+      trap cleanup EXIT
+      read -r process_stat <"/proc/$$/stat"
+      process_stat=${process_stat##*) }
+      read -r -a fields <<<"$process_stat"
+      temporary=$(/usr/bin/mktemp "$state_dir/.inhibit-pid.XXXXXXXX")
+      /usr/bin/chmod 600 "$temporary"
+      printf "1 %s %s %s %s\n" "$$" "${fields[19]}" "$owner" "$token" >"$temporary"
+      /usr/bin/mv -fT -- "$temporary" "$state_dir/inhibit-pid"
+      temporary=""
+      trap - EXIT
+      exec -a "$expected" /usr/bin/sleep infinity
+    ' omarchy-update-inhibitor "$state_dir" "$token" "$caller_uid"
+  )
 
-    for (( attempt = 0; attempt < 50; attempt++ )); do
-      inhibit_identity=$(process_identity "$inhibit_pid" "$token" 2>/dev/null || true)
-      [[ -n $inhibit_identity ]] && break
-      kill -0 "$inhibit_pid" 2>/dev/null || break
-      sleep 0.02
-    done
-    if [[ -n $inhibit_identity ]]; then
-      read -r inhibit_start_time inhibit_owner <<<"$inhibit_identity"
-      if ! atomic_write_state "$inhibit_pid_file" "1 $inhibit_pid $inhibit_start_time $inhibit_owner $token"; then
-        discard_launched_inhibitor "$inhibit_pid" "$inhibit_start_time" "$inhibit_owner" "$token"
-        return 1
-      fi
-      inhibitor_published=1
-    else
-      launch_identity=$(process_base_identity "$inhibit_pid" 2>/dev/null || true)
-      if [[ -n $launch_identity ]] && [[ $(process_state "$inhibit_pid" 2>/dev/null || true) != "Z" ]]; then
-        read -r launch_start_time launch_owner <<<"$launch_identity"
-        atomic_write_state "$inhibit_pid_file" "2 $inhibit_pid $launch_start_time $launch_owner $token" || true
-        return 1
-      fi
-      if [[ ! -e /proc/$inhibit_pid ]] || [[ $(process_state "$inhibit_pid" 2>/dev/null || true) == "Z" ]]; then
-        wait "$inhibit_pid" 2>/dev/null || true
-      else
-        return 1
-      fi
+  if (( EUID == 0 )); then
+    (
+      [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+      exec {state_lock_fd}>&-
+      exec "${hold_command[@]}"
+    ) &
+    launcher_pid=$!
+  elif [[ -t 0 ]]; then
+    if ! (
+      [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+      exec {state_lock_fd}>&-
+      exec /usr/bin/sudo -N -b -- "${hold_command[@]}"
+    ); then
+      return 1
     fi
+  else
+    (
+      [[ -z ${OMARCHY_UPDATE_LOCK_FD:-} ]] || exec {OMARCHY_UPDATE_LOCK_FD}>&-
+      exec {state_lock_fd}>&-
+      exec /usr/bin/pkexec "${hold_command[@]}"
+    ) &
+    launcher_pid=$!
   fi
+
+  while :; do
+    inhibit_record=$(read_state_record "$inhibit_pid_file" 2>/dev/null || true)
+    if [[ $inhibit_record =~ ^1\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9]{1,10})\ ($token)$ ]]; then
+      inhibit_pid="${BASH_REMATCH[1]}"
+      inhibit_start_time="${BASH_REMATCH[2]}"
+      inhibit_owner="${BASH_REMATCH[3]}"
+      process_matches "$inhibit_pid" "$inhibit_start_time" "$inhibit_owner" "$token" && break
+    fi
+    if [[ -n $launcher_pid ]] && ! kill -0 "$launcher_pid" 2>/dev/null; then
+      wait "$launcher_pid" || return 1
+      echo "The update sleep inhibitor did not start." >&2
+      return 1
+    fi
+    (( readiness_attempts += 1 ))
+    if [[ -t 0 ]] && (( EUID != 0 && readiness_attempts >= 100 )); then
+      echo "The update sleep inhibitor did not become ready." >&2
+      return 1
+    fi
+    /usr/bin/sleep 0.05
+  done
 
   if [[ ! -f $stay_awake_state ]]; then
     if ! atomic_write_state "$idle_owner_file" "$idle_owner"; then
-      (( inhibitor_published == 0 )) || stop_locked || true
+      stop_locked || true
       return 1
     fi
     if ! mkdir -p "$(dirname "$stay_awake_state")"; then
@@ -491,7 +527,7 @@ start_locked() {
       if ! printf '%s\n' "$idle_owner" >"$stay_awake_state"; then
         omarchy-toggle-idle allow-idle >/dev/null 2>&1 || true
         rm -f -- "$idle_owner_file"
-        (( inhibitor_published == 0 )) || stop_locked || true
+        stop_locked || true
         return 1
       fi
     else

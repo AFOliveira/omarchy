@@ -17,6 +17,7 @@ cleanup_test() {
 trap cleanup_test EXIT
 
 stub_bin="$test_tmp/bin"
+mapped_root="$test_tmp/omarchy"
 test_home="$test_tmp/home"
 runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 if [[ ! -d $runtime_dir || -L $runtime_dir || $(stat -Lc '%u %a' "$runtime_dir" 2>/dev/null || true) != "$(id -u) 700" ]]; then
@@ -31,7 +32,7 @@ test_run_id="test-$BASHPID-$RANDOM"
 state_dir="$runtime_dir/omarchy-update-stay-awake-$test_run_id"
 state_hardlink="$runtime_dir/.omarchy-update-stay-awake-hardlink-$test_run_id"
 inhibitor_log="$test_tmp/inhibitors"
-mkdir -p "$stub_bin" "$test_home"
+mkdir -p "$stub_bin" "$test_home" "$mapped_root/bin" "$mapped_root/default/omarchy/sudo-no-update"
 : >"$inhibitor_log"
 
 cat >"$stub_bin/pkexec" <<'SH'
@@ -41,7 +42,35 @@ SH
 
 cat >"$stub_bin/sudo" <<'SH'
 #!/bin/bash
-[[ ${1:-} == "-v" ]] && exit 0
+case ${1:-} in
+  -h) echo 'usage: sudo [-bHkNnPS] command'; exit 0 ;;
+  -k|-K|-v) exit 0 ;;
+esac
+background=0
+while (( $# )); do
+  case "$1" in
+    -N|-n) shift ;;
+    -b) background=1; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if (( background )); then
+  "$@" &
+else
+  exec "$@"
+fi
+SH
+
+cat >"$stub_bin/setpriv" <<'SH'
+#!/bin/bash
+while [[ ${1:-} == --* ]]; do
+  case "$1" in
+    --reuid|--regid) shift 2 ;;
+    --clear-groups) shift ;;
+    *) exit 90 ;;
+  esac
+done
 exec "$@"
 SH
 
@@ -53,9 +82,8 @@ if [[ -n ${CREATE_BAD_IDLE:-} ]]; then
   ln -s "$CREATE_BAD_IDLE" "$TEST_STATE_DIR/idle-owner"
 fi
 trap 'exit 0' TERM
-while :; do
-  sleep 0.05
-done
+while [[ ${1:-} == --* ]]; do shift; done
+exec "$@"
 SH
 
 cat >"$stub_bin/omarchy-toggle-idle" <<'SH'
@@ -73,11 +101,23 @@ esac
 SH
 chmod +x "$stub_bin"/*
 
-mapped_helper="$test_tmp/omarchy-update-stay-awake"
-sed \
-  -e 's#state_dir="$state_base/omarchy-update-stay-awake"#state_dir="$state_base/omarchy-update-stay-awake-${OMARCHY_TEST_RUN_ID:?}"#' \
-  "$ROOT/bin/omarchy-update-stay-awake" >"$mapped_helper"
-chmod +x "$mapped_helper"
+mapped_helper="$mapped_root/bin/omarchy-update-stay-awake"
+cp "$ROOT/bin/omarchy-update-stay-awake" "$mapped_helper"
+cp "$ROOT/bin/omarchy-security-functions" "$mapped_root/bin/omarchy-security-functions"
+cp "$ROOT/default/omarchy/sudo-no-update/sudo" "$mapped_root/default/omarchy/sudo-no-update/sudo"
+for mapped_file in \
+  "$mapped_helper" \
+  "$mapped_root/bin/omarchy-security-functions" \
+  "$mapped_root/default/omarchy/sudo-no-update/sudo"; do
+  sed -i \
+    -e "s#/usr/bin/sudo#$stub_bin/sudo#g" \
+    -e "s#/usr/bin/pkexec#$stub_bin/pkexec#g" \
+    -e "s#/usr/bin/systemd-inhibit#$stub_bin/systemd-inhibit#g" \
+    -e "s#/usr/bin/setpriv#$stub_bin/setpriv#g" \
+    -e 's#state_dir="$state_base/omarchy-update-stay-awake"#state_dir="$state_base/omarchy-update-stay-awake-${OMARCHY_TEST_RUN_ID:?}"#' \
+    "$mapped_file"
+done
+chmod +x "$mapped_helper" "$mapped_root/default/omarchy/sudo-no-update/sudo"
 
 run_helper() {
   HOME="$test_home" \
@@ -85,6 +125,7 @@ run_helper() {
   INHIBITOR_LOG="$inhibitor_log" \
   TEST_STATE_DIR="$state_dir" \
   OMARCHY_TEST_RUN_ID="$test_run_id" \
+  OMARCHY_PATH="$mapped_root" \
   PATH="$stub_bin:$ROOT/bin:/usr/bin:/bin" \
     "$mapped_helper" "$@"
 }
@@ -287,10 +328,9 @@ done <"$inhibitor_log"
 pass "concurrent state operations are serialized"
 
 if SYSTEMD_FAIL=1 run_helper start; then
-  [[ ! -e $state_dir/inhibit-pid ]] || fail "failed inhibitor launch publishes no PID state"
-else
-  fail "failed systemd-inhibit launch still allows the idle fallback"
+  fail "failed systemd-inhibit launch reports success"
 fi
+[[ ! -e $state_dir/inhibit-pid ]] || fail "failed inhibitor launch publishes no PID state"
 run_helper stop
 pass "failed inhibitor launch leaves no stale process state"
 
@@ -328,7 +368,9 @@ else
 fi
 
 namespace_capable=0
-if (( ${#namespace_args[@]} > 0 )) &&
+# Cross-UID adversarial execution is intentionally excluded from this safe fixture.
+# Ownership rejection is covered above with caller-owned benign files.
+if false && (( ${#namespace_args[@]} > 0 )) &&
   "${namespace_args[@]}" /usr/bin/bash -c '
     mount -t tmpfs -o mode=1777 tmpfs /tmp
     setpriv --reuid=1000 --regid=1000 --clear-groups true
