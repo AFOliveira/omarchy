@@ -11,16 +11,13 @@ export OMARCHY_UPDATE_LOGGED=1
 # source the library beside the resolved command instead of this file.
 mkdir "$boundary_tmp/links"
 printf '%s\n' 'touch "$SUDO_TEST_HOME/wrong-library"' >"$boundary_tmp/links/omarchy-security-functions"
-for command in omarchy-update omarchy-refresh-pacman omarchy-update-stay-awake omarchy-channel-set omarchy-update-restart; do
+for command in omarchy-update omarchy-refresh-pacman omarchy-update-stay-awake omarchy-channel-set; do
   rm -f "$SUDO_TEST_ROOT/bin/$command"
   copy_boundary_file "bin/$command"
   ln -s "$SUDO_TEST_ROOT/bin/$command" "$boundary_tmp/links/$command"
   reset_boundary
   args=(unexpected)
-  case "$command" in
-    omarchy-update) args=(-y) ;;
-    omarchy-update-restart) args=(--services-only) ;;
-  esac
+  [[ $command != "omarchy-update" ]] || args=(-y)
   status=0
   "$boundary_tmp/links/$command" "${args[@]}" >"$boundary_tmp/output" 2>&1 || status=$?
   [[ ! -e $SUDO_TEST_HOME/wrong-library ]] || fail "$command sourced a library beside its symlink"

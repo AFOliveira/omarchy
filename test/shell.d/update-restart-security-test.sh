@@ -157,6 +157,17 @@ BASH_ENV="$boundary_tmp/startup" ENV="$boundary_tmp/startup" run_restart --servi
 assert_boundary_cold "sanitized restart"
 pass "inherited startup files do not run in restart handling or its helpers"
 
+reset_restart
+mkdir "$boundary_tmp/restart-links"
+ln -s "$SUDO_TEST_ROOT/bin/omarchy-update-restart" "$boundary_tmp/restart-links/omarchy-update-restart"
+printf '%s\n' 'touch "$SUDO_TEST_HOME/wrong-library"' >"$boundary_tmp/restart-links/omarchy-security-functions"
+touch "$state_dir/restart-bluetooth-required"
+"$boundary_tmp/restart-links/omarchy-update-restart" --services-only >"$boundary_tmp/output" 2>&1 || fail "symlink invocation failed"
+[[ ! -e $SUDO_TEST_HOME/wrong-library ]] || fail "restart handling sourced a library beside its invocation link"
+[[ ! -e $state_dir/restart-bluetooth-required ]] || fail "symlink invocation did not run the supported restart"
+assert_boundary_cold "symlinked restart command"
+pass "symlink invocation loads the library beside the canonical restart command"
+
 for mode in all --reboot-only; do
   reset_restart
   touch "$state_dir/restart-bluetooth-required" "$state_dir/reboot-required"
