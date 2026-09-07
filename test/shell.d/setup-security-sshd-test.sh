@@ -86,7 +86,10 @@ esac
 SH
 chmod +x "$stub"/*
 
-mapped_sshd="$tmp/omarchy-setup-security-sshd"
+mapped_root="$tmp/omarchy"
+mkdir -p "$mapped_root/bin"
+sed "s#/usr/bin/sudo#$stub/sudo#g" "$ROOT/bin/omarchy-security-functions" >"$mapped_root/bin/omarchy-security-functions"
+mapped_sshd="$mapped_root/bin/omarchy-setup-security-sshd"
 sed \
   -e "s#/usr/bin/getent#$stub/getent#g" \
   -e "s#/usr/bin/id#$stub/id#g" \
@@ -97,7 +100,7 @@ sed \
   -e "s#/usr/bin/gum#$stub/gum#g" \
   -e "s#/usr/bin/mv#$stub/mv#g" \
   "$ROOT/bin/omarchy-setup-security-sshd" >"$mapped_sshd"
-chmod 0755 "$mapped_sshd"
+chmod 0755 "$mapped_root/bin/"*
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/key"
 key=$(<"$tmp/key.pub")
@@ -110,7 +113,7 @@ run() {
   [[ ${PRE_ACTIVE:-0} != 1 ]] || touch "$d/state/active"
   [[ ${PRE_ENABLED:-0} != 1 ]] || touch "$d/state/enabled"
   [[ ${PRE_RULE:-0} != 1 ]] || touch "$d/state/rule"
-  env HOME="$d/home" PATH="$stub:/usr/bin" FAKE_ROOT="$d/root" STATE="$d/state" EVENTS="$d/events" USER=audit TEST_UID="$test_uid" \
+  env HOME="$d/home" PATH="$stub:/usr/bin" OMARCHY_PATH="$mapped_root" FAKE_ROOT="$d/root" STATE="$d/state" EVENTS="$d/events" USER=audit TEST_UID="$test_uid" \
     PACKAGE_FAIL="${PACKAGE_FAIL:-0}" GH_FAIL="${GH_FAIL:-0}" GH_KEYS="${GH_KEYS:-}" GUM_CHOICE="${GUM_CHOICE:-}" GUM_INPUT="${GUM_INPUT:-}" GUM_CANCEL="${GUM_CANCEL:-0}" \
     START_FAIL="${START_FAIL:-0}" START_PARTIAL="${START_PARTIAL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" ENABLE_PARTIAL="${ENABLE_PARTIAL:-0}" RELOAD_ONCE="${RELOAD_ONCE:-0}" RELOAD_ALWAYS_FAIL="${RELOAD_ALWAYS_FAIL:-0}" \
     HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" DUMP_FAIL="${DUMP_FAIL:-0}" PASS_AUTH="${PASS_AUTH:-no}" KBD_AUTH="${KBD_AUTH:-no}" AUTH_METHODS="${AUTH_METHODS:-publickey}" PUBKEY_AUTH="${PUBKEY_AUTH:-yes}" AUTHORIZED_KEYS_SETTING="${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}" \

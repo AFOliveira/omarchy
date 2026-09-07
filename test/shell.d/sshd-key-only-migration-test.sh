@@ -1,71 +1,62 @@
 #!/bin/bash
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
-t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
-b="$t/bin"; mkdir "$b"
-test_uid=$(/usr/bin/id -u)
+require_command unshare
+t=$(mktemp -d); trap 'rm -rf -- "$t"' EXIT
+
+unshare --user --map-root-user --mount /usr/bin/bash -s "$ROOT" "$t" <<'NAMESPACE'
+set -euo pipefail
+repo=$1 t=$2; b="$t/bin"; mapped="$t/omarchy"; mkdir -p "$b" "$mapped/bin" "$t/run"; chmod 0755 "$t/run"
 cat >"$b/systemctl" <<'SH'
 #!/bin/bash
-echo "systemctl $*" >>"$LOG"
-case $1 in is-active) [[ -e $STATE/active ]];; is-enabled) [[ -e $STATE/enabled ]];; reload) [[ ${RELOAD_FAIL:-0} != 1 ]];; disable) rm -f "$STATE/active" "$STATE/enabled";; esac
+echo "systemctl $*" >>"$EVENTS"
+case $1 in
+is-active) [[ -e $STATE/active ]] && exit 0 || exit 1;; is-enabled) [[ -e $STATE/enabled ]] && exit 0 || exit 1;;
+reload) if [[ ${SLOW_RELOAD:-0} == 1 ]]; then mkdir "$STATE/held" 2>/dev/null || touch "$STATE/overlap"; sleep .15; rmdir "$STATE/held" 2>/dev/null || true; fi; [[ ${RELOAD_FAIL:-0} != 1 ]];;
+disable) rm -f "$STATE/active" "$STATE/enabled";; esac
 SH
 cat >"$b/ssh-keygen" <<'SH'
 #!/bin/bash
-[[ $1 != -A ]] || { echo hostkeys >>"$LOG"; exit "${HOSTKEY_FAIL:-0}"; }
+[[ ${1:-} != -A ]] || { echo hostkeys >>"$EVENTS"; exit "${HOSTKEY_FAIL:-0}"; }
 exec /usr/bin/ssh-keygen "$@"
 SH
 cat >"$b/sshd" <<'SH'
 #!/bin/bash
-[[ $1 != -t ]] || exit "${T_FAIL:-0}"
-if [[ " $* " == *' -C '* ]]; then echo "PasswordAuthentication ${MATCH_PASS_AUTH:-${PASS_AUTH:-no}}"; else echo "PasswordAuthentication ${PASS_AUTH:-no}"; fi
-echo 'KbdInteractiveAuthentication no'
-echo 'AuthenticationMethods publickey'
-echo 'PubkeyAuthentication yes'
-echo 'AuthorizedKeysFile .ssh/authorized_keys'
+[[ ${1:-} != -t ]] || exit "${T_FAIL:-0}"
+user=; for arg in "$@"; do [[ $arg != user=* ]] || { user=${arg#user=}; user=${user%%,*}; }; done
+password=no; [[ -z ${MATCH_BAD_USER:-} || $user != "$MATCH_BAD_USER" ]] || password=yes
+echo "PasswordAuthentication $password"; echo 'KbdInteractiveAuthentication no'; echo 'AuthenticationMethods publickey'; echo 'PubkeyAuthentication yes'; echo 'AuthorizedKeysFile .ssh/authorized_keys'
 SH
-cat >"$b/sudo" <<'SH'
-#!/bin/bash
-if [[ $1 == install ]]; then [[ ${INSTALL_FAIL:-0} != 1 ]] || exit 1; a=("$@"); d=${a[-1]}; mkdir -p "${d%/*}"; exec /usr/bin/install -m0644 "${a[-2]}" "$d"; fi
-exec "$@"
-SH
-cat >"$b/id" <<'SH'
-#!/bin/bash
-echo "${TEST_UID:?}"
-SH
-cat >"$b/getent" <<'SH'
-#!/bin/bash
-echo "audit:x:${TEST_UID:?}:${TEST_UID}:Audit:${PASSWD_HOME:?}:/bin/bash"
-SH
-cat >"$b/stat" <<'SH'
-#!/bin/bash
-if [[ ${FOREIGN_KEY_OWNER:-0} == 1 && $* == *"%u"* && ${*: -1} == */authorized_keys ]]; then echo 9999; else exec /usr/bin/stat "$@"; fi
-SH
-chmod +x "$b"/*
-ssh-keygen -q -t ed25519 -N '' -f "$t/key"
-key=$(<"$t/key.pub")
-run_migration() {
-  local n=$1; local d="$t/$n"; mkdir -p "$d/home/.ssh" "$d/etc/ssh/sshd_config.d" "$d/state"; [[ -e $d/etc/ssh/sshd_config ]] || echo 'Include /etc/ssh/sshd_config.d/*.conf' >"$d/etc/ssh/sshd_config"; : >"$d/log"
-  [[ ${NO_KEY:-0} == 1 ]] || printf '%s\n' "${MIGRATION_KEY:-$key}" >"$d/home/.ssh/authorized_keys"
-  chmod 700 "$d/home" "$d/home/.ssh"; [[ ! -e $d/home/.ssh/authorized_keys ]] || chmod 600 "$d/home/.ssh/authorized_keys"
-  if [[ ${SYMLINK_SSH:-0} == 1 ]]; then mv "$d/home/.ssh" "$d/home/ssh-real"; ln -s ssh-real "$d/home/.ssh"; fi
-  [[ ${ACTIVE:-0} != 1 ]] || touch "$d/state/active"; [[ ${ENABLED:-0} != 1 ]] || touch "$d/state/enabled"
-  [[ ${ADMIN_LEGACY:-0} == 1 ]] && echo 'PasswordAuthentication yes' >"$d/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" || printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >"$d/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"
-  sed -e "s#^legacy_config=.*#legacy_config=$d/etc/ssh/sshd_config.d/10-omarchy-hardening.conf#" -e "s#^key_only_config=.*#key_only_config=$d/etc/ssh/sshd_config.d/00-omarchy-key-only.conf#" -e "s#^main_config=.*#main_config=$d/etc/ssh/sshd_config#" -e "s#^dropin_dir=.*#dropin_dir=$d/etc/ssh/sshd_config.d#" -e "s#/usr/bin/id#$b/id#g" -e "s#/usr/bin/getent#$b/getent#g" -e "s#/usr/bin/stat#$b/stat#g" "$ROOT/migrations/1788163637.sh" |
-    HOME="$d/home" PATH="$b:/usr/bin" LOG="$d/log" STATE="$d/state" TEST_UID="$test_uid" PASSWD_HOME="${PASSWD_HOME_OVERRIDE:-$d/home}" FOREIGN_KEY_OWNER="${FOREIGN_KEY_OWNER:-0}" PASS_AUTH="${PASS_AUTH:-no}" MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" RELOAD_FAIL="${RELOAD_FAIL:-0}" INSTALL_FAIL="${INSTALL_FAIL:-0}" bash
-}
-ACTIVE=1 ENABLED=1 run_migration active
-[[ -f $t/active/etc/ssh/sshd_config.d/00-omarchy-key-only.conf && ! -e $t/active/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]]; grep -q 'systemctl reload' "$t/active/log"
-ENABLED=1 run_migration stopped; ! grep -q 'systemctl reload' "$t/stopped/log"; [[ -e $t/stopped/state/enabled ]]
-NO_KEY=1 ACTIVE=1 ENABLED=1 run_migration no-key; [[ ! -e $t/no-key/state/active && ! -e $t/no-key/state/enabled ]]
-MIGRATION_KEY=invalid ACTIVE=1 run_migration invalid-key; [[ ! -e $t/invalid-key/state/active ]]
-FOREIGN_KEY_OWNER=1 ACTIVE=1 ENABLED=1 run_migration foreign-owner; [[ ! -e $t/foreign-owner/state/active && ! -e $t/foreign-owner/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
-SYMLINK_SSH=1 ACTIVE=1 run_migration symlink-ssh; [[ ! -e $t/symlink-ssh/state/active ]]
-PASSWD_HOME_OVERRIDE="$t/home-mismatch/elsewhere" ACTIVE=1 run_migration home-mismatch; [[ ! -e $t/home-mismatch/state/active ]]
-mkdir -p "$t/ambiguous/etc/ssh"; printf 'PasswordAuthentication yes\nInclude /etc/ssh/sshd_config.d/*.conf\n' >"$t/ambiguous/etc/ssh/sshd_config"; ACTIVE=1 run_migration ambiguous; [[ ! -e $t/ambiguous/state/active ]]
-PASS_AUTH=yes ACTIVE=1 run_migration match-bypass; [[ ! -e $t/match-bypass/state/active && ! -e $t/match-bypass/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
-MATCH_PASS_AUTH=yes ACTIVE=1 run_migration matched-only; [[ ! -e $t/matched-only/state/active && ! -e $t/matched-only/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
-RELOAD_FAIL=1 ACTIVE=1 ENABLED=1 run_migration reload-fail; [[ ! -e $t/reload-fail/state/active && ! -e $t/reload-fail/state/enabled && -e $t/reload-fail/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
-ADMIN_LEGACY=1 ACTIVE=1 run_migration admin; grep -qxF 'PasswordAuthentication yes' "$t/admin/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; [[ -e $t/admin/state/active ]]
-if INSTALL_FAIL=1 ACTIVE=1 run_migration install-fail; then fail 'migration install failure completes'; fi; [[ -e $t/install-fail/state/active ]]
-run_migration idempotent; run_migration idempotent
-pass "key-only SSH migration repairs, disables, preserves, rolls back, and reruns safely"
+chmod 0755 "$b"/*; cp "$repo/bin/omarchy-security-functions" "$mapped/bin/"
+sed -e "s#legacy_config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf#legacy_config=\$TEST_ROOT/etc/ssh/sshd_config.d/10-omarchy-hardening.conf#" \
+ -e "s#key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf#key_only_config=\$TEST_ROOT/etc/ssh/sshd_config.d/00-omarchy-key-only.conf#" \
+ -e "s#main_config=/etc/ssh/sshd_config#main_config=\$TEST_ROOT/etc/ssh/sshd_config#" -e "s#dropin_dir=/etc/ssh/sshd_config.d#dropin_dir=\$TEST_ROOT/etc/ssh/sshd_config.d#" \
+ -e "s#passwd_file=/etc/passwd#passwd_file=\$TEST_ROOT/etc/passwd#" -e "s#login_defs=/etc/login.defs#login_defs=\$TEST_ROOT/etc/login.defs#" \
+ -e "s#machine_lock=/run/omarchy-sshd-key-only-migration.lock#machine_lock=$t/run/lock#" \
+ -e "s#-- /run#-- $t/run#g" -e "s#-L /run#-L $t/run#g" -e "s#== /run#== $t/run#g" \
+ -e "s#/usr/bin/systemctl#$b/systemctl#g" -e "s#/usr/bin/ssh-keygen#$b/ssh-keygen#g" -e "s#/usr/bin/sshd#$b/sshd#g" \
+ "$repo/bin/omarchy-migrate-sshd-key-only" >"$mapped/bin/omarchy-migrate-sshd-key-only"; chmod 0755 "$mapped/bin/"*
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/key"; key=$(<"$t/key.pub")
+prepare() { local d="$t/$1"; mkdir -p "$d/root/etc/ssh/sshd_config.d" "$d/root/home/keyed/.ssh" "$d/root/home/later" "$d/state"; chmod 700 "$d/root/home/"{keyed,keyed/.ssh,later}; printf '%s\n' "$key" >"$d/root/home/keyed/.ssh/authorized_keys"; chmod 600 "$d/root/home/keyed/.ssh/authorized_keys"; cat >"$d/root/etc/passwd" <<EOF
+root:x:0:0:root:/root:/usr/bin/nologin
+keyed:x:1000:1000:Keyed:$d/root/home/keyed:/usr/bin/bash
+later:x:1001:1001:Later:$d/root/home/later:/usr/bin/bash
+daemon:x:2:2:Daemon:/sbin:/usr/bin/nologin
+EOF
+ echo 'UID_MIN 1000' >"$d/root/etc/login.defs"; echo 'Include /etc/ssh/sshd_config.d/*.conf' >"$d/root/etc/ssh/sshd_config"; printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >"$d/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; : >"$d/events"; }
+run() { TEST_ROOT="$t/$1/root" STATE="$t/$1/state" EVENTS="$t/$1/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" SLOW_RELOAD="${SLOW_RELOAD:-0}" RELOAD_FAIL="${RELOAD_FAIL:-0}" HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" "$mapped/bin/omarchy-migrate-sshd-key-only"; }
+prepare shared; touch "$t/shared/state/"{active,enabled}; run shared; run shared; [[ -e $t/shared/state/active ]]; ! grep -q 'systemctl disable' "$t/shared/events"
+prepare no-key; rm "$t/no-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/no-key/state/"{active,enabled}; run no-key; [[ ! -e $t/no-key/state/active ]]
+prepare matched; touch "$t/matched/state/"{active,enabled}; MATCH_BAD_USER=later run matched; [[ ! -e $t/matched/state/active ]]
+prepare symlink-key; mv "$t/symlink-key/root/home/keyed/.ssh/authorized_keys" "$t/symlink-key/root/home/key"; ln -s ../key "$t/symlink-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/symlink-key/state/"{active,enabled}; run symlink-key; [[ ! -e $t/symlink-key/state/active ]]
+prepare stopped; touch "$t/stopped/state/enabled"; run stopped; [[ -e $t/stopped/state/enabled ]]; ! grep -q 'systemctl reload' "$t/stopped/events"
+prepare reload-fail; touch "$t/reload-fail/state/"{active,enabled}; RELOAD_FAIL=1 run reload-fail; [[ ! -e $t/reload-fail/state/active && ! -e $t/reload-fail/state/enabled && -e $t/reload-fail/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
+prepare syntax-fail; touch "$t/syntax-fail/state/"{active,enabled}; T_FAIL=1 run syntax-fail; [[ ! -e $t/syntax-fail/state/active && ! -e $t/syntax-fail/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
+prepare concurrent; touch "$t/concurrent/state/"{active,enabled}; SLOW_RELOAD=1 run concurrent & a=$!; SLOW_RELOAD=1 run concurrent & c=$!; wait "$a"; wait "$c"; [[ ! -e $t/concurrent/state/overlap ]]
+prepare admin; echo 'PasswordAuthentication yes' >"$t/admin/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; touch "$t/admin/state/"{active,enabled}; before=$(sha256sum "$t/admin/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"); run admin; after=$(sha256sum "$t/admin/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"); [[ $before == "$after" && -e $t/admin/state/active && ! -s $t/admin/events ]]
+if /usr/bin/bash "$mapped/bin/omarchy-migrate-sshd-key-only" -p >/dev/null 2>&1; then exit 1; fi
+NAMESPACE
+pass "machine SSH migration preserves shared access, validates all users, serializes, and fails closed"
+grep -qF '/usr/bin/sudo -N -- /usr/bin/omarchy-migrate-sshd-key-only' "$ROOT/migrations/1788163637.sh" || fail "migration lacks fixed machine dispatch"
+! grep -Eq 'authorized_keys|getent passwd|/usr/bin/id -u' "$ROOT/migrations/1788163637.sh" || fail "migration still uses invoking-user state"
+pass "per-user migration delegates one fixed cold root machine phase"
