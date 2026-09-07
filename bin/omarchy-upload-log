@@ -1,14 +1,29 @@
-#!/bin/bash
+#!/bin/bash -p
 
 # omarchy:summary=Upload logs to logs.omarchy.org
 # omarchy:args=<log-file>
 # omarchy:hidden=true
 
-set -euo pipefail
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
 
-source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
+set -euo pipefail
+omarchy_security_sanitize_bash_environment "$0" "$@" || exit 126
 
 LOG_TYPE="${1:-install}"
+
+# The privileged reader is dispatched only as one fixed installed command with
+# no user-selected path. sudo does not need to preserve the caller's checkout
+# environment for it; every ordinary uploader invocation remains bound to its
+# canonical OMARCHY_PATH before extensible collectors can run.
+if [[ $LOG_TYPE != __read-private-install-logs ]]; then
+  omarchy_security_require_source_root "$0" || exit 126
+fi
 
 read_private_install_log() {
   local selector=${1:-} path parent current canonical owner mode first=1
@@ -194,8 +209,11 @@ fi
 collect_private_install_logs() {
   local destination="$1" status
   if ((EUID == 0)); then
-    read_private_install_logs >"$destination"
-    return 0
+    if read_private_install_logs >"$destination"; then
+      return 0
+    else
+      status=$?
+    fi
   elif /usr/bin/sudo -N -- /usr/bin/omarchy-upload-log __read-private-install-logs >"$destination"; then
     return 0
   else

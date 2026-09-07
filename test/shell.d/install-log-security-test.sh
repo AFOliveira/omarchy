@@ -295,6 +295,12 @@ sed "s#/usr/bin/sudo#$proof/bin/sudo#g" \
 sed "s#/usr/bin/sudo#$proof/bin/sudo#g" \
   "$repo/bin/omarchy-upload-log" >"$proof/bin/omarchy-upload-log"
 chmod 0755 "$proof/bin/omarchy-security-functions" "$proof/bin/omarchy-upload-log"
+mkdir -p "$proof/alias"
+ln -s "$proof/bin/omarchy-upload-log" "$proof/alias/omarchy-upload-log"
+startup_hook="$proof/home/startup-hook"
+startup_marker="$proof/home/startup-ran"
+printf ': >"$TEST_STARTUP_MARKER"\n' >"$startup_hook"
+chown 1:1 "$startup_hook"
 
 run_upload() {
   local command=$1 expect_reuse=$2 waiter
@@ -307,6 +313,8 @@ run_upload() {
   chown 1:1 "$proof/home/armed"
   setpriv --reuid=1 --regid=1 --clear-groups \
     env -i HOME="$proof/home" PATH="$proof/bin:/usr/bin:/bin" \
+      OMARCHY_PATH="$proof" \
+      BASH_ENV="$startup_hook" TEST_STARTUP_MARKER="$startup_marker" \
       TEST_SUDO="$proof/bin/sudo" TEST_SUDO_TOKEN="$proof/token" TEST_ROOT_VICTIM="$proof/root/victim" \
       TEST_COLLECTOR_RAN="$proof/home/collector" TEST_REUSED_SUDO="$proof/home/reused" \
       TEST_WAITER_ARMED="$proof/home/armed" TEST_WAITER_PID="$proof/home/pid" \
@@ -326,6 +334,15 @@ run_upload() {
 run_upload "$proof/bin/omarchy-upload-log" 0
 [[ -e $proof/home/collector && ! -e $proof/token && ! -e $proof/root/victim && ! -e $proof/home/reused ]]
 [[ $(wc -c <"$proof/home/reader-calls") == 1 ]]
+[[ ! -e $startup_marker ]]
+
+run_upload "$proof/alias/omarchy-upload-log" 0
+[[ ! -e $startup_marker && $(wc -c <"$proof/home/reader-calls") == 1 ]]
+
+if setpriv --reuid=1 --regid=1 --clear-groups /usr/bin/bash \
+  "$proof/bin/omarchy-upload-log" -p >/dev/null 2>&1; then
+  exit 1
+fi
 
 sed "s#$proof/bin/sudo -N --#$proof/bin/sudo --#" \
   "$proof/bin/omarchy-upload-log" >"$proof/bin/omarchy-upload-log-mutant"
@@ -334,7 +351,7 @@ run_upload "$proof/bin/omarchy-upload-log-mutant" 1
 [[ -e $proof/home/reused && -e $proof/root/victim ]]
 [[ $(wc -c <"$proof/home/reader-calls") == 1 ]]
 NAMESPACE
-pass "desktop upload uses cold no-update sudo and the mutation reopens the exploit"
+pass "desktop upload has a canonical startup boundary and cold no-update sudo"
 
 # Exercise the installed-path migration and the explicit privileged support
 # reader in an isolated namespace/chroot. No host /var/log or /usr path changes.
@@ -347,15 +364,17 @@ mkdir -p "$newroot"
 mount -t tmpfs -o mode=0755 tmpfs "$newroot"
 mkdir -p "$newroot/usr/bin" "$newroot/usr/lib" "$newroot/usr/lib64" \
   "$newroot/usr/share/omarchy" "$newroot/var/log" "$newroot/dev" \
-  "$newroot/test-bin" "$newroot/runtime" "$newroot/mnt" "$newroot/tmp"
+  "$newroot/test-bin" "$newroot/runtime" "$newroot/mnt" "$newroot/tmp" "$newroot/proc"
 chmod 0700 "$newroot/runtime"
 chmod 1777 "$newroot/tmp"
 mount --rbind /usr/bin "$newroot/usr/bin"
 mount --rbind /usr/lib "$newroot/usr/lib"
 [[ ! -d /usr/lib64 ]] || mount --rbind /usr/lib64 "$newroot/usr/lib64"
 mount --rbind "$repo" "$newroot/usr/share/omarchy"
+mount --rbind /proc "$newroot/proc"
 : >"$newroot/dev/null"
 mount --bind /dev/null "$newroot/dev/null"
+ln -s /proc/self/fd "$newroot/dev/fd"
 ln -s usr/bin "$newroot/bin"
 ln -s usr/lib "$newroot/lib"
 [[ ! -d /usr/lib64 ]] || ln -s usr/lib64 "$newroot/lib64"
@@ -403,10 +422,41 @@ grep -qF 'PRIVATE ROOT INSTALL CONTENT' "$newroot/var/log/omarchy-install.log"
 grep -qF 'sudo:-N -- /usr/bin/env -i PATH=/usr/bin:/bin' "$newroot/sudo.trace"
 
 chroot "$newroot" /usr/bin/env PATH=/test-bin:/usr/bin:/bin XDG_RUNTIME_DIR=/runtime \
-  /usr/bin/bash /usr/share/omarchy/bin/omarchy-upload-log install >"$newroot/upload.output"
+  OMARCHY_PATH=/usr/share/omarchy /usr/share/omarchy/bin/omarchy-upload-log install >"$newroot/upload.output"
 grep -qF 'https://logs.invalid/private' "$newroot/upload.output"
 grep -qF 'uploaded:600:700' "$newroot/upload.observe"
 [[ -z $(find "$newroot/runtime" -mindepth 1 -print -quit) ]]
+
+# Make the root reader validate successfully, then emit partial bytes and fail.
+# The root collection branch must propagate that status and remove its partial
+# private copy before curl can observe or upload it.
+cp "$newroot/usr/bin/cat" "$newroot/test-bin/real-cat"
+cat >"$newroot/test-bin/failing-cat" <<'STUB'
+#!/bin/bash
+if [[ ${1:-} == -- && ${2:-} == /var/log/omarchy-install.log ]]; then
+  count=0
+  [[ ! -f /cat.calls ]] || count=$(</cat.calls)
+  count=$((count + 1))
+  printf '%s\n' "$count" >/cat.calls
+  if ((count >= 2)); then
+    printf 'PARTIAL PRIVATE LOG\n'
+    exit 70
+  fi
+fi
+exec /test-bin/real-cat "$@"
+STUB
+chmod 0755 "$newroot/test-bin/failing-cat"
+mount --bind "$newroot/test-bin/failing-cat" "$newroot/usr/bin/cat"
+uploads_before=$(wc -l <"$newroot/upload.observe")
+if chroot "$newroot" /usr/bin/env PATH=/test-bin:/usr/bin:/bin XDG_RUNTIME_DIR=/runtime \
+  OMARCHY_PATH=/usr/share/omarchy /usr/share/omarchy/bin/omarchy-upload-log install \
+  >"$newroot/root-read-failure.output" 2>&1; then
+  echo 'root upload accepted a partial private-log read' >&2
+  exit 1
+fi
+[[ $(wc -l <"$newroot/upload.observe") == "$uploads_before" ]]
+[[ -z $(find "$newroot/runtime" -mindepth 1 -print -quit) ]]
+umount "$newroot/usr/bin/cat"
 
 # The migration preserves and rejects an exact-path administrator anomaly.
 mv "$newroot/var/log/omarchy-install.log" "$newroot/var/log/safe.log"
