@@ -11,7 +11,7 @@ export OMARCHY_UPDATE_LOGGED=1
 # source the library beside the resolved command instead of this file.
 mkdir "$boundary_tmp/links"
 printf '%s\n' 'touch "$SUDO_TEST_HOME/wrong-library"' >"$boundary_tmp/links/omarchy-security-functions"
-for command in omarchy-update omarchy-refresh-pacman omarchy-update-stay-awake; do
+for command in omarchy-update omarchy-refresh-pacman omarchy-update-stay-awake omarchy-channel-set; do
   rm -f "$SUDO_TEST_ROOT/bin/$command"
   copy_boundary_file "bin/$command"
   ln -s "$SUDO_TEST_ROOT/bin/$command" "$boundary_tmp/links/$command"
