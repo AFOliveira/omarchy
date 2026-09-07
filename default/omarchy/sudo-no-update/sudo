@@ -1,42 +1,19 @@
 #!/bin/bash -p
 
-# Internal update/migration sudo boundary. Authentication may authorize this
-# command, but -N prevents it from publishing a timestamp that detached user
-# code can silently reuse.
-
+# Preserve sudo options while preventing authentication from refreshing the
+# credential cache. Timestamp maintenance and informational modes stand alone.
 if [[ $- != *p* ]]; then
   echo "Refusing an unsafe Bash startup for the sudo boundary." >&2
   exit 126
 fi
+source "${BASH_SOURCE[0]%/*}/../../../bin/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
 
-require_privileged_bash_startup() {
-  [[ $- == *p* ]] || return 1
-  /usr/bin/env -i /usr/bin/bash -p -c '
-    [[ $1 =~ ^[1-9][0-9]*$ ]] || exit 1
-    mapfile -d "" -t argv <"/proc/$1/cmdline" || exit 1
-    executable=$(/usr/bin/readlink -e -- "/proc/$1/exe") || exit 1
-    [[ $executable == /usr/bin/bash ]]
-    [[ ${argv[0]:-} == /bin/bash || ${argv[0]:-} == /usr/bin/bash ]]
-    [[ ${argv[1]:-} == -p ]]
-  ' omarchy-bash-startup "$$"
-}
-if ! require_privileged_bash_startup; then
-  echo "Refusing an unsafe Bash startup for the sudo boundary." >&2
-  exit 126
+if (( $# == 1 )); then
+  case "$1" in
+    -k|--reset-timestamp|-K|--remove-timestamp|-h|--help|-V|--version)
+      exec /usr/bin/sudo "$@"
+      ;;
+  esac
 fi
-
-# The update's sleep inhibitor validates interactively before launching its
-# privileged process. Preserve that one non-command operation, while keeping
-# every command argument behind `--` so caller data cannot become a sudo option.
-case "${1:-}" in
-  -v | --validate)
-    if (( $# != 1 )); then
-      echo "The sudo boundary accepts validation without additional options." >&2
-      exit 2
-    fi
-    exec /usr/bin/sudo -N "$1"
-    ;;
-  *)
-    exec /usr/bin/sudo -N -- "$@"
-    ;;
-esac
+exec /usr/bin/sudo -N "$@"

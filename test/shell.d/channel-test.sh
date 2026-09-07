@@ -105,7 +105,7 @@ assert_log_line() {
 }
 
 run_channel stable
-assert_log_line $'refresh\tstable' "stable refreshes the stable pacman channel"
+assert_log_line $'refresh\tstable\tdefer-hook' "stable refreshes the stable pacman channel"
 assert_log_line $'sudo\tenv\tOMARCHY_UPDATE_PACMAN=1\tpacman\t-S\t--needed\t--noconfirm\t--ask\t4\tomarchy\tomarchy-settings' "stable installs stable Omarchy packages"
 assert_log_line $'unlink\t--no-reboot' "stable restores the package-backed Omarchy path without an early reboot prompt"
 assert_log_line $'update\t-y\tOMARCHY_PATH=/usr/share/omarchy' "stable runs the normal update pipeline from the package-backed path"
@@ -115,13 +115,13 @@ fi
 pass "stable does not require reboot when already package-backed"
 
 run_channel rc
-assert_log_line $'refresh\trc' "rc refreshes the rc pacman channel"
+assert_log_line $'refresh\trc\tdefer-hook' "rc refreshes the rc pacman channel"
 assert_log_line $'sudo\tenv\tOMARCHY_UPDATE_PACMAN=1\tpacman\t-S\t--needed\t--noconfirm\t--ask\t4\tomarchy\tomarchy-settings' "rc installs rc Omarchy packages"
 assert_log_line $'unlink\t--no-reboot' "rc restores the package-backed Omarchy path without an early reboot prompt"
 assert_log_line $'update\t-y\tOMARCHY_PATH=/usr/share/omarchy' "rc runs the normal update pipeline from the package-backed path"
 
 OMARCHY_TEST_PATH="$ROOT" run_channel edge
-assert_log_line $'refresh\tedge' "edge refreshes the edge pacman channel"
+assert_log_line $'refresh\tedge\tdefer-hook' "edge refreshes the edge pacman channel"
 assert_log_line $'sudo\tenv\tOMARCHY_UPDATE_PACMAN=1\tpacman\t-S\t--needed\t--noconfirm\t--ask\t4\tomarchy-dev\tomarchy-settings-dev' "edge installs development Omarchy packages"
 assert_log_line $'unlink\t--no-reboot' "edge unlinks dev without an early reboot prompt"
 assert_log_line $'state\tset\treboot-required' "edge marks reboot required when leaving dev"
@@ -137,7 +137,7 @@ if run_channel dev >"$test_tmp/occupied.out" 2>"$test_tmp/occupied.err"; then
 fi
 
 grep -q "already exists and is not a git checkout" "$test_tmp/occupied.err" || fail "dev explains occupied checkout paths" "$(cat "$test_tmp/occupied.err")"
-if grep -Fx $'refresh\tedge' "$log_file" >/dev/null; then
+if grep -Fx $'refresh\tedge\tdefer-hook' "$log_file" >/dev/null; then
   fail "dev validates checkout path before changing packages" "$(cat "$log_file")"
 fi
 pass "dev refuses occupied non-checkout paths before package changes"
@@ -145,15 +145,17 @@ pass "dev refuses occupied non-checkout paths before package changes"
 rmdir "$checkout"
 run_channel dev
 assert_log_line $'gum\tconfirm\t--default=false\tSwitch to dev channel?' "dev asks for confirmation"
-assert_log_line $'refresh\tedge' "dev refreshes the edge pacman channel"
+assert_log_line $'refresh\tedge\tdefer-hook' "dev refreshes the edge pacman channel"
 assert_log_line $'sudo\tenv\tOMARCHY_UPDATE_PACMAN=1\tpacman\t-S\t--needed\t--noconfirm\t--ask\t4\tomarchy-dev\tomarchy-settings-dev' "dev installs development Omarchy packages"
 assert_log_line $'git\tclone\thttps://github.com/basecamp/omarchy.git\t'"$checkout" "dev clones the source checkout to ~/omarchy"
 assert_log_line $'link\t'"$checkout"$'\t--no-reboot' "dev links ~/omarchy without an early reboot prompt"
 assert_log_line $'state\tset\treboot-required' "dev defers the reboot prompt to the update pipeline"
 assert_log_line $'update\t-y\tOMARCHY_PATH='"$checkout" "dev runs the normal update pipeline from the source checkout"
-[[ $(grep -E '^(git|link|state|refresh|sudo|update)' "$log_file") == $'git\tclone\thttps://github.com/basecamp/omarchy.git\t'"$checkout"$'\nlink\t'"$checkout"$'\t--no-reboot\nstate\tset\treboot-required\nrefresh\tedge\nsudo\tenv\tOMARCHY_UPDATE_PACMAN=1\tpacman\t-S\t--needed\t--noconfirm\t--ask\t4\tomarchy-dev\tomarchy-settings-dev\nupdate\t-y\tOMARCHY_PATH='"$checkout" ]] ||
+[[ $(grep -E '^(git|link|state|refresh|sudo|update)' "$log_file" | sed '/run-deferred/d') == $'git\tclone\thttps://github.com/basecamp/omarchy.git\t'"$checkout"$'\nlink\t'"$checkout"$'\t--no-reboot\nstate\tset\treboot-required\nrefresh\tedge\tdefer-hook\nsudo\tenv\tOMARCHY_UPDATE_PACMAN=1\tpacman\t-S\t--needed\t--noconfirm\t--ask\t4\tomarchy-dev\tomarchy-settings-dev\nupdate\t-y\tOMARCHY_PATH='"$checkout" ]] ||
   fail "dev activates the checkout before changing or updating packages" "$(cat "$log_file")"
 pass "dev activates the checkout before changing or updating packages"
+[[ $(tail -1 "$log_file") == $'refresh\tedge\trun-deferred' ]] || fail "channel refresh hook must run after the complete update"
+pass "channel changes defer the refresh hook until all update work finishes"
 
 OMARCHY_TEST_PATH="$checkout" run_channel stable
 assert_log_line $'unlink\t--no-reboot' "switching from dev to stable unlinks without an early reboot prompt"
