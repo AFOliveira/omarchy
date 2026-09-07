@@ -524,7 +524,7 @@ start_locked() {
       temporary=$(/usr/bin/mktemp "$state_dir/.inhibit-pid.XXXXXXXX")
       /usr/bin/chmod 600 "$temporary"
       printf "1 %s %s %s %s\n" "$$" "${fields[19]}" "$owner" "$token" >"$temporary"
-      exec {control_fd}<>"$control"
+      exec {control_fd}<"$control"
       /usr/bin/flock -x "$control_fd"
       IFS= read -r control_record <&"$control_fd"
       [[ $control_record == "active $token" ]]
