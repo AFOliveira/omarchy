@@ -126,6 +126,10 @@ printf '%s\n' "$*" >>"$OMARCHY_TEST_QS_LOG"
 
 case " $* " in
   *' list --all -j '*)
+    if [[ ${OMARCHY_TEST_QS_LIST_INVALID:-0} == 1 ]]; then
+      printf 'not-json\n'
+      exit 0
+    fi
     if [[ -f $OMARCHY_TEST_QS_STATE.delayed-exit ]]; then
       count=0
       read -r count <"$OMARCHY_TEST_QS_STATE.delayed-exit"
@@ -241,7 +245,24 @@ else
 fi
 SH
 
-chmod +x "$restart_bin/qs" "$restart_bin/quickshell" "$restart_bin/hyprctl" "$restart_bin/systemd-cat" "$restart_bin/systemctl"
+cat >"$restart_bin/busctl" <<'SH'
+#!/bin/bash
+if [[ -z ${OMARCHY_TEST_NOTIFICATION_CHECKS:-} ]]; then
+  echo 'b false'
+else
+  checks=0
+  [[ ! -f $OMARCHY_TEST_NOTIFICATION_CHECKS ]] || read -r checks <"$OMARCHY_TEST_NOTIFICATION_CHECKS"
+  (( checks += 1 ))
+  printf '%s\n' "$checks" >"$OMARCHY_TEST_NOTIFICATION_CHECKS"
+  if (( checks == 1 || checks >= 4 )); then
+    echo 'b true'
+  else
+    echo 'b false'
+  fi
+fi
+SH
+
+chmod +x "$restart_bin/qs" "$restart_bin/quickshell" "$restart_bin/hyprctl" "$restart_bin/systemd-cat" "$restart_bin/systemctl" "$restart_bin/busctl"
 
 sleep 30 &
 restart_pid_one=$!
@@ -263,6 +284,7 @@ OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
 OMARCHY_TEST_IPC_LOG="$ipc_log" \
 OMARCHY_TEST_SESSION_PATH="$restart_root" \
 OMARCHY_TEST_TRANSIENT_ENV=leaked \
+OMARCHY_TEST_NOTIFICATION_CHECKS="$test_tmp/notification-checks" \
   timeout 5 "$ROOT/bin/omarchy-restart-shell"
 
 if kill -0 "$restart_pid_one" 2>/dev/null; then
@@ -282,6 +304,8 @@ grep -F "kill -p $restart_root/shell --any-display" "$restart_log" >/dev/null ||
 grep -F 'hl.dsp.exec_cmd("omarchy-launch-shell")' "$dispatch_log" >/dev/null || fail "restart launches the fresh shell through Hyprland"
 grep -F "ipc -n -p $restart_root/shell call -- shell ping" "$ipc_log" >/dev/null || fail "restart checks readiness in the session checkout"
 pass "restart replaces duplicate shell instances from the session checkout"
+[[ $(<"$test_tmp/notification-checks") == 4 ]] || fail "restart waits for the existing notification service after core IPC is ready"
+pass "restart waits for notification readiness before one-time update hooks"
 
 : >"$restart_log"
 printf '303\n' >"$restart_state"
@@ -439,6 +463,92 @@ done
   fail "a no-launch timeout was not retried inside the serialized restart"
 pass "ambiguous and no-launch dispatch timeouts recover without duplicate shells"
 
+# A persistently unreadable registry must release restart serialization at one
+# aggregate deadline, preserve the old process, and permit a later clean retry.
+sleep 30 &
+restart_pid_one=$!
+printf '%s\n' "$restart_pid_one" >"$restart_state"
+: >"$restart_log"
+: >"$dispatch_log"
+set +e
+registry_error=$(PATH="$restart_bin:$PATH" \
+  OMARCHY_PATH="$restart_root" \
+  XDG_RUNTIME_DIR="$runtime_dir" \
+  OMARCHY_RESTART_STOP_TIMEOUT_SECONDS=2 \
+  OMARCHY_TEST_QS_LIST_INVALID=1 \
+  OMARCHY_TEST_QS_STATE="$restart_state" \
+  OMARCHY_TEST_QS_LOG="$restart_log" \
+  OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+  OMARCHY_TEST_IPC_LOG="$ipc_log" \
+  OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 5 "$ROOT/bin/omarchy-restart-shell" 2>&1)
+registry_status=$?
+set -e
+(( registry_status == 1 )) || fail "persistent invalid registry state escaped the stop deadline" "$registry_status $registry_error"
+[[ $registry_error == "Could not confirm that the existing Omarchy shell stopped before the restart deadline." ]] ||
+  fail "persistent invalid registry state lacks its deadline diagnostic" "$registry_error"
+kill -0 "$restart_pid_one" 2>/dev/null || fail "an invalid registry answer killed an unconfirmed shell"
+[[ ! -s $dispatch_log ]] || fail "an invalid registry answer launched a replacement"
+
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_QS_ENV_LOG="$restart_env_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 5 "$ROOT/bin/omarchy-restart-shell" || fail "a later retry did not acquire released restart ownership"
+wait "$restart_pid_one" 2>/dev/null || true
+restart_pid_one=""
+[[ $(<"$restart_state") == 303 ]] || fail "a later retry did not leave one replacement shell"
+pass "persistent registry ambiguity is bounded and a later retry succeeds"
+
+# Cancellation during an ambiguous stop must not kill or replace an
+# unconfirmed shell, and its bounded child probe must release serialization.
+sleep 30 &
+restart_pid_one=$!
+printf '%s\n' "$restart_pid_one" >"$restart_state"
+: >"$restart_log"
+: >"$dispatch_log"
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_QS_LIST_INVALID=1 \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  "$ROOT/bin/omarchy-restart-shell" >"$test_tmp/interrupted.out" 2>"$test_tmp/interrupted.err" &
+restart_probe_pid=$!
+sleep 0.2
+kill -TERM "$restart_probe_pid"
+set +e
+wait "$restart_probe_pid"
+interrupted_status=$?
+set -e
+restart_probe_pid=""
+(( interrupted_status == 143 )) || fail "an interrupted ambiguous stop returned the wrong status" "$interrupted_status"
+kill -0 "$restart_pid_one" 2>/dev/null || fail "an interrupted ambiguous stop killed the old shell"
+[[ ! -s $dispatch_log ]] || fail "an interrupted ambiguous stop launched a replacement"
+sleep 1.2
+
+PATH="$restart_bin:$PATH" \
+OMARCHY_PATH="$restart_root" \
+XDG_RUNTIME_DIR="$runtime_dir" \
+OMARCHY_TEST_QS_STATE="$restart_state" \
+OMARCHY_TEST_QS_LOG="$restart_log" \
+OMARCHY_TEST_QS_ENV_LOG="$restart_env_log" \
+OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+OMARCHY_TEST_IPC_LOG="$ipc_log" \
+OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  timeout 5 "$ROOT/bin/omarchy-restart-shell" || fail "a retry after interrupted stop did not acquire restart ownership"
+wait "$restart_pid_one" 2>/dev/null || true
+restart_pid_one=""
+pass "interrupted ambiguous stop preserves the old shell and permits retry"
+
 # A timed-out kill is ambiguous: the old process may still answer ping. It
 # must abort the restart instead of accepting that old answer as a replacement.
 sleep 30 &
@@ -450,22 +560,25 @@ set +e
 kill_error=$(PATH="$restart_bin:$PATH" \
   OMARCHY_PATH="$restart_root" \
   XDG_RUNTIME_DIR="$runtime_dir" \
+  OMARCHY_RESTART_STOP_TIMEOUT_SECONDS=2 \
   OMARCHY_TEST_QS_KILL_HANG=1 \
   OMARCHY_TEST_QS_STATE="$restart_state" \
   OMARCHY_TEST_QS_LOG="$restart_log" \
   OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
   OMARCHY_TEST_IPC_LOG="$ipc_log" \
   OMARCHY_TEST_SESSION_PATH="$restart_root" \
-  timeout 7 "$ROOT/bin/omarchy-restart-shell" 2>&1)
+  timeout 5 "$ROOT/bin/omarchy-restart-shell" 2>&1)
 kill_status=$?
 set -e
-(( kill_status == 124 )) || fail "a pre-delivery kill wedge was abandoned by the serialized recovery" "$kill_status $kill_error"
+(( kill_status == 1 )) || fail "a pre-delivery kill wedge escaped the aggregate stop deadline" "$kill_status $kill_error"
+[[ $kill_error == "Could not confirm that the existing Omarchy shell stopped before the restart deadline." ]] ||
+  fail "a stop deadline failure lacks its diagnostic" "$kill_error"
 kill -0 "$restart_pid_one" 2>/dev/null || fail "a timed-out kill test did not preserve its old shell"
 [[ ! -s $dispatch_log ]] || fail "a timed-out kill launched a replacement shell"
 kill "$restart_pid_one" 2>/dev/null || true
 wait "$restart_pid_one" 2>/dev/null || true
 restart_pid_one=""
-pass "restart retains ownership when stopping the old shell remains ambiguous"
+pass "restart releases bounded ownership when stopping the old shell remains ambiguous"
 
 # Quickshell can deliver the quit request and then time out waiting for the
 # server to disconnect. Keep polling after that timeout; once the delayed

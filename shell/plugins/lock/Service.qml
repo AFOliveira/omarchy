@@ -25,6 +25,9 @@ Item {
   property bool fingerprintConfigured: false
   property bool previewVisible: false
   property bool displayBlanked: false
+  property bool displaysBlank: false
+  property var monitorDpms: ({})
+  property bool monitorDpmsKnown: false
   property int focusRequestVersion: 0
   property string enteredPassword: ""
   property string pendingPassword: ""
@@ -54,6 +57,9 @@ Item {
   // reads through Quickshell's stale process-global session-lock pointer.
   readonly property bool sessionLockOwned: lockRequested || sessionLock.locked
   readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating
+  readonly property bool videoBackground: Util.isVideoPath(backgroundPath)
+  readonly property var batteryService: shell && shell.services ? shell.firstPartyServiceFor("omarchy.battery") : null
+  readonly property bool powerSaverActive: batteryService ? batteryService.powerSaverOnBattery : false
 
   function realScreenCount() {
     var screens = Quickshell.screens || []
@@ -228,7 +234,9 @@ Item {
   }
 
   function runWake() {
+    root.displaysBlank = false
     displayBlanked = false
+    monitorDpmsKnown = false
     focusRequestVersion += 1
     blankPending = false
     blankRetryTimer.stop()
@@ -241,7 +249,9 @@ Item {
   }
 
   function runBlank() {
+    root.displaysBlank = true
     displayBlanked = true
+    monitorDpmsKnown = false
     wakePending = false
     wakeRetryTimer.stop()
     wakeRetryAttempt = 0
@@ -307,6 +317,30 @@ Item {
 
     blankPending = false
     drainDisplayRequest()
+  }
+
+  function screenBlank(screenName) {
+    var name = String(screenName || "")
+    if (!monitorDpmsKnown || !(name in monitorDpms)) return displaysBlank
+    return !monitorDpms[name]
+  }
+
+  function applyMonitorDpms(text) {
+    var monitors
+    try {
+      monitors = JSON.parse(String(text || ""))
+    } catch (error) {
+      return
+    }
+    if (!Array.isArray(monitors)) return
+
+    var dpms = {}
+    for (var i = 0; i < monitors.length; i++) {
+      var monitor = monitors[i]
+      if (monitor && monitor.name && !monitor.disabled) dpms[String(monitor.name)] = !!monitor.dpmsStatus
+    }
+    monitorDpms = dpms
+    monitorDpmsKnown = true
   }
 
   function submitPassword(value) {
@@ -417,6 +451,8 @@ Item {
         failedAttempts: root.failedAttempts
         inputEnabled: root.lockRequested
         loadBackground: root.locked
+        displaysBlank: root.screenBlank(lockSurface.screen ? lockSurface.screen.name : "")
+        powerSaverActive: root.powerSaverActive
         passwordText: root.enteredPassword
         displayBlanked: root.displayBlanked
         focusRequestVersion: root.focusRequestVersion
@@ -449,6 +485,7 @@ Item {
       failedAttempts: 0
       inputEnabled: false
       loadBackground: root.previewVisible
+      powerSaverActive: root.powerSaverActive
       passwordText: ""
     }
 
@@ -556,6 +593,28 @@ Item {
     onExited: function(exitCode) { root.handleBlankExit(exitCode) }
   }
 
+  Process {
+    id: monitorDpmsProcess
+    command: ["hyprctl", "monitors", "-j"]
+    stdout: StdioCollector {
+      onStreamFinished: root.applyMonitorDpms(text)
+    }
+  }
+
+  Timer {
+    id: monitorDpmsTimer
+    interval: 3000
+    repeat: true
+    triggeredOnStart: true
+    running: root.locked && root.videoBackground
+    onTriggered: {
+      if (!monitorDpmsProcess.running) monitorDpmsProcess.running = true
+    }
+    onRunningChanged: {
+      if (!running) root.monitorDpmsKnown = false
+    }
+  }
+
   // Keyboard activity still reaches the compositor when no lock surface has
   // focus. Keep this armed for the whole lock so the first key after DPMS-off
   // can both wake the display and re-arm the bounded password-focus retry.
@@ -656,6 +715,7 @@ Item {
   Connections {
     target: Quickshell
     function onScreensChanged() {
+      root.displaysBlank = false
       root.requestSessionLock()
       if (root.lockRequested) root.focusRequestVersion += 1
 

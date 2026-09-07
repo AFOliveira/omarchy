@@ -7,6 +7,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 run_node_test <<'JS'
 const fs = require('fs')
 const shellQml = fs.readFileSync(path.join(root, 'shell/shell.qml'), 'utf8')
+const authStore = fs.readFileSync(path.join(root, 'shell/services/AuthServiceStore.js'), 'utf8')
 
 function bodyOf(src, name, label) {
   const start = src.indexOf(`function ${name}(`)
@@ -30,10 +31,16 @@ function firstIndexOf(body, needles) {
 
 const owned = bodyOf(shellQml, 'sessionLockOwned', 'ownership scan')
 assert(
-  /for \(var id in _services\)/.test(owned) && /inst\.sessionLockOwned === true/.test(owned),
+  owned.includes('AuthServiceStore.anySessionLockOwned()') &&
+    /for \(var id in _services\)/.test(owned) && /inst\.sessionLockOwned === true/.test(owned),
   'lock ownership is duck-typed across every service'
 )
 assert(!owned.includes('omarchy.lock'), 'lock ownership is not tied to the built-in plugin id')
+const privateOwned = bodyOf(authStore, 'anySessionLockOwned', 'private authentication ownership scan')
+assert(privateOwned.includes('sessionLockOwned(keys[i])'), 'the private store scans actual authentication services')
+const guardedDestroy = bodyOf(authStore, 'destroyUnlessSessionLockOwned', 'private authentication teardown')
+assert(guardedDestroy.indexOf('sessionLockOwned(id)') < guardedDestroy.indexOf('destroy(id)'),
+  'private authentication teardown checks the owned lock before destruction')
 
 const reload = bodyOf(shellQml, 'reloadPlugins', 'reload guard')
 const teardown = firstIndexOf(reload, [
@@ -69,7 +76,7 @@ assert(localChange.includes('shell.armLocalPluginReload()'), 'local file changes
 
 const sync = bodyOf(shellQml, '_syncServices', 'service synchronization')
 const syncGuard = sync.indexOf('inst && inst.sessionLockOwned === true')
-const syncDestroy = sync.indexOf('.destroy()')
+const syncDestroy = sync.indexOf('.destroy()', syncGuard)
 assert(syncGuard !== -1, '_syncServices retains a lock-owning service')
 assert(syncDestroy !== -1, '_syncServices still destroys ordinary removed services')
 assert(syncGuard < syncDestroy, '_syncServices checks ownership before destroying a service')
@@ -88,4 +95,8 @@ assert(
     unload.slice(unloadGuard, unloadDestroy).includes('continue'),
   'the protected lock instance remains registered with the shell'
 )
+assert(unload.includes('AuthServiceStore.destroyUnlessSessionLockOwned(authenticationId)'),
+  'the low-level unload protects a private authentication lock')
+assert(sync.includes('AuthServiceStore.destroyUnlessSessionLockOwned(authenticationId)'),
+  'disable and removal protect a private authentication lock')
 JS

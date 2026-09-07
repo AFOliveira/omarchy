@@ -162,6 +162,18 @@ relock_session() {
   return 1
 }
 
+notifications_ready() {
+  [[ $(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus NameHasOwner s org.freedesktop.Notifications 2>/dev/null) == "b true" ]]
+}
+
+# Core IPC can answer before the notification plugin has registered its bus
+# name. Preserve that readiness requirement only when the old service existed.
+notifications_were_running=0
+if notifications_ready; then
+  notifications_were_running=1
+fi
+
 launch_replacement_shell() {
   local deadline deadline_seconds instance_state ipc_budget remaining timeout_duration
   local dispatch_attempts=0
@@ -190,7 +202,8 @@ launch_replacement_shell() {
     if OMARCHY_PATH="$session_omarchy_path" \
       OMARCHY_SHELL_IPC_TIMEOUT="$timeout_duration" \
       OMARCHY_SHELL_IPC_KILL_AFTER=0.1s \
-      omarchy-shell shell ping >/dev/null 2>&1; then
+      omarchy-shell shell ping >/dev/null 2>&1 &&
+      { (( notifications_were_running == 0 )) || notifications_ready; }; then
       return 0
     fi
 
@@ -228,33 +241,58 @@ launch_replacement_shell() {
 # not evidence that it stopped: fail closed until the exact config is confirmed
 # absent, so a still-pingable old shell can never masquerade as its replacement.
 stop_existing_shells() {
-  local drain_attempt instance_state
+  local deadline deadline_seconds drain_deadline instance_state remaining timeout_duration
 
-  # There is deliberately no aggregate deadline here. Quickshell sends its
-  # quit request before waiting for the server to disconnect, so a client
-  # timeout is ambiguous: abandoning the transaction could leave the old
-  # clean-exit supervisor gone with nobody responsible for replacement. Each
-  # individual probe remains bounded and the single serialized recovery keeps
-  # retrying until the registry proves the exact config absent.
+  deadline_seconds=${OMARCHY_RESTART_STOP_TIMEOUT_SECONDS:-30}
+  if [[ ! $deadline_seconds =~ ^[1-9][0-9]*$ ]] || (( deadline_seconds > 30 )); then
+    deadline_seconds=30
+  fi
+  clock_millis
+  deadline=$((REPLY + deadline_seconds * 1000))
+
   while :; do
-    shell_instance_state
+    clock_millis
+    remaining=$((deadline - REPLY))
+    if (( remaining <= 0 )); then
+      echo "Could not confirm that the existing Omarchy shell stopped before the restart deadline." >&2
+      return 1
+    fi
+
+    shell_instance_state "$remaining"
     instance_state=$?
     case $instance_state in
       1) return 0 ;;
-      2) sleep 0.1; continue ;;
+      2)
+        duration_from_millis "$((remaining < 100 ? remaining : 100))"
+        sleep "$REPLY"
+        continue
+        ;;
     esac
 
-    /usr/bin/timeout --kill-after=0.2s 5s \
+    clock_millis
+    remaining=$((deadline - REPLY))
+    (( remaining > 0 )) || continue
+    (( remaining > 5000 )) && remaining=5000
+    duration_from_millis "$remaining"
+    timeout_duration=$REPLY
+    /usr/bin/timeout --kill-after=0.2s "$timeout_duration" \
       quickshell kill -p "$CONFIG_DIR" --any-display >/dev/null 2>&1 || true
 
     # A timed-out client may already have delivered the shutdown request.
-    # Give the independently maintained registry a bounded drain window before
-    # attempting another kill; exact absence transfers ownership to launch.
-    for ((drain_attempt = 0; drain_attempt < 20; drain_attempt++)); do
-      shell_instance_state
+    # Give its registry entry a short drain window before another kill, while
+    # charging every registry probe and pause to the aggregate deadline.
+    clock_millis
+    drain_deadline=$((REPLY + 2000))
+    (( drain_deadline > deadline )) && drain_deadline=$deadline
+    while :; do
+      clock_millis
+      remaining=$((drain_deadline - REPLY))
+      (( remaining > 0 )) || break
+      shell_instance_state "$remaining"
       instance_state=$?
       (( instance_state == 1 )) && return 0
-      sleep 0.1
+      duration_from_millis "$((remaining < 100 ? remaining : 100))"
+      sleep "$REPLY"
     done
   done
 }
