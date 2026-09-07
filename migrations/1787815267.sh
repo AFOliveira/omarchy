@@ -44,7 +44,7 @@ unit_enabled() {
 }
 
 repair_machine() {
-  local account="" group="" uid="" gid="" description="" home="" shell="" group_gid="" members="" other_primary_user=""
+  local account="" group="" uid="" gid="" description="" home="" shell="" group_gid="" members="" other_primary_user="" passwd_records=""
   local status
   [[ ! -e $machine_marker ]] || return 0
   load_installed_packages || return 1
@@ -55,7 +55,11 @@ repair_machine() {
     if [[ -n $account || -n $group ]]; then
       IFS=: read -r _ _ uid gid description home shell <<<"$account"
       IFS=: read -r _ _ group_gid members <<<"$group"
-      other_primary_user=$(/usr/bin/getent passwd | /usr/bin/awk -F: -v gid="$gid" '$1 != "cups-browsed" && $4 == gid { print $1; exit }')
+      if ! passwd_records=$(/usr/bin/getent passwd); then
+        echo "Could not enumerate passwd records; leaving CUPS hardening pending." >&2
+        return 1
+      fi
+      other_primary_user=$(/usr/bin/awk -F: -v gid="$gid" '$1 != "cups-browsed" && $4 == gid { print $1; exit }' <<<"$passwd_records") || return 1
       if [[ ! $uid =~ ^[0-9]+$ || ! $group_gid =~ ^[0-9]+$ ]] ||
         (( uid <= 0 || uid >= 1000 )) || [[ $gid != "$group_gid" ]] ||
         [[ $description != "CUPS printer discovery" || $home != "/" || $shell != "/usr/bin/nologin" ]] ||
@@ -67,28 +71,28 @@ repair_machine() {
   fi
 
   if package_installed cups-pdf; then
-    /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -Rns --noconfirm -- cups-pdf
+    /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -Rns --noconfirm -- cups-pdf || return 1
   fi
   if package_installed cups && ! package_installed cups-pk-helper; then
-    /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -S --needed --noconfirm -- cups-pk-helper
+    /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -S --needed --noconfirm -- cups-pk-helper || return 1
   fi
   if unit_active cups-browsed.service; then
-    /usr/bin/systemctl stop cups-browsed.service
+    /usr/bin/systemctl stop cups-browsed.service || return 1
   else
     status=$?
     (( status == 1 )) || return 1
   fi
   if package_installed cups; then
-    /usr/bin/systemctl daemon-reload
-    /usr/bin/systemctl try-reload-or-restart cups.service
+    /usr/bin/systemctl daemon-reload || return 1
+    /usr/bin/systemctl try-reload-or-restart cups.service || return 1
   fi
   if unit_enabled cups-browsed.service; then
-    /usr/bin/systemctl restart cups-browsed.service
+    /usr/bin/systemctl restart cups-browsed.service || return 1
   else
     status=$?
     (( status == 1 )) || return 1
   fi
-  /usr/bin/install -Dm644 /dev/null "$machine_marker"
+  /usr/bin/install -Dm644 /dev/null "$machine_marker" || return 1
 }
 
 if (( $# == 0 )); then

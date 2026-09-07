@@ -21,14 +21,14 @@ repair_machine() {
   done <<<"$controllers"
 
   if (( powered )); then
-    /usr/bin/omarchy-bluetooth-power on
+    /usr/bin/omarchy-bluetooth-power on || return 1
   else
-    /usr/bin/omarchy-bluetooth-power off
+    /usr/bin/omarchy-bluetooth-power off || return 1
   fi
   if [[ -f $main_conf ]]; then
-    /usr/bin/sed -i 's/^AutoEnable=false$/#AutoEnable=true/' "$main_conf"
+    /usr/bin/sed -i 's/^AutoEnable=false$/#AutoEnable=true/' "$main_conf" || return 1
   fi
-  /usr/bin/install -Dm644 /dev/null "$marker"
+  /usr/bin/install -Dm644 /dev/null "$marker" || return 1
 }
 
 if (( $# == 0 )); then

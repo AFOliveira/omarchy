@@ -54,11 +54,11 @@ repair_machine() {
     return 1
   fi
   if [[ -f $limine_conf ]] && /usr/bin/grep -q 'pcie_ports=compat' "$limine_conf"; then
-    /usr/bin/sed -i 's/pcie_ports=compat/pm_async=off mem_sleep_default=deep/' "$limine_conf"
+    /usr/bin/sed -i 's/pcie_ports=compat/pm_async=off mem_sleep_default=deep/' "$limine_conf" || return 1
     rebuild=1
   fi
   if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then
-    /usr/bin/tee -a "$fan_conf" >/dev/null <<'EOF'
+    /usr/bin/tee -a "$fan_conf" >/dev/null <<'EOF' || return 1
 
 [Fan2]
 low_temp=55
@@ -69,7 +69,7 @@ EOF
   fi
   if tiny_dfr_installed; then
     /usr/bin/systemctl disable --now tiny-dfr.service || true
-    /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -Rns --noconfirm -- tiny-dfr
+    /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -Rns --noconfirm -- tiny-dfr || return 1
   else
     status=$?
     if (( status != 1 )); then
@@ -81,8 +81,8 @@ EOF
     /usr/bin/grep -q 'mem_sleep_default=deep' "$limine_conf" &&
     { [[ ! -r $running_cmdline ]] || ! /usr/bin/grep -Eq '(^| )pm_async=off( |$)' "$running_cmdline" ||
       ! /usr/bin/grep -Eq '(^| )mem_sleep_default=deep( |$)' "$running_cmdline"; }; then rebuild=1; fi
-  if (( rebuild )); then /usr/bin/limine-mkinitcpio; fi
-  /usr/bin/install -Dm644 /dev/null "$repair_marker"
+  if (( rebuild )); then /usr/bin/limine-mkinitcpio || return 1; fi
+  /usr/bin/install -Dm644 /dev/null "$repair_marker" || return 1
 }
 
 if (( $# == 0 )); then
