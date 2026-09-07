@@ -6,7 +6,8 @@ if [[ $- != *p* ]]; then
   echo "Refusing an unsafe Bash startup for the sudo boundary." >&2
   exit 126
 fi
-source "${BASH_SOURCE[0]%/*}/../../../bin/omarchy-security-functions" || exit 126
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/../../../bin/omarchy-security-functions" || exit 126
 omarchy_security_require_privileged_bash_startup || exit 126
 
 if (( $# == 1 )); then
