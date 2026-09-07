@@ -4,8 +4,23 @@ marker=/var/lib/omarchy/migrations/1786380259
 main_conf=/etc/bluetooth/main.conf
 
 repair_machine() {
+  local controllers controller details powered=0
   [[ ! -e $marker ]] || return 0
-  if /usr/bin/omarchy-bluetooth-power is-on; then
+
+  controllers=$(/usr/bin/timeout 2s /usr/bin/bluetoothctl list) || {
+    echo "Could not read Bluetooth power state; leaving the migration pending." >&2
+    return 1
+  }
+  while read -r _ controller _; do
+    [[ -n ${controller:-} ]] || continue
+    details=$(/usr/bin/timeout 2s /usr/bin/bluetoothctl show "$controller") || {
+      echo "Could not read Bluetooth controller $controller; leaving the migration pending." >&2
+      return 1
+    }
+    [[ $details == *"Powered: yes"* ]] && powered=1
+  done <<<"$controllers"
+
+  if (( powered )); then
     /usr/bin/omarchy-bluetooth-power on
   else
     /usr/bin/omarchy-bluetooth-power off

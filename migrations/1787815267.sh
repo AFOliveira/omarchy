@@ -1,16 +1,57 @@
 echo "Separate printer discovery from root and print-filter access"
 
 machine_marker=/var/lib/omarchy/migrations/1787815267
+installed_packages=""
 
-cups_installed() { /usr/bin/pacman -Qq cups &>/dev/null; }
+load_installed_packages() {
+  installed_packages=$(/usr/bin/pacman -Qq) || {
+    echo "Could not inspect installed packages; leaving CUPS hardening pending." >&2
+    return 1
+  }
+}
+
+package_installed() { [[ $'\n'$installed_packages$'\n' == *$'\n'"$1"$'\n'* ]]; }
+
+nss_record() {
+  local database=$1 name=$2 output status
+  output=$(/usr/bin/getent "$database" "$name") && status=0 || status=$?
+  if (( status == 0 )); then
+    printf '%s' "$output"
+  elif (( status == 2 )); then
+    return 1
+  else
+    echo "Could not inspect the $name $database record; leaving CUPS hardening pending." >&2
+    return 2
+  fi
+}
+
+unit_active() {
+  local status
+  /usr/bin/systemctl is-active --quiet "$1" 2>/dev/null && return 0
+  status=$?
+  (( status == 3 )) && return 1
+  echo "Could not inspect whether $1 is active; leaving CUPS hardening pending." >&2
+  return 2
+}
+
+unit_enabled() {
+  local state status
+  state=$(/usr/bin/systemctl is-enabled "$1" 2>/dev/null) && status=0 || status=$?
+  if (( status == 0 )); then return 0; fi
+  case $state in disabled|masked|masked-runtime|static|indirect|generated|transient|alias|linked|linked-runtime) return 1 ;; esac
+  echo "Could not inspect whether $1 is enabled; leaving CUPS hardening pending." >&2
+  return 2
+}
 
 repair_machine() {
   local account="" group="" uid="" gid="" description="" home="" shell="" group_gid="" members="" other_primary_user=""
+  local status
   [[ ! -e $machine_marker ]] || return 0
+  load_installed_packages || return 1
 
-  if cups_installed; then
-    account=$(/usr/bin/getent passwd cups-browsed || true)
-    group=$(/usr/bin/getent group cups-browsed || true)
+  if package_installed cups; then
+    account=$(nss_record passwd cups-browsed) || { status=$?; (( status == 1 )) || return 1; account=""; }
+    group=$(nss_record group cups-browsed) || { status=$?; (( status == 1 )) || return 1; group=""; }
     if [[ -n $account || -n $group ]]; then
       IFS=: read -r _ _ uid gid description home shell <<<"$account"
       IFS=: read -r _ _ group_gid members <<<"$group"
@@ -25,21 +66,27 @@ repair_machine() {
     fi
   fi
 
-  if /usr/bin/pacman -Qq cups-pdf &>/dev/null; then
+  if package_installed cups-pdf; then
     /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -Rns --noconfirm -- cups-pdf
   fi
-  if cups_installed && ! /usr/bin/pacman -Qq cups-pk-helper &>/dev/null; then
+  if package_installed cups && ! package_installed cups-pk-helper; then
     /usr/bin/env OMARCHY_UPDATE_PACMAN=1 /usr/bin/pacman -S --needed --noconfirm -- cups-pk-helper
   fi
-  if /usr/bin/systemctl is-active --quiet cups-browsed.service 2>/dev/null; then
+  if unit_active cups-browsed.service; then
     /usr/bin/systemctl stop cups-browsed.service
+  else
+    status=$?
+    (( status == 1 )) || return 1
   fi
-  if cups_installed; then
+  if package_installed cups; then
     /usr/bin/systemctl daemon-reload
     /usr/bin/systemctl try-reload-or-restart cups.service
   fi
-  if /usr/bin/systemctl is-enabled --quiet cups-browsed.service 2>/dev/null; then
+  if unit_enabled cups-browsed.service; then
     /usr/bin/systemctl restart cups-browsed.service
+  else
+    status=$?
+    (( status == 1 )) || return 1
   fi
   /usr/bin/install -Dm644 /dev/null "$machine_marker"
 }

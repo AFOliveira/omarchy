@@ -23,11 +23,16 @@ needs_machine_repair() {
 }
 
 repair_machine() (
-  local owner group mode authdir=${authfile%/*} stage=""
+  local owner group mode authdir=${authfile%/*} authdir_mode stage=""
   if [[ ! -L $authfile && ! -e $authfile ]]; then
     [[ ! -L $authdir && -d $authdir ]] || return 0
     if [[ ! -e $authfile && ! -L $authfile ]]; then return 0; fi
-    /usr/bin/chmod 755 "$authdir"
+  fi
+  if [[ ! -L $authdir && -d $authdir && ( -e $authfile || -L $authfile ) ]]; then
+    authdir_mode=$(/usr/bin/stat -c %a "$authdir")
+    if (( (10#${authdir_mode: -1} & 1) == 0 )); then
+      /usr/bin/chmod 755 "$authdir"
+    fi
   fi
   [[ ! -L $authfile ]] || return 20
   [[ -f $authfile ]] || return 21
