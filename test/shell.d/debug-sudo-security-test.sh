@@ -19,10 +19,15 @@ if [[ ${OMARCHY_DEBUG_SUDO_SECURITY_NS:-0} != 1 ]]; then
     pass "no subordinate uid/gid range; skipping debug sudo proof"
     exit 0
   fi
-  exec unshare --user --mount \
-    --map-users "0:$outer_uid:1" --map-users "1:$subuid:65536" \
-    --map-groups "0:$outer_gid:1" --map-groups "1:$subgid:65536" \
-    env OMARCHY_DEBUG_SUDO_SECURITY_NS=1 bash "$0"
+  namespace=(unshare --user --mount
+    --map-users "0:$outer_uid:1" --map-users "1:$subuid:65536"
+    --map-groups "0:$outer_gid:1" --map-groups "1:$subgid:65536")
+  if "${namespace[@]}" true 2>/dev/null; then
+    exec "${namespace[@]}" env OMARCHY_DEBUG_SUDO_SECURITY_NS=1 bash "$0"
+  else
+    pass "requested user/mount namespace unavailable; skipping debug sudo proof"
+    exit 0
+  fi
 fi
 
 [[ $(id -u) == 0 ]] || fail "debug proof did not enter its root namespace"

@@ -275,6 +275,7 @@ static int capture_command(char *const argv[], int output_fd, size_t limit,
                            bool merge_stderr, bool *overflowed) {
   unsigned char buffer[16384];
   size_t total = 0;
+  bool capture_failed = false;
   int pipefd[2];
   int status = 0;
   pid_t child;
@@ -292,6 +293,7 @@ static int capture_command(char *const argv[], int output_fd, size_t limit,
     ssize_t received = read(pipefd[0], buffer, sizeof(buffer));
     if (received < 0 && errno == EINTR) continue;
     if (received < 0) {
+      capture_failed = true;
       kill(child, SIGKILL);
       break;
     }
@@ -302,6 +304,7 @@ static int capture_command(char *const argv[], int output_fd, size_t limit,
       break;
     }
     if (write_all(output_fd, buffer, (size_t)received)) {
+      capture_failed = true;
       kill(child, SIGKILL);
       break;
     }
@@ -309,6 +312,7 @@ static int capture_command(char *const argv[], int output_fd, size_t limit,
   }
   close(pipefd[0]);
   if (wait_for_child(child, &status)) return 125;
+  if (capture_failed) return 125;
   if (*overflowed) return 124;
   return command_status(status);
 }
