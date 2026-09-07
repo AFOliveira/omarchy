@@ -174,6 +174,76 @@ SH
   [[ ! -e $pkexec_marker ]] || fail "terminal sleep inhibition does not use pkexec"
   run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
   pass "terminal updates use sudo instead of Polkit for sleep inhibition"
+
+  wait_for_process_exit() {
+    local process_pid="$1"
+
+    for _ in {1..100}; do
+      kill -0 "$process_pid" 2>/dev/null || return 0
+      [[ $(awk '{ print $3 }' "/proc/$process_pid/stat" 2>/dev/null || true) == "Z" ]] && return 0
+      sleep 0.02
+    done
+    return 1
+  }
+
+  delayed_marker="$test_tmp/delayed-inhibitor"
+  delayed_helper_pid_file="$test_tmp/delayed-helper-pid"
+  write_stub systemd-inhibit 'echo "$$" >"$DELAYED_MARKER"; sleep 0.4; while [[ $1 == --* ]]; do shift; done; exec "$@"'
+
+  # Keep the start helper's stdin attached to the private PTY so it takes the
+  # sudo -b branch, then signal only that helper before the held child publishes.
+  delayed_terminal_driver="$test_tmp/delayed-terminal-stay-awake"
+  cat >"$delayed_terminal_driver" <<'SH'
+#!/bin/bash
+set +e
+omarchy-update-stay-awake start </dev/tty &
+helper_pid=$!
+echo "$helper_pid" >"$DELAYED_HELPER_PID_FILE"
+wait "$helper_pid"
+exit $?
+SH
+  chmod +x "$delayed_terminal_driver"
+  DELAYED_MARKER="$delayed_marker" DELAYED_HELPER_PID_FILE="$delayed_helper_pid_file" \
+    run_with_lock_env script -qefc "$delayed_terminal_driver" /dev/null >"$test_tmp/delayed-terminal.out" 2>&1 &
+  delayed_terminal_driver_pid=$!
+  for _ in {1..100}; do
+    [[ -s $delayed_marker && -s $delayed_helper_pid_file ]] && break
+    sleep 0.02
+  done
+  [[ -s $delayed_marker && -s $delayed_helper_pid_file ]] || fail "terminal cancellation reaches the delayed launch window"
+  kill -TERM "$(<"$delayed_helper_pid_file")"
+  wait "$delayed_terminal_driver_pid" || true
+  delayed_inhibitor_pid=$(<"$delayed_marker")
+  wait_for_process_exit "$delayed_inhibitor_pid" || fail "terminal cancellation leaves no delayed inhibitor"
+  [[ ! -e $runtime_dir/$stay_awake_dir_name ]] || fail "terminal cancellation leaves no launch state"
+  pass "terminal cancellation rolls back delayed publication"
+
+  # With redirected stdin the same helper takes the graphical pkexec branch.
+  : >"$delayed_marker"
+  delayed_graphical_helper_pid_file="$test_tmp/delayed-graphical-helper-pid"
+  delayed_graphical_driver="$test_tmp/delayed-graphical-stay-awake"
+  cat >"$delayed_graphical_driver" <<'SH'
+#!/bin/bash
+echo "$$" >"$DELAYED_HELPER_PID_FILE"
+exec omarchy-update-stay-awake start </dev/null
+SH
+  chmod +x "$delayed_graphical_driver"
+  DELAYED_MARKER="$delayed_marker" DELAYED_HELPER_PID_FILE="$delayed_graphical_helper_pid_file" \
+    run_with_lock_env "$delayed_graphical_driver" >"$test_tmp/delayed-graphical.out" 2>&1 &
+  delayed_graphical_driver_pid=$!
+  for _ in {1..100}; do
+    [[ -s $delayed_marker && -s $delayed_graphical_helper_pid_file ]] && break
+    sleep 0.02
+  done
+  [[ -s $delayed_marker && -s $delayed_graphical_helper_pid_file ]] || fail "graphical cancellation reaches the delayed launch window"
+  delayed_graphical_helper_pid=$(<"$delayed_graphical_helper_pid_file")
+  kill -TERM "$delayed_graphical_helper_pid"
+  wait "$delayed_graphical_driver_pid" || true
+  delayed_inhibitor_pid=$(<"$delayed_marker")
+  wait_for_process_exit "$delayed_inhibitor_pid" || fail "graphical cancellation leaves no delayed inhibitor"
+  [[ ! -e $runtime_dir/$stay_awake_dir_name ]] || fail "graphical cancellation leaves no launch state"
+  pass "graphical cancellation rolls back delayed publication"
+  write_stub systemd-inhibit 'while [[ $1 == --* ]]; do shift; done; exec "$@"'
 fi
 
 # Update-owned Stay Awake state must be cleared before the restart helper can
