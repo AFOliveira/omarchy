@@ -1,11 +1,21 @@
-#!/bin/bash
+#!/bin/bash -p
 
 # omarchy:summary=Show a fuzzy-finder TUI for picking new Arch and OPR packages to install.
 # omarchy:requires-sudo=true
 
-source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
 
-set -euo pipefail
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
+set -e
+omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_require_source_root "$0"
+
+set -uo pipefail
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
 unset BASH_ENV ENV CDPATH GLOBIGNORE
@@ -33,7 +43,18 @@ fzf_args=(
   --color 'pointer:green,marker:green'
 )
 
+set +e
 pkg_names=$(/usr/bin/pacman -Slq | /usr/bin/fzf "${fzf_args[@]}")
+picker_status=$?
+set -e
+case "$picker_status" in
+  0) ;;
+  130) exit 0 ;;
+  *)
+    echo "Package discovery failed." >&2
+    exit "$picker_status"
+    ;;
+esac
 
 if [[ -n $pkg_names ]]; then
   mapfile -t packages <<<"$pkg_names"
