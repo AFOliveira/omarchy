@@ -4,7 +4,7 @@
 
 ## Grant lifecycle
 
-Root state records the resolved account name, absolute expiry epoch and unique timer name. A calendar timer is armed and verified before the generated policy becomes active. Publication rechecks the package-owned boot cleanup before and after installing policy. Policy revocation must succeed before expiry jobs are stopped; a deletion error leaves those jobs armed and reports that administrator cleanup is required.
+Root state records the resolved account name, absolute expiry epoch and unique timer name. A calendar timer is armed and verified before the generated policy becomes active. The sudoers rule also embeds the same UTC deadline with `NOTAFTER`, so sudo independently rejects it after expiry even if timer cleanup is delayed. Publication rechecks the package-owned boot cleanup before and after installing policy. Policy revocation must succeed before expiry jobs are stopped; a deletion error leaves those jobs armed and reports that administrator cleanup is required.
 
 An internal status result is `0` for an active, validated grant and `3` for confirmed inactive access. All other results are errors, including failed authentication and failed revocation. The user interface only offers a new grant after result `3`. It must not turn an inspection failure into a claim that no grant exists.
 
@@ -12,9 +12,9 @@ Each new expiry callback carries its timer identity. A delayed predecessor canno
 
 ## Package ownership
 
-The packaging companion must put the publication/expiry command, `omarchy-security-functions` and `omarchy-nopasswd-sudo.conf` in the settings package together. Removing the desktop runtime alone must leave a working expiry command behind. Stable and development package pairs must transfer ownership in one transaction without duplicate files.
+The packaging companion must put the publication/expiry command, `omarchy-security-functions` `omarchy-nopasswd-sudo.conf` and the pre-transaction revocation hook in the settings package together. Removing the desktop runtime alone must leave a working expiry command behind. Stable and development package pairs must transfer ownership in one transaction without duplicate files.
 
-Before settings removal or upgrade, its scriptlet acquires the same grant lock, sets `/run/omarchy-sudo-passwordless-package-removing` and revokes existing policy. The marker prevents a waiting publisher from creating a new grant while package files change. A successful installation clears the marker only after boot cleanup exists. Failed scriptlet cleanup returns an error and prints recovery guidance; a package-manager scriptlet failure must not be represented as an automatic transaction rollback.
+Before settings removal or upgrade, the installed ALPM `PreTransaction` hook invokes the fixed `__package-removing` action, acquires the same grant lock, sets `/run/omarchy-sudo-passwordless-package-removing` and revokes existing policy. The marker prevents a waiting publisher from creating a new grant while package files change. A successful installation clears the marker only after boot cleanup exists. The hook uses `AbortOnFail` because a scriptlet failure alone does not abort pacman. The scriptlets repeat cleanup as a fallback for upgrades from older packages that have no installed hook. New grants require both the boot rule and hook before publication. Failed or interrupted transactions leave the marker set; retry the package transaction successfully before requesting another grant.
 
 The runtime marker need not survive reboot: pre-removal revokes the old grants before package files disappear, and a new invocation independently verifies boot cleanup. Both root operations use fixed machine paths. The marker is not a user-controlled mode switch.
 

@@ -19,7 +19,7 @@ trap cleanup EXIT
 
 # All policy, state, locks and command mutations stay in this private fixture.
 # Native visudo validates inert fragments; no test installs host sudo policy.
-mkdir -p "$test_tmp/bin" "$test_tmp/state" "$test_tmp/etc/sudoers.d" "$test_tmp/etc/tmpfiles.d" "$test_tmp/run/lock"
+mkdir -p "$test_tmp/bin" "$test_tmp/state" "$test_tmp/etc/sudoers.d" "$test_tmp/etc/tmpfiles.d" "$test_tmp/run/lock" "$test_tmp/hooks"
 export TEST_GRANT_ROOT="$test_tmp"
 cat >"$test_tmp/bin/stat" <<'STUB'
 #!/bin/bash
@@ -60,6 +60,7 @@ library="$test_tmp/grant-functions.sh"
   -e "s|/var/lib/omarchy/sudo-passwordless|$test_tmp/state|g" \
   -e "s|/etc/sudoers.d|$test_tmp/etc/sudoers.d|g" \
   -e "s|/etc/tmpfiles.d|$test_tmp/etc/tmpfiles.d|g" \
+  -e "s|/usr/share/libalpm/hooks|$test_tmp/hooks|g" \
   -e "s|/run/lock/omarchy-sudo-passwordless.lock|$test_tmp/run/lock/omarchy-sudo-passwordless.lock|g" \
   -e "s|/run/omarchy-sudo-passwordless-package-removing|$test_tmp/run/omarchy-sudo-passwordless-package-removing|g" \
   -e "s|/usr/bin/stat|$test_tmp/bin/stat|g" \
@@ -67,6 +68,8 @@ library="$test_tmp/grant-functions.sh"
   -e "s|/usr/bin/rm|$test_tmp/bin/rm|g" \
   -e "s|/usr/bin/systemctl|$test_tmp/bin/systemctl|g" \
   -e 's|/usr/bin/chown|/usr/bin/true|g' >"$library"
+
+cp "$ROOT/default/libalpm/hooks/05-omarchy-passwordless-revoke.hook" "$test_tmp/hooks/"
 
 printf 'r! /etc/sudoers.d/99-omarchy-nopasswd-*\n' >"$test_tmp/etc/tmpfiles.d/omarchy-nopasswd-sudo.conf"
 # The expected policy text is mapped along with its filename in this fixture.
@@ -197,3 +200,36 @@ if TEST_FAIL_RULE_DELETE=1 bash -euo pipefail -c 'source "$1"; post_remove' bash
 fi
 grep -q 'Administrator cleanup is required' "$test_tmp/removal-failure.output" || fail "package deletion failure lacks recovery guidance"
 pass "package removal reports cleanup failures instead of successful revocation"
+
+(
+  source "$library"
+  transaction_setup
+  rm -f "$REMOVAL_BLOCKER"
+  enable_locked 1000 5
+  record=$(read_state_record 1000)
+  expiry=${record#*$'\t'}
+  expiry=${expiry%%$'\t'*}
+  deadline=$(/usr/bin/date -u -d "@$expiry" +%Y%m%d%H%M%SZ)
+  [[ $(cat "$(rule_file 1000)") == "audituser ALL=(ALL) NOTAFTER=$deadline NOPASSWD: ALL" ]]
+  /usr/sbin/visudo -cf "$(rule_file 1000)" >/dev/null
+  classify_generated_rule "$(rule_file 1000)"
+  rm -f "$(state_file 1000)"
+  remove_known_legacy_rules
+  [[ ! -e $(rule_file 1000) ]]
+) || fail "native sudo deadline or state-independent bounded rule cleanup is incorrect"
+pass "sudo policy contains the same deadline and bounded orphan rules are recognized"
+
+(
+  source "$library"
+  transaction_setup
+  rm -f "$REMOVAL_BLOCKER"
+  enable_locked 1000 5
+  if TEST_FAIL_RULE_DELETE=1 package_removing_locked; then exit 1; fi
+  [[ -f $REMOVAL_BLOCKER && -f $(rule_file 1000) ]]
+  ! enable_locked 1000 5
+  package_removing_locked
+  [[ ! -e $(rule_file 1000) ]]
+  rm -f "$REMOVAL_BLOCKER" "$PACKAGE_HOOK"
+  ! enable_locked 1000 5
+) || fail "pre-transaction revocation error or missing hook does not prevent new grants"
+pass "package hook fails closed and grants require its installed policy"
