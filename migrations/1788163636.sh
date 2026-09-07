@@ -6,7 +6,7 @@ t2_packages=(linux-t2 linux-t2-headers apple-t2-audio-config apple-bcm-firmware 
 
 disable_unsafe_t2_repository() (
   [[ -f $pacman_conf ]] || return 0
-  local section backup stage=""
+  local section backup stage="" signature_policy
 
   section=$(/usr/bin/awk '
     found && /^[[:space:]]*\[/ { exit }
@@ -14,7 +14,28 @@ disable_unsafe_t2_repository() (
     found { print }
   ' "$pacman_conf")
   [[ -n $section ]] || return 0
-  /usr/bin/grep -Eq '^[[:space:]]*SigLevel[[:space:]]*=.*((Package)?(Never|Optional)|TrustAll)([[:space:]]|$)' <<<"$section" || return 0
+
+  # Resolve includes, inherited policy and directive precedence through pacman
+  # itself. DatabaseOptional/DatabaseNever do not weaken package signatures.
+  if ! signature_policy=$(/usr/bin/pacman-conf --config "$pacman_conf" --repo arch-mact2 SigLevel); then
+    echo "Could not resolve the arch-mact2 signature policy; leaving the repair pending." >&2
+    return 1
+  fi
+  if [[ -z ${signature_policy//[$' \t\n\r']/} ]]; then
+    if ! signature_policy=$(/usr/bin/pacman-conf --config "$pacman_conf" SigLevel); then
+      echo "Could not resolve the inherited signature policy; leaving the repair pending." >&2
+      return 1
+    fi
+  fi
+  signature_policy=${signature_policy//$'\n'/ }
+  signature_policy=${signature_policy//$'\t'/ }
+  if [[ " $signature_policy " == *" PackageRequired "* &&
+    " $signature_policy " == *" PackageTrustedOnly "* &&
+    " $signature_policy " != *" PackageOptional "* &&
+    " $signature_policy " != *" PackageNever "* &&
+    " $signature_policy " != *" PackageTrustAll "* ]]; then
+    return 0
+  fi
 
   backup="$(/usr/bin/dirname "$pacman_conf")/arch-mact2.omarchy-disabled.$(/usr/bin/date +%s).txt"
   sudo /usr/bin/install -T -o root -g root -m 0600 /dev/stdin "$backup" <<<"$section"

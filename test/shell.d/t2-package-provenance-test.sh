@@ -4,6 +4,8 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+require_command pacman-conf
+
 t2_migration="$ROOT/migrations/1788163636.sh"
 test_tmp=$(mktemp -d)
 trap 'rm -rf "$test_tmp"' EXIT
@@ -35,7 +37,9 @@ printf '%s\n' '01:00.0 Bridge [0680]: Apple Inc. T2 Security Chip [106b:1801]'
 STUB
 cat >"$stub_bin/pacman-conf" <<'STUB'
 #!/bin/bash
-if [[ " $* " == *" --repo omarchy "* ]]; then
+if [[ ${TEST_NATIVE_SIGLEVEL:-0} == 1 || " $* " == *" --repo arch-mact2 "* ]]; then
+  exec /usr/bin/pacman-conf "$@"
+elif [[ " $* " == *" --repo omarchy "* ]]; then
   printf '%s\n' "${TEST_REPO_SIGLEVEL-${TEST_SIGLEVEL:-PackageRequired PackageTrustedOnly}}"
 else
   printf '%s\n' "${TEST_GLOBAL_SIGLEVEL-${TEST_SIGLEVEL:-PackageRequired PackageTrustedOnly}}"
@@ -76,17 +80,18 @@ run_t2_scenario() {
   local query_fail_package="${9:-}" query_padding_lines="${10:-0}"
   local dir="$test_tmp/$name"
   mkdir "$dir"
-  cat >"$dir/pacman.conf" <<'CONF'
+  cat >"$dir/pacman.conf" <<CONF
 [options]
-SigLevel = Required DatabaseOptional
+SigLevel = ${TEST_LEGACY_GLOBAL_POLICY:-Required DatabaseOptional}
 [arch-mact2]
 Server = https://unsafe.invalid/
-SigLevel = Never
+${TEST_LEGACY_POLICY-SigLevel = Never}
 [administrator]
 Server = file:///srv/admin
 SigLevel = Required
 [omarchy]
 Server = https://pkgs.omarchy.org/
+SigLevel = PackageRequired PackageTrustedOnly DatabaseOptional
 CONF
   if (( padding_lines > 0 )); then
     /usr/bin/awk -v padding_lines="$padding_lines" '
@@ -108,6 +113,48 @@ CONF
     TEST_QUERY_FAIL_PACKAGE="$query_fail_package" TEST_QUERY_PADDING_LINES="$query_padding_lines" \
     TEST_TRANSACTION_LOG="$dir/transactions" bash -euo pipefail "$dir/t2-migration.sh" >"$dir/output" 2>&1
 }
+
+check_legacy_policy() {
+  local name="$1" policy="$2" expected="$3" global_policy="${4:-Required DatabaseOptional}"
+  TEST_NATIVE_SIGLEVEL=1 TEST_LEGACY_POLICY="$policy" TEST_LEGACY_GLOBAL_POLICY="$global_policy" \
+    run_t2_scenario "$name" 'PackageRequired PackageTrustedOnly' omarchy
+  [[ -f $test_tmp/$name/marker ]] || fail "legacy policy case $name did not finish replacement"
+  if [[ $expected == "preserve" ]]; then
+    grep -q '^\[arch-mact2\]$' "$test_tmp/$name/pacman.conf" ||
+      fail "secure legacy package policy $name was removed"
+    [[ -z $(find "$test_tmp/$name" -name 'arch-mact2.omarchy-disabled.*.txt' -print -quit) ]] ||
+      fail "secure legacy package policy $name was backed up as unsafe"
+  else
+    ! grep -q '^\[arch-mact2\]$' "$test_tmp/$name/pacman.conf" ||
+      fail "unsafe legacy package policy $name was retained"
+    [[ -n $(find "$test_tmp/$name" -name 'arch-mact2.omarchy-disabled.*.txt' -print -quit) ]] ||
+      fail "unsafe legacy package policy $name has no recovery backup"
+  fi
+}
+
+check_legacy_policy database-optional 'SigLevel = PackageRequired DatabaseOptional PackageTrustedOnly' preserve
+check_legacy_policy database-never 'SigLevel = PackageRequired DatabaseNever PackageTrustedOnly' preserve
+check_legacy_policy database-trust-all 'SigLevel = PackageRequired DatabaseTrustAll PackageTrustedOnly' preserve
+check_legacy_policy package-override 'SigLevel = Optional PackageRequired TrustedOnly' preserve
+check_legacy_policy inherited-secure '' preserve
+check_legacy_policy package-optional 'SigLevel = PackageOptional DatabaseRequired PackageTrustedOnly' remove
+check_legacy_policy package-trust-all 'SigLevel = PackageRequired PackageTrustAll' remove
+check_legacy_policy inherited-unsafe '' remove Never
+printf '%s\n' 'SigLevel = PackageRequired DatabaseOptional PackageTrustedOnly' >"$test_tmp/included-policy.conf"
+check_legacy_policy included-secure "Include = $test_tmp/included-policy.conf" preserve
+printf '%s\n' 'SigLevel = PackageOptional DatabaseRequired PackageTrustedOnly' >"$test_tmp/included-policy.conf"
+check_legacy_policy included-unsafe "Include = $test_tmp/included-policy.conf" remove
+pass "native policy resolution preserves secure database exceptions and disables inherited or included unsafe package policy"
+
+if TEST_LEGACY_POLICY='SigLevel = InvalidPolicy' \
+  run_t2_scenario invalid-policy 'PackageRequired PackageTrustedOnly' omarchy; then
+  fail "unresolvable legacy signature policy reaches replacement"
+fi
+[[ ! -s $test_tmp/invalid-policy/transactions && ! -e $test_tmp/invalid-policy/marker ]] ||
+  fail "unresolvable legacy policy publishes a package transaction or completion"
+grep -q '^\[arch-mact2\]$' "$test_tmp/invalid-policy/pacman.conf" ||
+  fail "unresolvable legacy policy rewrites administrator configuration"
+pass "unresolvable legacy signature policy remains pending without mutation"
 
 if run_t2_scenario insecure 'PackageOptional PackageTrustAll' omarchy; then
   fail "T2 migration accepts insecure effective package policy"
