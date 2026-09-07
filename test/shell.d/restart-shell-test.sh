@@ -126,6 +126,7 @@ printf '%s\n' "$*" >>"$OMARCHY_TEST_QS_LOG"
 
 case " $* " in
   *' list --all -j '*)
+    [[ ${LC_ALL:-} == "C" ]] || exit 88
     if [[ ${OMARCHY_TEST_QS_LIST_INVALID:-0} == 1 ]]; then
       printf 'not-json\n'
       exit 0
@@ -157,7 +158,8 @@ case " $* " in
     if [[ ${OMARCHY_TEST_QS_LIVE:-1} == 1 && -s $OMARCHY_TEST_QS_STATE ]]; then
       printf '[{"config_path":"%s/shell/shell.qml","pid":303}]\n' "$OMARCHY_TEST_SESSION_PATH"
     else
-      printf '[]\n'
+      # Captured from native `quickshell list --all -j` with an empty registry.
+      printf 'No running instances.\n'
     fi
     ;;
   *' kill -p '*)
@@ -304,6 +306,7 @@ grep -F "kill -p $restart_root/shell --any-display" "$restart_log" >/dev/null ||
 grep -F 'hl.dsp.exec_cmd("omarchy-launch-shell")' "$dispatch_log" >/dev/null || fail "restart launches the fresh shell through Hyprland"
 grep -F "ipc -n -p $restart_root/shell call -- shell ping" "$ipc_log" >/dev/null || fail "restart checks readiness in the session checkout"
 pass "restart replaces duplicate shell instances from the session checkout"
+pass "restart accepts Quickshell's native empty-registry response during ordinary restart"
 [[ $(<"$test_tmp/notification-checks") == 4 ]] || fail "restart waits for the existing notification service after core IPC is ready"
 pass "restart waits for notification readiness before one-time update hooks"
 
@@ -425,6 +428,7 @@ OMARCHY_TEST_SESSION_PATH="$restart_root" \
 grep -F "list --all -j" "$restart_log" >/dev/null || fail "dead-lock recovery checks the live Quickshell registry"
 grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "dead-lock recovery re-acquires the session lock"
 pass "restart distinguishes a dead locker from a live but unreadable one"
+pass "cold and locked recovery accept Quickshell's native empty-registry response"
 
 for dispatch_mode in hang-after-launch hang-before-once; do
   sleep 30 &

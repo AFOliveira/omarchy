@@ -59,8 +59,18 @@ shell_instance_state() {
   duration_from_millis "$budget_millis"
   timeout_duration=$REPLY
 
-  if ! instance_list=$(/usr/bin/timeout --kill-after=0.1s "$timeout_duration" quickshell list --all -j 2>/dev/null) ||
-    ! live_instance=$(jq -er --arg config "$CONFIG_FILE" '
+  if ! instance_list=$(/usr/bin/timeout --kill-after=0.1s "$timeout_duration" /usr/bin/env LC_ALL=C quickshell list --all -j 2>/dev/null); then
+    return 2
+  fi
+
+  # Quickshell's successful canonical empty result is text even with -j. Fix
+  # the locale so that exact response is stable, while keeping every other
+  # non-JSON answer ambiguous and therefore unsafe to launch through.
+  if [[ $instance_list == "No running instances." ]]; then
+    return 1
+  fi
+
+  if ! live_instance=$(jq -er --arg config "$CONFIG_FILE" '
       if type == "array" then any(.[]; .config_path == $config) | tostring
       else error("invalid instance list") end
     ' <<<"$instance_list" 2>/dev/null); then
