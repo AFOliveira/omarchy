@@ -8,7 +8,8 @@ if [[ $- != *p* ]]; then
   exit 126
 fi
 
-source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
 
 if ! omarchy_security_require_privileged_bash_startup; then
   echo "Refusing an unsafe Bash startup for Omarchy migrations." >&2
@@ -18,6 +19,7 @@ fi
 set -euo pipefail
 
 omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_require_source_root "$0"
 
 PATH="$OMARCHY_PATH/bin:/usr/bin:/usr/sbin:/bin:/sbin"
 export PATH

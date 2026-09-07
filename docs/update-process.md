@@ -58,6 +58,8 @@ the migration should no-op for other users.
 
 Both the update and standalone migration runner start with a cold credential state and use the no-update sudo wrapper. The runner revokes again on success, failure, and catchable termination signals. Historical migrations remain strictly ordered, and failed migrations remain pending.
 
+The standalone migration runner and SSH setup command also require their source root to match the running entrypoint before selecting the wrapper or migration files. The migration directory remains `$OMARCHY_PATH/migrations` after that validation; no fallback source tree is inferred from the user's home or configuration.
+
 For watchers and diagnostics, `omarchy-migrate --pending` prints pending
 migration names and exits `0` when any are pending. When no migrations are
 pending, it prints nothing and exits non-zero.
@@ -144,11 +146,13 @@ omarchy-update
 
 Important behavior:
 
-- `omarchy update` uses the session’s `OMARCHY_PATH` and a fixed command search path for its system phases. User PATH is restored behind the sudo wrapper for hooks and mise.
+- Protected update entrypoints require the session's canonical `OMARCHY_PATH` to match their own checkout or the packaged `/usr/bin` entrypoint before selecting commands or the sudo wrapper. This preserves intentionally trusted development checkouts while rejecting a command paired with a different source root. System phases use a fixed command search path; user PATH is restored behind the sudo wrapper for hooks and mise.
 - Mixed-trust update entrypoints start Bash in privileged mode, discard `BASH_ENV`, `ENV`, and exported-function records before launching helpers, and reject an ordinary `bash path/to/command` invocation. Run them as executables (normally through the `omarchy` CLI); `/usr/bin/bash -p path/to/command` is the explicit interpreter form. This keeps shell startup injection from replacing the no-update sudo boundary.
 - In dev-link mode, `omarchy update` fast-forwards the active checkout from its configured upstream before changing system packages or running migrations.
 - Migrations remain in chronological order even though historical entries mix user-controlled code with later privileged repairs. Before entering that mixed-trust tail, Omarchy invalidates its timestamp and forces every later sudo call—including AUR's configurable sudo command—to use `--no-update`; prompts authorize one command without publishing a reusable timestamp. Yay's credential loop is disabled for the update.
 - User-controlled post-update hooks and mise tools run only after every sudo-capable update stage. Omarchy invalidates its sudo timestamp before each boundary and on every exit; detached children therefore have no later reusable update authorization to wait for.
+- This lifecycle controls authorization created by the protected workflow. `sudo -N` prevents cache updates but can use an existing valid credential, and `sudo -k` revokes the current session's timestamp. It does not isolate the account from unrelated concurrent authentication in another workflow.
+- Channel switching establishes the same boundary before dev link/unlink, refresh and package operations. It keeps the wrapper first when changing source roots, carries the original user PATH into update hooks and mise, and runs the deferred refresh hook only after the full update succeeds and authorization is revoked again. Failed and interrupted channel switches revoke on exit.
 - `-y` exports `OMARCHY_UPDATE_UNATTENDED=1` and suppresses Omarchy confirmation prompts. Interactive review steps (orphan removal, conflict handoff) report and skip instead of blocking. Privileged commands still require sudo authorization, and command-scoped authentication can prompt separately for each command.
 - The free-space requirement uses a 10 GiB threshold and stops the update before
   confirmation when it is not met. If free space cannot be determined, the
