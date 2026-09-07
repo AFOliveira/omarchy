@@ -66,6 +66,7 @@ printf 'FZF\n' >>"$TEST_EVENT_LOG"
 case ${TEST_PICKER_RESULT:-select} in
   select) printf '%s\n' "${TEST_SELECTION:-safe-package}" ;;
   empty) ;;
+  nomatch) printf 'ignored-partial-output\n'; exit 1 ;;
   cancel) exit 130 ;;
   error) exit 42 ;;
 esac
@@ -116,10 +117,14 @@ for command in install remove; do
 
   run_picker "$command" 0 TEST_PICKER_RESULT=empty
   ! grep -q '^SUDO:transaction$' "$event_log" || fail "$command authenticated for an empty selection"
+  run_picker "$command" 0 TEST_PICKER_RESULT=nomatch
+  ! grep -q '^SUDO:transaction$' "$event_log" || fail "$command authenticated after no match"
   run_picker "$command" 0 TEST_PICKER_RESULT=cancel
   ! grep -q '^SUDO:transaction$' "$event_log" || fail "$command authenticated after Esc"
 
   run_picker "$command" 41 TEST_QUERY_FAIL=1
+  run_picker "$command" 41 TEST_QUERY_FAIL=1 TEST_PICKER_RESULT=cancel
+  ! grep -q '^FZF$' "$event_log" || fail "$command masked a query failure with picker cancellation"
   run_picker "$command" 42 TEST_PICKER_RESULT=error
   run_picker "$command" 1 TEST_SUDO_NO_N=1
   ! grep -q '^FZF$' "$event_log" || fail "$command reached picker without no-update sudo support"
@@ -140,6 +145,19 @@ for command in install remove; do
   [[ ! -e $startup_marker ]] || fail "$command picker executed inherited Bash startup code"
 done
 pass "package picker enters through protected Bash before discovery"
+
+for command in install remove; do
+  : >"$event_log"
+  set +e
+  env -i HOME="$test_tmp/home" OMARCHY_PATH="$mapped_root" \
+    TEST_EVENT_LOG="$event_log" TEST_REVOKE_COUNT="$revoke_count" \
+    /usr/bin/bash "$mapped_root/bin/omarchy-pkg-$command" -p >/dev/null 2>&1
+  status=$?
+  set -e
+  (( status == 126 )) || fail "$command accepted an ordinary Bash launch with a decoy -p argument"
+  [[ ! -s $event_log ]] || fail "$command decoy -p launch reached discovery or sudo"
+done
+pass "package picker rejects ordinary Bash with a decoy privileged-mode argument"
 
 for command in install remove; do
   : >"$event_log"

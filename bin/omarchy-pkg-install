@@ -44,11 +44,21 @@ fzf_args=(
 )
 
 set +e
-pkg_names=$(/usr/bin/pacman -Slq | /usr/bin/fzf "${fzf_args[@]}")
+package_candidates=$(/usr/bin/pacman -Slq)
+query_status=$?
+set -e
+if (( query_status != 0 )); then
+  echo "Package discovery failed." >&2
+  exit "$query_status"
+fi
+
+set +e
+pkg_names=$(printf '%s' "$package_candidates" | /usr/bin/fzf "${fzf_args[@]}")
 picker_status=$?
 set -e
 case "$picker_status" in
   0) ;;
+  1) pkg_names="" ;;
   130) exit 0 ;;
   *)
     echo "Package discovery failed." >&2
