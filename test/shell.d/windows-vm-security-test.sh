@@ -19,7 +19,7 @@ second_password=$(generate_password)
 [[ $first_password != "$second_password" ]] || fail "fresh generated Windows passwords are unique"
 for generated in "$first_password" "$second_password"; do
   valid_password "$generated" || fail "generated Windows password satisfies Omarchy validation"
-  [[ ${#generated} -ge 32 && ${#generated} -le 64 ]] ||
+  (( ${#generated} >= 32 && ${#generated} <= 64 )) ||
     fail "generated Windows password has a compatible bounded length"
   [[ $generated =~ [A-Z] && $generated =~ [a-z] && $generated =~ [0-9] && $generated =~ [^A-Za-z0-9] ]] ||
     fail "generated Windows password satisfies Windows complexity classes"
@@ -114,6 +114,37 @@ mapfile -d '' -t freerdp_args <"$FREERDP_ARGV_FILE"
 [[ ${freerdp_args[0]} == /u:generated-user ]] || fail "launch uses the configured Windows username"
 [[ ${freerdp_args[1]} == "/p:$generated_from_prompt" ]] || fail "launch uses the generated Windows password"
 pass "launch consumes the generated credential instead of a public fallback"
+
+mkdir -p "$OMARCHY_WINDOWS_DIR"
+cat >"$COMPOSE_FILE" <<'COMPOSE'
+services:
+  windows:
+    environment:
+      USERNAME: "recovered-user"
+      PASSWORD: "  Compo$$e\"Pass\\word1  "
+COMPOSE
+recovered_password='  Compo$e"Pass\word1  '
+for broken in password username missing; do
+  case $broken in
+    password) write_credentials stale-user "$(printf '%065d' 0)" ;;
+    username) write_credentials 'invalid user' stale-password ;;
+    missing) write_credentials '' stale-password ;;
+  esac
+  : >"$lifecycle_log"
+  launch_windows --keep-alive >"$test_dir/recovery-$broken.output"
+  mapfile -d '' -t freerdp_args <"$FREERDP_ARGV_FILE"
+  [[ ${freerdp_args[0]} == /u:recovered-user && ${freerdp_args[1]} == "/p:$recovered_password" ]] ||
+    fail "compose recovery mixes private and recovered credentials for $broken"
+done
+pass "invalid or incomplete private credentials recover a complete compatible compose pair"
+
+printf '      USERNAME: "invalid user"\n      PASSWORD: "unusable-pair"\n' >"$COMPOSE_FILE"
+: >"$lifecycle_log"
+if (launch_windows --keep-alive) >"$test_dir/invalid-recovery.output" 2>&1; then
+  fail "invalid compose recovery permits launch"
+fi
+[[ ! -s $lifecycle_log ]] || fail "invalid recovered credentials start the VM"
+pass "unusable recovered credentials fail before VM startup"
 
 rm -f "$CREDENTIALS_FILE" "$COMPOSE_FILE"
 : >"$lifecycle_log"

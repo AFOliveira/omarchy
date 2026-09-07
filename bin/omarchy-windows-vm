@@ -1417,13 +1417,16 @@ launch_windows() {
     fi
   fi
 
-  # RDP credentials come from the private per-user file. Fall back to the compose
-  # only when it is readable (sudoless mode), reversing the writer's escaping.
+  # Recover a complete pair from readable compose settings when the private
+  # record is incomplete or invalid. Never mix a username from one record with
+  # the password from another, or substitute a public default.
   WIN_USER=$(read_credential USERNAME) || WIN_USER=""
   WIN_PASS=$(read_credential PASSWORD) || WIN_PASS=""
-  if [[ -z $WIN_USER || -z $WIN_PASS ]] && [[ -r $COMPOSE_FILE ]]; then
-    [[ -z $WIN_USER ]] && WIN_USER=$(unescape "$(read_compose_value USERNAME "$COMPOSE_FILE")")
-    [[ -z $WIN_PASS ]] && WIN_PASS=$(unescape "$(read_compose_value PASSWORD "$COMPOSE_FILE")")
+  if ! valid_username "$WIN_USER" || ! valid_password "$WIN_PASS"; then
+    if [[ -r $COMPOSE_FILE ]]; then
+      WIN_USER=$(unescape "$(read_compose_value USERNAME "$COMPOSE_FILE")")
+      WIN_PASS=$(unescape "$(read_compose_value PASSWORD "$COMPOSE_FILE")")
+    fi
   fi
   if ! valid_username "$WIN_USER" || ! valid_password "$WIN_PASS"; then
     echo "Windows VM credentials are missing or invalid; refusing to use public defaults." >&2
