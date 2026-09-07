@@ -14,7 +14,10 @@ source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
 omarchy_security_require_privileged_bash_startup || exit 126
 set -e
 omarchy_security_sanitize_bash_environment "$0" "$@"
-user_path=$PATH
+# Logging and lock acquisition re-exec this command with a sanitized PATH.
+# Preserve the caller's path only for the later unprivileged hook/mise phases.
+user_path=${OMARCHY_UPDATE_USER_PATH:-$PATH}
+unset OMARCHY_UPDATE_USER_PATH
 omarchy_security_revoke_sudo_timestamp || exit 1
 omarchy_security_install_sudo_cleanup_traps
 omarchy_security_enable_no_update_sudo
@@ -35,11 +38,11 @@ cleanup_update() {
 
 if [[ -z ${OMARCHY_UPDATE_LOGGED:-} ]]; then
   script_command=$(printf '%q ' "$0" "$@")
-  exec env OMARCHY_UPDATE_LOGGED=1 script -qefc "$script_command" "/tmp/omarchy-update.log"
+  exec env OMARCHY_UPDATE_LOGGED=1 OMARCHY_UPDATE_USER_PATH="$user_path" script -qefc "$script_command" "/tmp/omarchy-update.log"
 fi
 
 if ! omarchy-update-lock held; then
-  exec omarchy-update-lock run "$0" "$@"
+  exec env OMARCHY_UPDATE_USER_PATH="$user_path" omarchy-update-lock run "$0" "$@"
 fi
 
 trap 'echo ""; echo -e "\033[0;31mSomething went wrong during the update!\n\nPlease review the output above carefully, correct the error, and retry the update.\n\nIf you need assistance, get help from the community at https://omarchy.org/discord\033[0m"' ERR
