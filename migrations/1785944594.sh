@@ -2,7 +2,6 @@ echo "Update T2 Mac suspend, Touch Bar, and fan defaults"
 
 limine_conf=/etc/limine-entry-tool.d/t2-mac.conf
 fan_conf=/etc/t2fand.conf
-running_cmdline=/proc/cmdline
 repair_marker=/var/lib/omarchy/migrations/1785944594
 
 is_t2_mac() {
@@ -27,19 +26,7 @@ needs_machine_repair() {
     return 2
   fi
   [[ ! -e $repair_marker ]] || return 1
-  if [[ -f $limine_conf ]] && /usr/bin/grep -q 'pcie_ports=compat' "$limine_conf"; then return 0; fi
-  if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then return 0; fi
-  if tiny_dfr_installed; then
-    return 0
-  else
-    status=$?
-    (( status == 1 )) || return 2
-  fi
-  if [[ -f $limine_conf ]] && /usr/bin/grep -q 'pm_async=off' "$limine_conf" &&
-    /usr/bin/grep -q 'mem_sleep_default=deep' "$limine_conf" &&
-    { [[ ! -r $running_cmdline ]] || ! /usr/bin/grep -Eq '(^| )pm_async=off( |$)' "$running_cmdline" ||
-      ! /usr/bin/grep -Eq '(^| )mem_sleep_default=deep( |$)' "$running_cmdline"; }; then return 0; fi
-  return 1
+  return 0
 }
 
 repair_machine() {
@@ -78,9 +65,7 @@ EOF
     fi
   fi
   if [[ -f $limine_conf ]] && /usr/bin/grep -q 'pm_async=off' "$limine_conf" &&
-    /usr/bin/grep -q 'mem_sleep_default=deep' "$limine_conf" &&
-    { [[ ! -r $running_cmdline ]] || ! /usr/bin/grep -Eq '(^| )pm_async=off( |$)' "$running_cmdline" ||
-      ! /usr/bin/grep -Eq '(^| )mem_sleep_default=deep( |$)' "$running_cmdline"; }; then rebuild=1; fi
+    /usr/bin/grep -q 'mem_sleep_default=deep' "$limine_conf"; then rebuild=1; fi
   if (( rebuild )); then /usr/bin/limine-mkinitcpio || return 1; fi
   /usr/bin/install -Dm644 /dev/null "$repair_marker" || return 1
 }

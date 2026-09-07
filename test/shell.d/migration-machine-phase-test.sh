@@ -3,11 +3,11 @@ set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 tmp=$(mktemp -d)
 trap 'chmod -R u+rwx "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT
-if ! unshare --user --map-root-user true 2>/dev/null; then
+if ! unshare --user --map-root-user --mount /usr/bin/bash -p -c : 2>/dev/null; then
   pass "user namespaces unavailable; skipping privileged migration machine-body execution"
   exit 0
 fi
-root_run() { unshare --user --map-root-user --mount /usr/bin/bash "$@"; }
+root_run() { unshare --user --map-root-user --mount /usr/bin/bash -p "$@"; }
 script_copy() { cp "$ROOT/migrations/$1.sh" "$2"; }
 
 fido_dir="$tmp/fido2"; fido_file="$fido_dir/fido2"; fido_marker="$tmp/fido.marker"
@@ -130,6 +130,53 @@ grep -Fq '[Fan2]' "$tmp/fan.conf" || fail "T2 retry did not add the second fan"
 T2_PRESENT=1 root_run "$t2_body" --machine
 pass "T2 machine body preserves discovery and rebuild failures, completes a retry, and replays without mutation"
 
+t2_dispatch="$tmp/t2-dispatch.sh"; script_copy 1785944594 "$t2_dispatch"
+t2_dispatch_marker="$tmp/t2-dispatch.marker"; t2_dispatch_lock="$tmp/t2-dispatch.lock"; t2_dispatch_log="$tmp/t2-dispatch.log"
+t2_dispatch_conf="$tmp/t2-dispatch.conf"; t2_dispatch_fan="$tmp/t2-dispatch-fan.conf"; t2_dispatch_cmdline="$tmp/t2-dispatch-cmdline"
+t2_dispatch_lspci="$tmp/t2-dispatch-lspci"; t2_dispatch_pacman="$tmp/t2-dispatch-pacman"; t2_dispatch_limine="$tmp/t2-dispatch-limine"; t2_dispatch_sudo="$tmp/t2-dispatch-sudo"
+printf 'options=pm_async=off mem_sleep_default=deep\n' >"$t2_dispatch_conf"
+printf '[Fan2]\n' >"$t2_dispatch_fan"
+printf 'quiet pm_async=off mem_sleep_default=deep\n' >"$t2_dispatch_cmdline"
+touch "$tmp/t2-fail-once"
+touch "$tmp/t2-present"
+cat >"$t2_dispatch_lspci" <<SH
+#!/bin/bash
+[[ -e '$tmp/t2-present' ]] && echo '00:00.0 ISA bridge [0601]: Apple Inc. T2 [106b:1801]'
+exit 0
+SH
+cat >"$t2_dispatch_pacman" <<'SH'
+#!/bin/bash
+[[ $1 == -Qq ]] && exit 0
+exit 91
+SH
+cat >"$t2_dispatch_limine" <<SH
+#!/bin/bash
+printf 'rebuild\n' >>'$t2_dispatch_log'
+if [[ -e '$tmp/t2-fail-once' ]]; then
+  rm -f '$tmp/t2-fail-once'
+  exit 27
+fi
+SH
+cat >"$t2_dispatch_sudo" <<SH
+#!/bin/bash
+[[ \$1 == -N && \$2 == -- ]] || exit 90
+printf 'sudo\n' >>'$t2_dispatch_log'
+shift 2
+exec "\$@"
+SH
+chmod +x "$t2_dispatch_lspci" "$t2_dispatch_pacman" "$t2_dispatch_limine" "$t2_dispatch_sudo"
+sed -i -e "s|/usr/bin/lspci|$t2_dispatch_lspci|g" -e "s|/usr/bin/pacman|$t2_dispatch_pacman|g" -e "s|/usr/bin/limine-mkinitcpio|$t2_dispatch_limine|g" -e "s|/usr/bin/sudo|$t2_dispatch_sudo|g" -e "s|/run/omarchy-t2-hardware-migration.lock|$t2_dispatch_lock|g" -e "s|/usr/share/omarchy/migrations/1785944594.sh|$t2_dispatch|g" -e "s|/var/lib/omarchy/migrations/1785944594|$t2_dispatch_marker|g" -e "s|/etc/limine-entry-tool.d/t2-mac.conf|$t2_dispatch_conf|g" -e "s|/etc/t2fand.conf|$t2_dispatch_fan|g" -e "s|/proc/cmdline|$t2_dispatch_cmdline|g" "$t2_dispatch"
+if root_run "$t2_dispatch" --machine; then fail "T2 failed rebuild publishes completion in full retry fixture"; fi
+[[ ! -e $t2_dispatch_marker && $(grep -c '^rebuild$' "$t2_dispatch_log") == 1 ]] || fail "T2 failed rebuild did not remain pending"
+root_run "$t2_dispatch"
+[[ -e $t2_dispatch_marker && $(grep -c '^rebuild$' "$t2_dispatch_log") == 2 && $(grep -c '^sudo$' "$t2_dispatch_log") == 1 ]] || fail "T2 no-argument dispatch did not retry and mark an already-correct persistent configuration"
+root_run "$t2_dispatch"
+[[ $(grep -c '^sudo$' "$t2_dispatch_log") == 1 && $(grep -c '^rebuild$' "$t2_dispatch_log") == 2 ]] || fail "T2 marked replay entered the privileged transaction"
+rm -f "$t2_dispatch_marker" "$tmp/t2-present"
+root_run "$t2_dispatch"
+[[ $(grep -c '^sudo$' "$t2_dispatch_log") == 1 && ! -e $t2_dispatch_marker ]] || fail "confirmed non-T2 hardware entered the privileged transaction"
+pass "T2 full no-argument dispatch retries an unmarked failed rebuild and keeps marked or confirmed non-T2 runs unprivileged"
+
 cups_bin="$tmp/cups-bin"; mkdir "$cups_bin"; printf '#!/bin/bash\nexit 9\n' >"$cups_bin/pacman"; chmod +x "$cups_bin/pacman"
 cups_body="$tmp/cups-body.sh"; script_copy 1787815267 "$cups_body"
 sed -i -e "s|/usr/bin/pacman|$cups_bin/pacman|g" -e "s|/var/lib/omarchy/migrations/1787815267|$tmp/cups.marker|g" "$cups_body"
@@ -173,7 +220,13 @@ NSS_ENUM_STATUS=8 root_run "$cups_body" --machine
 pass "CUPS NSS and service mutation failures remain pending, retry successfully, and replay without querying NSS"
 
 for transformed in "$fido_body" "$bt_body" "$t2_body" "$cups_body"; do
-  if "$transformed" --machine >/dev/null 2>&1; then fail "$(basename "$transformed") accepts machine dispatch without EUID 0"; fi
+  gate_output="$tmp/$(basename "$transformed").gate-output"
+  set +e
+  /usr/bin/bash -p "$transformed" --machine >"$gate_output" 2>&1
+  gate_status=$?
+  set -e
+  [[ $gate_status == 1 ]] || fail "$(basename "$transformed") returns $gate_status instead of the root-gate status"
+  grep -Fq 'its machine phase requires root' "$gate_output" || fail "$(basename "$transformed") did not execute the non-root machine gate"
   if root_run "$transformed" --unexpected >/dev/null 2>&1; then fail "$(basename "$transformed") accepts an unexpected argument"; fi
 done
 pass "all transformed production dispatchers preserve their EUID and argument gates"
