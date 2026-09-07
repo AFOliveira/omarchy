@@ -11,13 +11,21 @@ test_uid=$(id -u)
 
 cat >"$stub/id" <<'SH'
 #!/bin/bash
-[[ ${1:-} == -u ]] || exit 2
-printf '%s\n' "$TEST_UID"
+case ${1:-} in
+-u) printf '%s\n' "$TEST_UID" ;;
+-Gn) [[ ${2:-} == -- && ${3:-} == "${TEST_ACCOUNT:-audit}" ]] || exit 2; printf '%s\n' "${TEST_GROUPS:-audit sshers}" ;;
+*) exit 2 ;;
+esac
 SH
 cat >"$stub/getent" <<'SH'
 #!/bin/bash
 [[ ${1:-} == passwd && ${2:-} == "$TEST_UID" ]] || exit 2
-printf 'audit:x:%s:100:Audit Test:%s:/bin/bash\n' "$TEST_UID" "$HOME"
+printf '%s:x:%s:100:Audit Test:%s:/bin/bash\n' "${TEST_ACCOUNT:-audit}" "$TEST_UID" "$HOME"
+SH
+cat >"$stub/passwd" <<'SH'
+#!/bin/bash
+[[ ${1:-} == -S && ${2:-} == -- && ${3:-} == "${TEST_ACCOUNT:-audit}" ]] || exit 2
+printf '%s %s 2026-01-01 -1 -1 -1 -1\n' "${TEST_ACCOUNT:-audit}" "${ACCOUNT_STATUS:-P}"
 SH
 
 cat >"$stub/omarchy-pkg-add" <<'SH'
@@ -55,7 +63,8 @@ case $1 in
 systemctl)
   a=$2
   case $a in
-  is-active) [[ -e $STATE/active ]] ;; is-enabled) [[ -e $STATE/enabled ]] ;;
+  is-active) [[ ${ACTIVE_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ -e $STATE/active ]] && { echo active; exit 0; } || { echo inactive; exit 3; } ;;
+  is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; } ;;
   start) [[ ${START_PARTIAL:-0} != 1 ]] || { touch "$STATE/active"; exit 1; }; [[ ${START_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/active" ;;
   enable) [[ ${ENABLE_PARTIAL:-0} != 1 ]] || { touch "$STATE/enabled"; exit 1; }; [[ ${ENABLE_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/enabled" ;;
   stop) [[ ${STOP_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/active" ;;
@@ -78,7 +87,7 @@ install) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); mkdir -p "${d%/*}"; /usr/bi
 ssh-keygen) echo host-keygen >>"$EVENTS"; [[ ${HOSTKEY_FAIL:-0} != 1 ]] || exit 1; touch "$FAKE_ROOT/etc/ssh/ssh_host_key" ;;
 sshd)
   if [[ $2 == -t ]]; then echo sshd-t >>"$EVENTS"; [[ ${T_FAIL:-0} != 1 ]]
-  else echo sshd-T >>"$EVENTS"; [[ ${DUMP_FAIL:-0} != 1 ]] || exit 1; if [[ " $* " == *' -C '* ]]; then echo "PasswordAuthentication ${MATCH_PASS_AUTH:-${PASS_AUTH:-no}}"; echo "KbdInteractiveAuthentication ${MATCH_KBD_AUTH:-${KBD_AUTH:-no}}"; echo "AuthenticationMethods ${MATCH_AUTH_METHODS:-${AUTH_METHODS:-publickey}}"; echo "PubkeyAuthentication ${MATCH_PUBKEY_AUTH:-${PUBKEY_AUTH:-yes}}"; echo "AuthorizedKeysFile ${MATCH_KEYS_SETTING:-${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}}"; else echo "PasswordAuthentication ${PASS_AUTH:-no}"; echo "KbdInteractiveAuthentication ${KBD_AUTH:-no}"; echo "AuthenticationMethods ${AUTH_METHODS:-publickey}"; echo "PubkeyAuthentication ${PUBKEY_AUTH:-yes}"; echo "AuthorizedKeysFile ${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}"; fi; fi ;;
+  else echo sshd-T >>"$EVENTS"; [[ ${DUMP_FAIL:-0} != 1 ]] || exit 1; if [[ " $* " == *' -C '* ]]; then echo "PasswordAuthentication ${MATCH_PASS_AUTH:-${PASS_AUTH:-no}}"; echo "KbdInteractiveAuthentication ${MATCH_KBD_AUTH:-${KBD_AUTH:-no}}"; echo "AuthenticationMethods ${MATCH_AUTH_METHODS:-${AUTH_METHODS:-publickey}}"; echo "PubkeyAuthentication ${MATCH_PUBKEY_AUTH:-${PUBKEY_AUTH:-yes}}"; echo "AuthorizedKeysFile ${MATCH_KEYS_SETTING:-${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}}"; [[ -z ${ALLOW_USERS:-} ]] || echo "AllowUsers $ALLOW_USERS"; [[ -z ${DENY_USERS:-} ]] || echo "DenyUsers $DENY_USERS"; [[ -z ${ALLOW_GROUPS:-} ]] || echo "AllowGroups $ALLOW_GROUPS"; [[ -z ${DENY_GROUPS:-} ]] || echo "DenyGroups $DENY_GROUPS"; else echo "PasswordAuthentication ${PASS_AUTH:-no}"; echo "KbdInteractiveAuthentication ${KBD_AUTH:-no}"; echo "AuthenticationMethods ${AUTH_METHODS:-publickey}"; echo "PubkeyAuthentication ${PUBKEY_AUTH:-yes}"; echo "AuthorizedKeysFile ${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}"; fi; fi ;;
 mv) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); /usr/bin/mv -fT "$s" "$d" ;;
 rm) [[ ${CONFIG_RM_FAIL:-0} != 1 ]] || exit 1; /usr/bin/rm -f "$(map "${*: -1}")" ;;
 *) exec "$@" ;;
@@ -93,6 +102,7 @@ mapped_sshd="$mapped_root/bin/omarchy-setup-security-sshd"
 sed \
   -e "s#/usr/bin/getent#$stub/getent#g" \
   -e "s#/usr/bin/id#$stub/id#g" \
+  -e "s#/usr/bin/passwd#$stub/passwd#g" \
   -e "s#/usr/bin/sudo#$stub/sudo#g" \
   -e "s#/usr/bin/omarchy-pkg-add#$stub/omarchy-pkg-add#g" \
   -e "s#/usr/bin/omarchy-cmd-missing#$stub/omarchy-cmd-missing#g" \
@@ -114,10 +124,12 @@ run() {
   [[ ${PRE_ENABLED:-0} != 1 ]] || touch "$d/state/enabled"
   [[ ${PRE_RULE:-0} != 1 ]] || touch "$d/state/rule"
   env HOME="$d/home" PATH="$stub:/usr/bin" OMARCHY_PATH="$mapped_root" FAKE_ROOT="$d/root" STATE="$d/state" EVENTS="$d/events" USER=audit TEST_UID="$test_uid" \
+    TEST_ACCOUNT="${TEST_ACCOUNT:-audit}" TEST_GROUPS="${TEST_GROUPS:-audit sshers}" ACCOUNT_STATUS="${ACCOUNT_STATUS:-P}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" \
     PACKAGE_FAIL="${PACKAGE_FAIL:-0}" GH_FAIL="${GH_FAIL:-0}" GH_KEYS="${GH_KEYS:-}" GUM_CHOICE="${GUM_CHOICE:-}" GUM_INPUT="${GUM_INPUT:-}" GUM_CANCEL="${GUM_CANCEL:-0}" \
     START_FAIL="${START_FAIL:-0}" START_PARTIAL="${START_PARTIAL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" ENABLE_PARTIAL="${ENABLE_PARTIAL:-0}" RELOAD_ONCE="${RELOAD_ONCE:-0}" RELOAD_ALWAYS_FAIL="${RELOAD_ALWAYS_FAIL:-0}" \
     HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" DUMP_FAIL="${DUMP_FAIL:-0}" PASS_AUTH="${PASS_AUTH:-no}" KBD_AUTH="${KBD_AUTH:-no}" AUTH_METHODS="${AUTH_METHODS:-publickey}" PUBKEY_AUTH="${PUBKEY_AUTH:-yes}" AUTHORIZED_KEYS_SETTING="${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}" \
     MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" MATCH_KBD_AUTH="${MATCH_KBD_AUTH:-}" MATCH_AUTH_METHODS="${MATCH_AUTH_METHODS:-}" MATCH_PUBKEY_AUTH="${MATCH_PUBKEY_AUTH:-}" MATCH_KEYS_SETTING="${MATCH_KEYS_SETTING:-}" \
+    ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" \
     LIMIT_FAIL="${LIMIT_FAIL:-0}" LIMIT_PARTIAL="${LIMIT_PARTIAL:-0}" VERIFY_MISS="${VERIFY_MISS:-0}" UFW_RELOAD_ONCE="${UFW_RELOAD_ONCE:-0}" UFW_RELOAD_ALWAYS_FAIL="${UFW_RELOAD_ALWAYS_FAIL:-0}" DELETE_FAIL="${DELETE_FAIL:-0}" CONFIG_RM_FAIL="${CONFIG_RM_FAIL:-0}" \
     "$mapped_sshd" "$@"
 }
@@ -146,6 +158,30 @@ pass "fresh SSH is key-authorized and validated before publication"
 
 for c in hostkey syntax dump pass kbd methods pubkey keysfile matched; do case $c in hostkey) HOSTKEY_FAIL=1;; syntax) T_FAIL=1;; dump) DUMP_FAIL=1;; pass) PASS_AUTH=yes;; kbd) KBD_AUTH=yes;; methods) AUTH_METHODS=any;; pubkey) PUBKEY_AUTH=no;; keysfile) AUTHORIZED_KEYS_SETTING=/etc/ssh/admin_keys;; matched) MATCH_PASS_AUTH=yes;; esac; if run "$c" "--key=$key" >/dev/null 2>&1; then fail "$c succeeds"; fi; no_publish "$c"; rolled_back "$c"; unset HOSTKEY_FAIL T_FAIL DUMP_FAIL PASS_AUTH KBD_AUTH AUTH_METHODS PUBKEY_AUTH AUTHORIZED_KEYS_SETTING MATCH_PASS_AUTH; done
 pass "host-key, syntax, and effective-policy failures are pre-publication"
+
+for c in allow-user deny-user allow-group deny-group locked complex-rule; do
+  case $c in
+    allow-user) ALLOW_USERS=someone;; deny-user) DENY_USERS=audit;; allow-group) ALLOW_GROUPS=admins;; deny-group) DENY_GROUPS=sshers;; locked) ACCOUNT_STATUS=L;; complex-rule) ALLOW_USERS='aud*';;
+  esac
+  if run "admission-$c" "--key=$key" >/dev/null 2>&1; then fail "$c admission restriction succeeds"; fi
+  no_publish "admission-$c"; rolled_back "admission-$c"
+  unset ALLOW_USERS DENY_USERS ALLOW_GROUPS DENY_GROUPS ACCOUNT_STATUS
+done
+ALLOW_USERS=audit DENY_USERS=someone ALLOW_GROUPS=sshers DENY_GROUPS=admins run admission-ok "--key=$key" >/dev/null
+TEST_ACCOUNT='machine$' TEST_GROUPS='machine$ sshers' ALLOW_USERS='machine$' run dollar-account "--key=$key" >/dev/null
+unset ALLOW_USERS DENY_USERS ALLOW_GROUPS DENY_GROUPS TEST_ACCOUNT TEST_GROUPS
+pass "account admission controls and status are tied to the newly keyed account"
+
+for query in active enabled; do
+  PRE_ACTIVE=1 PRE_ENABLED=1
+  if [[ $query == active ]]; then ACTIVE_QUERY_ERROR=1; else ENABLED_QUERY_ERROR=1; fi
+  if run "query-$query" "--key=$key" >/dev/null 2>&1; then fail "$query query error succeeds"; fi
+  [[ -e $tmp/query-$query/state/active && -e $tmp/query-$query/state/enabled && ! -e $tmp/query-$query/home/.ssh/authorized_keys ]] ||
+    fail "$query query error changed pre-existing service state or retained the new key"
+  no_publish "query-$query"
+  unset PRE_ACTIVE PRE_ENABLED ACTIVE_QUERY_ERROR ENABLED_QUERY_ERROR
+done
+pass "service state query errors abort and roll back without changing existing state"
 
 mkdir -p "$tmp/precedence/root/etc/ssh/sshd_config.d"
 printf 'PasswordAuthentication yes\nInclude /etc/ssh/sshd_config.d/*.conf\n' >"$tmp/precedence/root/etc/ssh/sshd_config"

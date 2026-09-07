@@ -32,7 +32,7 @@ PASSWD_ENTRY=$(/usr/bin/getent passwd "$CURRENT_UID") || {
   exit 1
 }
 IFS=: read -r ACCOUNT_NAME _ PASSWD_UID _ _ ACCOUNT_HOME _ <<<"$PASSWD_ENTRY"
-if [[ $PASSWD_UID != "$CURRENT_UID" || ! $ACCOUNT_NAME =~ ^[a-z_][a-z0-9_-]{0,31}$ || $ACCOUNT_HOME != /* ]]; then
+if [[ $PASSWD_UID != "$CURRENT_UID" || ! $ACCOUNT_NAME =~ ^[a-z_][a-z0-9_-]{0,30}[$]?$ || $ACCOUNT_HOME != /* ]]; then
   echo "The current account has an invalid system user-database entry." >&2
   exit 1
 fi
@@ -111,11 +111,38 @@ omarchy_firewall_rule_present() {
 }
 
 record_existing_state() {
-  /usr/bin/sudo systemctl is-active --quiet sshd.service && SERVICE_WAS_ACTIVE=true || true
-  /usr/bin/sudo systemctl is-enabled --quiet sshd.service && SERVICE_WAS_ENABLED=true || true
+  local active_status enabled_status
+  sshd_active_state && active_status=0 || active_status=$?
+  sshd_enabled_state && enabled_status=0 || enabled_status=$?
+  if (( active_status == 2 || enabled_status == 2 )); then
+    echo "Could not determine the existing sshd.service state; refusing SSH setup." >&2
+    return 1
+  fi
+  ((active_status != 0)) || SERVICE_WAS_ACTIVE=true
+  ((enabled_status != 0)) || SERVICE_WAS_ENABLED=true
   if ! /usr/bin/omarchy-cmd-missing ufw && omarchy_firewall_rule_present; then
     FIREWALL_RULE_WAS_PRESENT=true
   fi
+}
+
+sshd_active_state() {
+  local state
+  state=$(/usr/bin/sudo systemctl is-active sshd.service 2>/dev/null) || true
+  case "$state" in
+    active | activating | reloading | deactivating) return 0 ;;
+    inactive | failed) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+sshd_enabled_state() {
+  local state
+  state=$(/usr/bin/sudo systemctl is-enabled sshd.service 2>/dev/null) || true
+  case "$state" in
+    enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient) return 0 ;;
+    disabled | masked | masked-runtime) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 rollback_setup() {
@@ -397,6 +424,55 @@ effective_policy_is_key_only() {
     grep -qixF "authorizedkeysfile .ssh/authorized_keys" <<<"$dump"
 }
 
+valid_system_name() {
+  [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}[$]?$ ]]
+}
+
+account_is_admitted() {
+  local name=$1 dump=$2 directive token status_line status account_groups group admitted
+  local -a values groups
+
+  status_line=$(LC_ALL=C /usr/bin/passwd -S -- "$name" 2>/dev/null) || return 1
+  read -r token status _ <<<"$status_line"
+  [[ $token == "$name" && ( $status == "P" || $status == "NP" ) ]] || return 1
+  account_groups=$(/usr/bin/id -Gn -- "$name" 2>/dev/null) || return 1
+  read -r -a groups <<<"$account_groups"
+  ((${#groups[@]} > 0)) || return 1
+  for group in "${groups[@]}"; do valid_system_name "$group" || return 1; done
+
+  for directive in allowusers denyusers allowgroups denygroups; do
+    mapfile -t values < <(/usr/bin/awk -v wanted="$directive" 'tolower($1) == wanted { for (i=2; i<=NF; i++) print $i }' <<<"$dump")
+    case "$directive" in
+      allowusers)
+        ((${#values[@]} == 0)) || {
+          admitted=0
+          for token in "${values[@]}"; do valid_system_name "$token" || return 1; [[ $token != "$name" ]] || admitted=1; done
+          ((admitted)) || return 1
+        }
+        ;;
+      denyusers)
+        for token in "${values[@]}"; do valid_system_name "$token" || return 1; [[ $token != "$name" ]] || return 1; done
+        ;;
+      allowgroups)
+        ((${#values[@]} == 0)) || {
+          admitted=0
+          for token in "${values[@]}"; do
+            valid_system_name "$token" || return 1
+            for group in "${groups[@]}"; do [[ $token != "$group" ]] || admitted=1; done
+          done
+          ((admitted)) || return 1
+        }
+        ;;
+      denygroups)
+        for token in "${values[@]}"; do
+          valid_system_name "$token" || return 1
+          for group in "${groups[@]}"; do [[ $token != "$group" ]] || return 1; done
+        done
+        ;;
+    esac
+  done
+}
+
 current_account_name() {
   printf '%s' "$ACCOUNT_NAME"
 }
@@ -466,7 +542,7 @@ CONF
   account_name=$(current_account_name) || return 1
   if ! effective_config=$(/usr/bin/sudo sshd -T) || ! effective_policy_is_key_only "$effective_config" ||
     ! matched_config=$(/usr/bin/sudo sshd -T -C "user=$account_name,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22") ||
-    ! effective_policy_is_key_only "$matched_config"; then
+    ! effective_policy_is_key_only "$matched_config" || ! account_is_admitted "$account_name" "$matched_config"; then
     echo -e "\e[31msshd did not apply the password-authentication restrictions; removing the ineffective config.\e[0m" >&2
     return 1
   fi
@@ -478,19 +554,13 @@ publish_sshd() {
     # key-only policy to the already-running daemon.
     /usr/bin/sudo systemctl reload sshd.service
   else
-    if ! /usr/bin/sudo systemctl start sshd.service; then
-      /usr/bin/sudo systemctl is-active --quiet sshd.service && SERVICE_STARTED=true
-      return 1
-    fi
     SERVICE_STARTED=true
+    /usr/bin/sudo systemctl start sshd.service || return 1
   fi
 
   if [[ $SERVICE_WAS_ENABLED != "true" ]]; then
-    if ! /usr/bin/sudo systemctl enable sshd.service; then
-      /usr/bin/sudo systemctl is-enabled --quiet sshd.service && SERVICE_ENABLED=true
-      return 1
-    fi
     SERVICE_ENABLED=true
+    /usr/bin/sudo systemctl enable sshd.service || return 1
   fi
 }
 
