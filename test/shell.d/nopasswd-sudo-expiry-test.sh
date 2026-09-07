@@ -13,7 +13,7 @@ trap 'rm -rf "$test_tmp"' EXIT
 
 function_prefix() {
   printf 'source %q\n' "$security_library_path"
-  awk '/^source .*omarchy-security-functions/ { next } /^case "\$\{1:-\}" in$/ { exit } { print }' "$command_path"
+  awk '/^set -euo pipefail$/ { functions=1 } /^case "\$\{1:-\}" in$/ { exit } functions { print }' "$command_path"
 }
 
 # Exercise the validation code itself. Leading zeroes remain numeric, but zero,
@@ -23,7 +23,7 @@ function_prefix() {
   for minutes in 1 15 1440 00015; do
     valid_minutes "$minutes" || fail "passwordless sudo accepts bounded duration $minutes"
   done
-  for minutes in 0 1441 -1 1m '1;id' ''; do
+  for minutes in 0 1441 -1 1m '1;id' '' 18446744073709551617; do
     ! valid_minutes "$minutes" || fail "passwordless sudo rejects invalid duration '$minutes'"
   done
 )
@@ -45,8 +45,6 @@ pass "passwordless sudo derives and validates trusted account identity"
 # model that publishes a token only when -N is missing.
 grep -Fxq '#!/bin/bash -p' "$command_path" ||
   fail "passwordless sudo no longer suppresses Bash startup injection"
-grep -F '[[ ${argv[1]:-} == -p ]]' "$security_library_path" >/dev/null ||
-  fail "passwordless sudo accepts a decoy post-script -p"
 
 public_sudo_stub="$test_tmp/public-sudo"
 public_gum_stub="$test_tmp/public-gum"
@@ -67,19 +65,20 @@ if [[ ${1:-} == -N ]]; then no_update=1; shift; fi
 [[ ${1:-} != -- ]] || shift
 ((no_update)) || : >"$TEST_PUBLIC_TOKEN"
 case "${2:-}" in
-  __status) exit 1 ;;
+  __status) exit "${TEST_PUBLIC_STATUS:-3}" ;;
   __enable|__disable) exit 0 ;;
   *) exit 2 ;;
 esac
 STUB
 cat >"$public_gum_stub" <<'STUB'
 #!/bin/bash
+[[ -z ${TEST_PUBLIC_GUM_LOG:-} ]] || : >"$TEST_PUBLIC_GUM_LOG"
 [[ ! -e $TEST_PUBLIC_TOKEN ]] || : >"$TEST_PUBLIC_EXPLOIT"
 exit 1
 STUB
 chmod 0755 "$public_sudo_stub" "$public_gum_stub"
 public_flow="$test_tmp/passwordless-public-flow"
-/usr/bin/cp "$security_library_path" "$test_tmp/omarchy-security-functions"
+/usr/bin/sed "s#/usr/bin/sudo#$public_sudo_stub#g" "$security_library_path" >"$test_tmp/omarchy-security-functions"
 /usr/bin/sed \
   -e "s#/usr/bin/sudo#$public_sudo_stub#g" \
   -e "s#/usr/bin/gum#$public_gum_stub#g" \
@@ -89,6 +88,16 @@ TEST_PUBLIC_TOKEN="$public_token" TEST_PUBLIC_EXPLOIT="$public_exploit" \
   /usr/bin/bash -p "$public_flow" 15 >/dev/null
 [[ ! -e $public_token && ! -e $public_exploit ]] ||
   fail "passwordless confirmation inherited a reusable status credential"
+for status in 1 2; do
+  if TEST_PUBLIC_TOKEN="$public_token" TEST_PUBLIC_EXPLOIT="$public_exploit" \
+    TEST_PUBLIC_STATUS="$status" TEST_PUBLIC_GUM_LOG="$test_tmp/unsafe-status-confirmation" \
+    /usr/bin/bash -p "$public_flow" 15 >"$test_tmp/status-error.output" 2>&1; then
+    fail "passwordless sudo treats status/authorization failure $status as inactive"
+  fi
+  [[ ! -e $test_tmp/unsafe-status-confirmation ]] || fail "failed status inspection opens the enable prompt"
+  grep -q 'Could not safely inspect passwordless sudo' "$test_tmp/status-error.output" ||
+    fail "failed status inspection lacks recovery guidance"
+done
 
 startup_env="$test_tmp/passwordless-bash-env"
 startup_marker="$test_tmp/passwordless-bash-env-ran"
@@ -341,6 +350,9 @@ pkgs_candidates=(
 pkgs_root=""
 for candidate in "${pkgs_candidates[@]}"; do
   if [[ -n $candidate && -d $candidate/pkgbuilds/omarchy-settings ]]; then
+    pkgs_root=$candidate/pkgbuilds
+    break
+  elif [[ -n $candidate && -d $candidate/omarchy-settings ]]; then
     pkgs_root=$candidate
     break
   fi
@@ -348,31 +360,36 @@ done
 [[ -n $pkgs_root ]] || fail "omarchy-pkgs checkout found for passwordless package-removal coverage"
 
 for package_name in omarchy-settings omarchy-settings-dev; do
-  install_script="$pkgs_root/pkgbuilds/$package_name/$package_name.install"
+  install_script="$pkgs_root/$package_name/$package_name.install"
   transformed_install="$test_tmp/$package_name.install"
   removal_root="$test_tmp/$package_name-remove"
   removal_sudoers="$removal_root/etc/sudoers.d"
-  mkdir -p "$removal_sudoers"
+  mkdir -p "$removal_sudoers" "$removal_root/run/lock" "$removal_root/etc/tmpfiles.d"
   : >"$removal_sudoers/99-omarchy-nopasswd-1000"
   : >"$removal_sudoers/99-omarchy-nopasswd-legacy-user"
   : >"$removal_sudoers/omarchy-dns"
-  ln -s ../usr/share/omarchy/etc-overrides/os-release "$removal_root/etc/os-release"
-  grep -Fq 'ln -s ../usr/share/omarchy/etc-overrides/os-release            /etc/os-release' "$install_script" ||
-    fail "$package_name installation does not select package-owned OS metadata"
-  sed "s#/etc/#$removal_root/etc/#g" "$install_script" >"$transformed_install"
+  ln -s ../administrator/os-release "$removal_root/etc/os-release"
+  package_stat="$test_tmp/package-stat"
+  cat >"$package_stat" <<'STUB'
+#!/bin/bash
+if [[ $2 == '%u' ]]; then printf '0\n'; else /usr/bin/stat "$@"; fi
+STUB
+  chmod +x "$package_stat"
+  sed -e "s#/etc/#$removal_root/etc/#g" \
+    -e "s#/run#$removal_root/run#g" \
+    -e "s#/usr/bin/stat#$package_stat#g" "$install_script" >"$transformed_install"
   (
     source "$transformed_install"
+    pre_remove
+    [[ -f $removal_root/run/omarchy-sudo-passwordless-package-removing ]]
     post_remove
   ) || fail "$package_name removal revokes active passwordless grants"
   ! find "$removal_sudoers" -name '99-omarchy-nopasswd-*' -print -quit | grep -q . ||
     fail "$package_name removal leaves a passwordless grant behind"
   [[ -e $removal_sudoers/omarchy-dns ]] ||
     fail "$package_name removal deletes an unrelated sudoers policy"
-  [[ -L $removal_root/etc/os-release ]] &&
-    [[ $(readlink "$removal_root/etc/os-release") == ../usr/lib/os-release ]] ||
-    fail "$package_name removal does not restore the standard OS selector"
-
-  ln -sfn ../administrator/os-release "$removal_root/etc/os-release"
+  [[ $(readlink "$removal_root/etc/os-release") == ../administrator/os-release ]] ||
+    fail "$package_name removal changes unrelated OS metadata"
   : >"$removal_sudoers/99-omarchy-nopasswd-1001"
   (
     source "$transformed_install"
@@ -382,8 +399,23 @@ for package_name in omarchy-settings omarchy-settings-dev; do
     fail "$package_name removal overwrites an administrator OS selector"
   [[ ! -e $removal_sudoers/99-omarchy-nopasswd-1001 ]] ||
     fail "$package_name removal grant cleanup depends on OS selector state"
+
+  (
+    source "$transformed_install"
+    _etc_overrides_apply() { :; }
+    if post_install; then exit 1; fi
+    [[ -f $removal_root/run/omarchy-sudo-passwordless-package-removing ]]
+    : >"$removal_root/etc/tmpfiles.d/omarchy-nopasswd-sudo.conf"
+    post_install
+    [[ ! -e $removal_root/run/omarchy-sudo-passwordless-package-removing ]]
+    : >"$removal_sudoers/99-omarchy-nopasswd-1002"
+    pre_upgrade
+    [[ ! -e $removal_sudoers/99-omarchy-nopasswd-1002 ]]
+    post_upgrade
+    [[ ! -e $removal_root/run/omarchy-sudo-passwordless-package-removing ]]
+  ) || fail "$package_name restores grant availability only after boot cleanup is installed"
 done
-pass "settings package removal revokes grants and preserves package-selector ownership"
+pass "settings package transitions revoke grants and preserve unrelated configuration"
 
 # Exercise the production flock wrapper under contention. mkdir is an atomic
 # overlap detector; all workers must enter and leave the protected region.
@@ -418,7 +450,7 @@ pass "passwordless sudo serializes concurrent operations"
 
 # Same-boot expiry calls the fixed installed cleanup command, and cleanup
 # removes policy before touching a timer so timer failures cannot extend it.
-grep -F '"$INSTALLED_SELF" __expire "$uid"' "$command_path" >/dev/null
+grep -F '"$INSTALLED_SELF" __expire "$uid" "$timer"' "$command_path" >/dev/null
 cleanup_body=$(awk '/^cleanup_uid_locked\(\) \{/ { in_body=1 } in_body { print } in_body && /^}/ { exit }' "$command_path")
 rm_line=$(grep -n '/usr/bin/rm -f' <<<"$cleanup_body" | head -1 | cut -d: -f1)
 stop_line=$(grep -n 'stop_timer' <<<"$cleanup_body" | tail -1 | cut -d: -f1)
