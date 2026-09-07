@@ -8,12 +8,21 @@ source "$SHELL_TEST_DIR/fixtures/sudo-boundary-test.sh"
 test_tmp="$boundary_tmp"
 stub_bin="$SUDO_TEST_ROOT/bin"
 test_home="$SUDO_TEST_HOME"
-runtime_dir="$test_tmp/runtime"
-mkdir -p "$runtime_dir"
+runtime_dir="/run/user/$(id -u)"
+test_run_id="test-$BASHPID-$RANDOM"
+update_lock_name="omarchy-update-$test_run_id.lock"
+stay_awake_dir_name="omarchy-update-stay-awake-$test_run_id"
+trap 'rm -rf -- "$runtime_dir/$stay_awake_dir_name"; rm -f -- "$runtime_dir/$update_lock_name"; rm -rf -- "$boundary_tmp"' EXIT
 for command in omarchy-update omarchy-update-lock omarchy-update-stay-awake; do
   rm -f "$SUDO_TEST_ROOT/bin/$command"
   copy_boundary_file "bin/$command"
 done
+sed -i \
+  -e "s/omarchy-update\.lock/$update_lock_name/g" \
+  -e "s#state_dir=\"\$state_base/omarchy-update-stay-awake\"#state_dir=\"\$state_base/$stay_awake_dir_name\"#" \
+  "$SUDO_TEST_ROOT/bin/omarchy-update" \
+  "$SUDO_TEST_ROOT/bin/omarchy-update-lock" \
+  "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake"
 cat >"$SUDO_TEST_ROOT/mock/setpriv" <<'STUB'
 #!/bin/bash
 while [[ ${1:-} == --* ]]; do
@@ -67,6 +76,7 @@ for command in \
 done
 write_stub omarchy-update-available 'exit 1'
 write_stub pkexec 'exec "$@"'
+ln -s ../bin/pkexec "$SUDO_TEST_ROOT/mock/pkexec"
 write_stub systemd-inhibit 'while [[ $1 == --* ]]; do shift; done; exec "$@"'
 ln -s ../bin/systemd-inhibit "$SUDO_TEST_ROOT/mock/systemd-inhibit"
 
@@ -119,7 +129,7 @@ done
 inhibitor_pid=$(<"$inhibit_pid_file")
 kill -0 "$inhibitor_pid" 2>/dev/null || fail "sleep inhibitor is still running when its descriptors are inspected"
 
-lock_target=$(readlink -f "$runtime_dir/omarchy-update.lock")
+lock_target=$(readlink -f "$runtime_dir/$update_lock_name")
 inhibitor_holds_lock=0
 for fd in /proc/"$inhibitor_pid"/fd/*; do
   [[ -e $fd ]] || continue
@@ -150,10 +160,11 @@ if (( EUID != 0 )); then
 #!/bin/bash
 set -euo pipefail
 omarchy-update-stay-awake start
-[[ -s $XDG_RUNTIME_DIR/omarchy-update-stay-awake/inhibit-pid ]]
+[[ -s $XDG_RUNTIME_DIR/REPLACE_STAY_AWAKE_DIR/inhibit-pid ]]
 omarchy-update-stay-awake stop
-[[ ! -e $XDG_RUNTIME_DIR/omarchy-update-stay-awake/inhibit-pid ]]
+[[ ! -e $XDG_RUNTIME_DIR/REPLACE_STAY_AWAKE_DIR/inhibit-pid ]]
 SH
+  sed -i "s/REPLACE_STAY_AWAKE_DIR/$stay_awake_dir_name/g" "$terminal_driver"
   chmod +x "$terminal_driver"
 
   SUDO_LOG="$sudo_log" PKEXEC_MARKER="$pkexec_marker" INHIBIT_PID_FILE="$terminal_inhibit_pid_file" \
@@ -163,6 +174,76 @@ SH
   [[ ! -e $pkexec_marker ]] || fail "terminal sleep inhibition does not use pkexec"
   run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
   pass "terminal updates use sudo instead of Polkit for sleep inhibition"
+
+  wait_for_process_exit() {
+    local process_pid="$1"
+
+    for _ in {1..100}; do
+      kill -0 "$process_pid" 2>/dev/null || return 0
+      [[ $(awk '{ print $3 }' "/proc/$process_pid/stat" 2>/dev/null || true) == "Z" ]] && return 0
+      sleep 0.02
+    done
+    return 1
+  }
+
+  delayed_marker="$test_tmp/delayed-inhibitor"
+  delayed_helper_pid_file="$test_tmp/delayed-helper-pid"
+  write_stub systemd-inhibit 'echo "$$" >"$DELAYED_MARKER"; sleep 0.4; while [[ $1 == --* ]]; do shift; done; exec "$@"'
+
+  # Keep the start helper's stdin attached to the private PTY so it takes the
+  # sudo -b branch, then signal only that helper before the held child publishes.
+  delayed_terminal_driver="$test_tmp/delayed-terminal-stay-awake"
+  cat >"$delayed_terminal_driver" <<'SH'
+#!/bin/bash
+set +e
+omarchy-update-stay-awake start </dev/tty &
+helper_pid=$!
+echo "$helper_pid" >"$DELAYED_HELPER_PID_FILE"
+wait "$helper_pid"
+exit $?
+SH
+  chmod +x "$delayed_terminal_driver"
+  DELAYED_MARKER="$delayed_marker" DELAYED_HELPER_PID_FILE="$delayed_helper_pid_file" \
+    run_with_lock_env script -qefc "$delayed_terminal_driver" /dev/null >"$test_tmp/delayed-terminal.out" 2>&1 &
+  delayed_terminal_driver_pid=$!
+  for _ in {1..100}; do
+    [[ -s $delayed_marker && -s $delayed_helper_pid_file ]] && break
+    sleep 0.02
+  done
+  [[ -s $delayed_marker && -s $delayed_helper_pid_file ]] || fail "terminal cancellation reaches the delayed launch window"
+  kill -TERM "$(<"$delayed_helper_pid_file")"
+  wait "$delayed_terminal_driver_pid" || true
+  delayed_inhibitor_pid=$(<"$delayed_marker")
+  wait_for_process_exit "$delayed_inhibitor_pid" || fail "terminal cancellation leaves no delayed inhibitor"
+  [[ ! -e $runtime_dir/$stay_awake_dir_name ]] || fail "terminal cancellation leaves no launch state"
+  pass "terminal cancellation rolls back delayed publication"
+
+  # With redirected stdin the same helper takes the graphical pkexec branch.
+  : >"$delayed_marker"
+  delayed_graphical_helper_pid_file="$test_tmp/delayed-graphical-helper-pid"
+  delayed_graphical_driver="$test_tmp/delayed-graphical-stay-awake"
+  cat >"$delayed_graphical_driver" <<'SH'
+#!/bin/bash
+echo "$$" >"$DELAYED_HELPER_PID_FILE"
+exec omarchy-update-stay-awake start </dev/null
+SH
+  chmod +x "$delayed_graphical_driver"
+  DELAYED_MARKER="$delayed_marker" DELAYED_HELPER_PID_FILE="$delayed_graphical_helper_pid_file" \
+    run_with_lock_env "$delayed_graphical_driver" >"$test_tmp/delayed-graphical.out" 2>&1 &
+  delayed_graphical_driver_pid=$!
+  for _ in {1..100}; do
+    [[ -s $delayed_marker && -s $delayed_graphical_helper_pid_file ]] && break
+    sleep 0.02
+  done
+  [[ -s $delayed_marker && -s $delayed_graphical_helper_pid_file ]] || fail "graphical cancellation reaches the delayed launch window"
+  delayed_graphical_helper_pid=$(<"$delayed_graphical_helper_pid_file")
+  kill -TERM "$delayed_graphical_helper_pid"
+  wait "$delayed_graphical_driver_pid" || true
+  delayed_inhibitor_pid=$(<"$delayed_marker")
+  wait_for_process_exit "$delayed_inhibitor_pid" || fail "graphical cancellation leaves no delayed inhibitor"
+  [[ ! -e $runtime_dir/$stay_awake_dir_name ]] || fail "graphical cancellation leaves no launch state"
+  pass "graphical cancellation rolls back delayed publication"
+  write_stub systemd-inhibit 'while [[ $1 == --* ]]; do shift; done; exec "$@"'
 fi
 
 # Update-owned Stay Awake state must be cleared before the restart helper can
@@ -200,10 +281,12 @@ pass "omarchy-update restores only its own Stay Awake state before restart handl
 
 # Stale cleanup state from a killed update must not override a Stay Awake choice
 # the user made afterward.
-stay_awake_helper_state="$runtime_dir/omarchy-update-stay-awake"
+stay_awake_helper_state="$runtime_dir/$stay_awake_dir_name"
 stay_awake_state="$test_home/.local/state/omarchy/indicators/stay-awake"
-mkdir -p "$stay_awake_helper_state" "$(dirname "$stay_awake_state")"
-printf '%s\n' "old-update-owner" >"$stay_awake_helper_state/idle-owner"
+mkdir -m 700 -p "$stay_awake_helper_state"
+mkdir -p "$(dirname "$stay_awake_state")"
+printf '%s\n' "123:456:789" >"$stay_awake_helper_state/idle-owner"
+chmod 600 "$stay_awake_helper_state/idle-owner"
 printf '%s\n' "user-choice" >"$stay_awake_state"
 
 run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
@@ -215,8 +298,9 @@ pass "stale update ownership preserves a newer Stay Awake choice"
 sleep 30 &
 unrelated_pid=$!
 unrelated_start_time=$(awk '{ print $22 }' "/proc/$unrelated_pid/stat")
-mkdir -p "$stay_awake_helper_state"
-printf '%s %s\n' "$unrelated_pid" "$((unrelated_start_time + 1))" >"$stay_awake_helper_state/inhibit-pid"
+mkdir -m 700 -p "$stay_awake_helper_state"
+printf '1 %s %s %s %032x\n' "$unrelated_pid" "$((unrelated_start_time + 1))" "$(id -u)" 1 >"$stay_awake_helper_state/inhibit-pid"
+chmod 600 "$stay_awake_helper_state/inhibit-pid"
 
 run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
 kill -0 "$unrelated_pid" 2>/dev/null ||
