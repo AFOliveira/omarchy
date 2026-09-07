@@ -7,7 +7,8 @@ if [[ $- != *p* ]]; then
   echo "Refusing an unsafe Bash startup for update restart handling." >&2
   exit 126
 fi
-source "${BASH_SOURCE[0]%/*}/omarchy-security-functions" || exit 126
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
 omarchy_security_require_privileged_bash_startup || exit 126
 omarchy_security_sanitize_bash_environment "$0" "$@" || exit 126
 
@@ -17,15 +18,7 @@ if (( $# > 1 )) || [[ $mode != "all" && $mode != "--services-only" && $mode != "
   exit 2
 fi
 
-# Use the session's canonical source root. Installed commands live in /usr/bin;
-# dev-linked commands run directly from the selected checkout's bin directory.
-restart_source=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 1
-if [[ $OMARCHY_PATH != /* || $(/usr/bin/realpath -e -- "$OMARCHY_PATH") != "$OMARCHY_PATH" ]] ||
-  ! { [[ $restart_source == "$OMARCHY_PATH/bin/omarchy-update-restart" ]] ||
-    [[ $OMARCHY_PATH == "/usr/share/omarchy" && $restart_source == "/usr/bin/omarchy-update-restart" ]]; }; then
-  echo "OMARCHY_PATH does not match this restart command." >&2
-  exit 1
-fi
+omarchy_security_require_source_root "$0" || exit 1
 omarchy_security_revoke_sudo_timestamp || exit 1
 omarchy_security_install_sudo_cleanup_traps
 omarchy_security_enable_no_update_sudo || exit 1
