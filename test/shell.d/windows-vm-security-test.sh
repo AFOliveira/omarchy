@@ -211,3 +211,41 @@ pass "compose or credential commit failure blocks stale-credential launch"
   fail "successful retry does not commit the matching private record"
 [[ $(cat "$compose_update_log") == 'next-user:NextPassword1' ]] || fail "retry uses different machine and private credentials"
 pass "successful retry commits a coherent credential pair and clears pending state"
+
+wait_for_fixture() {
+  for (( attempt = 0; attempt < 250; attempt++ )); do
+    [[ ! -f $1 ]] || return 0
+    sleep 0.02
+  done
+  return 1
+}
+(
+  write_compose() {
+    : >"$test_dir/first-writer-entered"
+    wait_for_fixture "$test_dir/release-first-writer" || return 1
+    printf '%s:%s\n' "$4" "$5" >"$compose_update_log"
+  }
+  write_configuration 4G 2 64G first-user FirstPassword1 UTC
+) &
+first_writer=$!
+wait_for_fixture "$test_dir/first-writer-entered" || fail "first configuration writer did not start"
+(
+  flock() {
+    : >"$test_dir/second-writer-waiting"
+    /usr/bin/flock -w 5 "$@"
+  }
+  write_compose() {
+    : >"$test_dir/second-writer-entered"
+    printf '%s:%s\n' "$4" "$5" >"$compose_update_log"
+  }
+  write_configuration 4G 2 64G second-user SecondPassword1 UTC
+) &
+second_writer=$!
+wait_for_fixture "$test_dir/second-writer-waiting" || fail "second configuration writer did not reach the lock"
+[[ ! -e $test_dir/second-writer-entered ]] || fail "second writer replaced a pending transaction"
+: >"$test_dir/release-first-writer"
+wait "$first_writer" || fail "first configuration transaction failed"
+wait "$second_writer" || fail "second configuration transaction failed"
+[[ $(cat "$compose_update_log") == 'second-user:SecondPassword1' && $(read_credential USERNAME) == second-user && $(read_credential PASSWORD) == SecondPassword1 && ! -e ${CREDENTIALS_FILE}.pending ]] ||
+  fail "concurrent configuration transactions leave mismatched credentials"
+pass "concurrent configuration transactions serialize across compose and private commit"
