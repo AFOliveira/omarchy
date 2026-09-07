@@ -58,6 +58,8 @@ the migration should no-op for other users.
 
 Both the update and standalone migration runner start with a cold credential state and use the no-update sudo wrapper. The runner revokes again on success, failure, and catchable termination signals. Historical migrations remain strictly ordered, and failed migrations remain pending.
 
+The standalone migration runner and SSH setup command also require their source root to match the running entrypoint before selecting the wrapper or migration files. The migration directory remains `$OMARCHY_PATH/migrations` after that validation; no fallback source tree is inferred from the user's home or configuration.
+
 For watchers and diagnostics, `omarchy-migrate --pending` prints pending
 migration names and exits `0` when any are pending. When no migrations are
 pending, it prints nothing and exits non-zero.
