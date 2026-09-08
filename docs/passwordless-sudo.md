@@ -12,7 +12,7 @@ Each new expiry callback carries its timer identity. A delayed predecessor canno
 
 ## Package ownership
 
-The packaging companion must put the publication/expiry command, `omarchy-security-functions` `omarchy-nopasswd-sudo.conf` and the pre-transaction revocation hook in the settings package together. Removing the desktop runtime alone must leave a working expiry command behind. Stable and development package pairs must transfer ownership in one transaction without duplicate files.
+The packaging companion must put the publication/expiry command, `omarchy-security-functions`, `omarchy-nopasswd-sudo.conf`, and the pre-transaction revocation hook in the settings package together. Removing the desktop runtime alone must leave a working expiry command behind. Stable and development package pairs must transfer ownership in one transaction without duplicate files.
 
 Before settings removal or upgrade, the installed ALPM `PreTransaction` hook invokes the fixed `__package-removing` action, acquires the same grant lock, sets `/run/omarchy-sudo-passwordless-package-removing` and revokes existing policy. The marker prevents a waiting publisher from creating a new grant while package files change. A successful installation clears the marker only after boot cleanup exists. The hook uses `AbortOnFail` because a scriptlet failure alone does not abort pacman. The scriptlets repeat cleanup as a fallback for upgrades from older packages that have no installed hook. New grants require both the boot rule and hook before publication. Failed or interrupted transactions leave the marker set; retry the package transaction successfully before requesting another grant.
 
