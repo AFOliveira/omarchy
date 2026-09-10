@@ -4,11 +4,13 @@
 
 ## Grant lifecycle
 
-Root state records the resolved account name, absolute expiry epoch and unique timer name. A calendar timer is armed and verified before the generated policy becomes active. The sudoers rule also embeds the same UTC deadline with `NOTAFTER`, so sudo independently rejects it after expiry even if timer cleanup is delayed. Publication rechecks the package-owned boot cleanup before and after installing policy. Policy revocation must succeed before expiry jobs are stopped; a deletion error leaves those jobs armed and reports that administrator cleanup is required.
+The sudoers rule is the only grant record: it contains the resolved account name and a UTC `NOTAFTER` deadline enforced by sudo itself, including after suspend. Publication validates a dot-prefixed temporary file with `visudo`, arms a calendar cleanup timer, then atomically renames the complete rule into place. There is no separate per-user state file to publish, parse, or reconcile. Failure after renewal starts removes the old grant; failed revocation remains an error and leaves the cleanup timer armed.
 
 An internal status result is `0` for an active, validated grant and `3` for confirmed inactive access. All other results are errors, including failed authentication and failed revocation. The user interface only offers a new grant after result `3`. It must not turn an inspection failure into a claim that no grant exists.
 
-Each new expiry callback carries its timer identity. A delayed predecessor cannot revoke a newer grant. Already scheduled UID-only callbacks remain compatible by checking the current grant's expiry. Boot-time tmpfiles cleanup removes the reserved generated filename namespace before users log in; it does not run during routine non-boot tmpfiles maintenance.
+Calendar timers clean up expired files; their liveness does not define authorization. Callbacks read the current rule and remove it only when expired. Earlier callbacks cannot shorten a renewed grant, so no timer identity needs to be persisted. Old UID-only and token-bearing callbacks remain accepted. Pending callbacks after renewal or manual disable are harmless and expire within the maximum 24-hour grant window. Boot-time tmpfiles cleanup removes the reserved generated filename namespace before users log in; routine non-boot tmpfiles maintenance leaves live grants alone.
+
+Legacy cleanup uses a root-owned machine marker under `/var/lib/omarchy/migrations/`, written only after successful cleanup under the grant lock. Later accounts can finish their migration queues without sudo and without revoking grants created after the repair. Old grant state files are no longer consulted; generated legacy policy is removed conservatively and administrator-modified policy is preserved by the migration.
 
 ## Package ownership
 
@@ -20,6 +22,6 @@ The runtime marker need not survive reboot: pre-removal revokes the old grants b
 
 ## Validation
 
-`test/shell.d/nopasswd-sudo-expiry-test.sh` covers the public interface, cold authentication, timer setup, boot cleanup, package transitions and lock contention. `test/shell.d/passwordless-grant-lifecycle-test.sh` covers publication/cleanup failures, error status, supported account syntax, predecessor callbacks and the shared package-removal lock. Supply `OMARCHY_PKGS_PATH` as either a repository root or its `pkgbuilds` directory.
+The two passwordless-sudo test suites share a private filesystem and command fixture. They cover caller validation, the public prompt boundary, atomic publication, renewal failures, expiry, old callbacks, machine migration, and the source/package lock. Supply `OMARCHY_PKGS_PATH` as either a repository root or its `pkgbuilds` directory. An optional `OMARCHY_TEST_SUDOERS` path to sudo's upstream `testsudoers` executable evaluates the generated policy before and after its deadline without root or changing host policy.
 
-These tests use private filesystem fixtures and mapped privileged commands. Package archive ownership, actual install/upgrade/removal, real calendar expiry, suspend/resume and boot cleanup must also be validated in a disposable VM before claiming release readiness. Changes to the common library require integration checks on the downstream update, migration, installer, package-picker and diagnostic PRs.
+These local tests do not establish release readiness. The simplified candidate needs fresh installed-package, suspend/resume, boot-cleanup, and package-removal validation in a disposable VM. The shared security library and its interface are unchanged for downstream PRs.
