@@ -30,6 +30,7 @@ PY
 }
 
 copy_boundary_file bin/omarchy-security-functions
+copy_boundary_file bin/omarchy-update-pacman
 copy_boundary_file default/omarchy/sudo-no-update/sudo
 
 cat >"$SUDO_TEST_ROOT/mock/sudo" <<'STUB'
@@ -82,6 +83,12 @@ cat >"$SUDO_TEST_ROOT/bin/test-step" <<'STUB'
 set -euo pipefail
 step=${0##*/}
 printf 'step:%s %s\n' "$step" "$*" >>"$SUDO_TEST_LOG"
+if [[ $step == "systemd-run" ]]; then
+  # omarchy-update-pacman registers the transaction as a PID 1 scope on booted
+  # hosts. Run the wrapped command in place so the pacman step still executes.
+  while (( $# )) && [[ $1 == -* ]]; do shift; done
+  exec "$@"
+fi
 if [[ $step == "omarchy-hook" || $step == "omarchy-update-mise" ]]; then
   [[ ! -e $SUDO_TEST_CACHE ]] || exit 91
 fi
@@ -108,7 +115,7 @@ case "$step" in
 esac
 STUB
 chmod +x "$SUDO_TEST_ROOT/bin/test-step"
-for step in omarchy-update-lock omarchy-update-requires-free-space omarchy-update-confirm omarchy-update-pkg-prune omarchy-snapshot omarchy-update-stay-awake omarchy-update-dev omarchy-update-keyring omarchy-update-system-pkgs omarchy-migrate omarchy-hook omarchy-update-aur-pkgs omarchy-update-mise omarchy-update-orphan-pkgs omarchy-update-analyze-logs omarchy-update-status omarchy-update-restart omarchy-pkg-aur-accessible omarchy-notification-dismiss pacman cp yay; do
+for step in omarchy-update-lock omarchy-update-requires-free-space omarchy-update-confirm omarchy-update-pkg-prune omarchy-snapshot omarchy-update-stay-awake omarchy-update-dev omarchy-update-keyring omarchy-update-system-pkgs omarchy-migrate omarchy-hook omarchy-update-aur-pkgs omarchy-update-mise omarchy-update-orphan-pkgs omarchy-update-analyze-logs omarchy-update-status omarchy-update-restart omarchy-pkg-aur-accessible omarchy-notification-dismiss pacman systemd-run cp yay; do
   ln -s test-step "$SUDO_TEST_ROOT/bin/$step"
 done
 ln -s ../bin/test-step "$SUDO_TEST_ROOT/mock/pacman"

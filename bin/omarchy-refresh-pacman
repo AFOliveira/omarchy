@@ -36,7 +36,8 @@ if [[ $hook_mode != "run-deferred" ]]; then
   echo "Setting channel to $channel"
   sudo cp -f "$OMARCHY_PATH/default/pacman/pacman-$channel.conf" /etc/pacman.conf
   sudo cp -f "$OMARCHY_PATH/default/pacman/mirrorlist-$channel" /etc/pacman.d/mirrorlist
-  sudo env OMARCHY_UPDATE_PACMAN=1 pacman -Syyuu --noconfirm
+  # Reset all package DBs and then update
+  omarchy-update-pacman -Syyuu --noconfirm
 fi
 
 # Keep the historical hook name, but finish every privileged refresh operation
