@@ -106,9 +106,14 @@ setup_sshd_package() {
   /usr/bin/omarchy-pkg-add openssh
 }
 
-omarchy_firewall_rule_present() {
-  /usr/bin/sudo ufw show added 2>/dev/null |
-    /usr/bin/grep -Eq "^ufw limit 22/tcp comment ['\"]?omarchy-sshd['\"]?$"
+# 0 when the Omarchy rule is present, 1 when UFW proves it absent, 2 when UFW
+# could not be asked. An unanswered query must never read as "absent": the
+# rollback would then delete a rule the administrator already had.
+omarchy_firewall_rule_state() {
+  local added
+  added=$(/usr/bin/sudo ufw show added 2>/dev/null) || return 2
+  /usr/bin/grep -Eq "^ufw limit 22/tcp comment ['\"]?omarchy-sshd['\"]?$" <<<"$added" && return 0
+  return 1
 }
 
 record_existing_state() {
@@ -121,8 +126,14 @@ record_existing_state() {
   fi
   ((active_status != 0)) || SERVICE_WAS_ACTIVE=true
   ((enabled_status != 0)) || SERVICE_WAS_ENABLED=true
-  if ! /usr/bin/omarchy-cmd-missing ufw && omarchy_firewall_rule_present; then
-    FIREWALL_RULE_WAS_PRESENT=true
+  if ! /usr/bin/omarchy-cmd-missing ufw; then
+    local firewall_status
+    omarchy_firewall_rule_state && firewall_status=0 || firewall_status=$?
+    if (( firewall_status == 2 )); then
+      echo "Could not determine the existing UFW rules; refusing SSH setup." >&2
+      return 1
+    fi
+    ((firewall_status != 0)) || FIREWALL_RULE_WAS_PRESENT=true
   fi
 }
 
@@ -155,7 +166,15 @@ rollback_setup() {
 
   if [[ $SETUP_COMPLETE != "true" ]]; then
     if [[ $FIREWALL_RULE_ADDED == "true" ]]; then
-      /usr/bin/sudo ufw --force delete limit 22/tcp comment "omarchy-sshd" >/dev/null 2>&1 || rollback_failed=true
+      # Armed before the mutation, so a signal cannot leave our rule behind.
+      # The rule was proven absent beforehand, so deleting it is always ours to
+      # do; a failed delete only counts when UFW does not then show it gone,
+      # as happens when the signal arrived before the rule was added.
+      if ! /usr/bin/sudo ufw --force delete limit 22/tcp comment "omarchy-sshd" >/dev/null 2>&1; then
+        local firewall_status
+        omarchy_firewall_rule_state && firewall_status=0 || firewall_status=$?
+        (( firewall_status == 1 )) || rollback_failed=true
+      fi
       /usr/bin/sudo ufw reload >/dev/null 2>&1 || rollback_failed=true
     fi
     if [[ $SERVICE_ENABLED == "true" && $SERVICE_WAS_ENABLED != "true" ]]; then
@@ -191,6 +210,11 @@ rollback_setup() {
           rollback_failed=true
         fi
       fi
+    fi
+    if [[ $HARDENING_TOUCHED != "true" && -n $HARDENING_BACKUP ]]; then
+      # Interrupted between taking the backup and replacing the config.
+      /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || rollback_failed=true
+      HARDENING_BACKUP=""
     fi
     if [[ $AUTHORIZED_KEYS_TOUCHED == "true" ]]; then
       if [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
@@ -239,14 +263,9 @@ open_firewall() {
 
   echo "Opening the SSH port in the firewall (rate limited against brute force)..."
   if [[ $FIREWALL_RULE_WAS_PRESENT != "true" ]]; then
-    if ! /usr/bin/sudo ufw limit 22/tcp comment "omarchy-sshd" >/dev/null; then
-      omarchy_firewall_rule_present && FIREWALL_RULE_ADDED=true
-      return 1
-    fi
-    # The rule may exist even if a later status/parse check fails. Record our
-    # successful mutation first so every subsequent failure removes it.
     FIREWALL_RULE_ADDED=true
-    omarchy_firewall_rule_present || {
+    /usr/bin/sudo ufw limit 22/tcp comment "omarchy-sshd" >/dev/null || return 1
+    omarchy_firewall_rule_state || {
       echo "UFW did not publish the expected Omarchy SSH rule." >&2
       return 1
     }
@@ -548,6 +567,18 @@ CONF
     echo -e "\e[31msshd did not apply the password-authentication restrictions; removing the ineffective config.\e[0m" >&2
     return 1
   fi
+  if ! collected_key_accepted "$matched_config"; then
+    echo -e "\e[31msshd would not accept any of the collected keys for $account_name (key algorithm, RSA size, or revocation); removing the config.\e[0m" >&2
+    return 1
+  fi
+}
+
+collected_key_accepted() {
+  local dump=$1 key
+  for key in "${COLLECTED_KEYS[@]}"; do
+    omarchy_sshd_key_line_accepted "$key" "$dump" /usr/bin/sudo && return 0
+  done
+  return 1
 }
 
 publish_sshd() {

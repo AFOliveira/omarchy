@@ -40,6 +40,8 @@ cat >"$b/sshd" <<'SH'
 user=; for arg in "$@"; do [[ $arg != user=* ]] || { user=${arg#user=}; user=${user%%,*}; }; done
 password=no; [[ -z ${MATCH_BAD_USER:-} || $user != "$MATCH_BAD_USER" ]] || password=yes
 echo "PasswordAuthentication $password"; echo 'KbdInteractiveAuthentication no'; echo 'AuthenticationMethods publickey'; echo 'PubkeyAuthentication yes'; echo 'AuthorizedKeysFile .ssh/authorized_keys'
+echo "PubkeyAcceptedAlgorithms ${ACCEPTED_ALGORITHMS:-ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256}"; echo "RequiredRSASize ${REQUIRED_RSA_SIZE:-1024}"
+[[ -z ${REVOKED_KEYS:-} ]] || echo "RevokedKeys $REVOKED_KEYS"
 [[ -z ${ALLOW_USERS:-} ]] || echo "AllowUsers $ALLOW_USERS"
 [[ -z ${DENY_USERS:-} ]] || echo "DenyUsers $DENY_USERS"
 [[ -z ${ALLOW_GROUPS:-} ]] || echo "AllowGroups $ALLOW_GROUPS"
@@ -63,7 +65,7 @@ later:x:1001:1001:Later:$d/root/home/later:/usr/bin/bash
 daemon:x:2:2:Daemon:/sbin:/usr/bin/nologin
 EOF
  echo 'UID_MIN 1000' >"$d/root/etc/login.defs"; echo 'Include /etc/ssh/sshd_config.d/*.conf' >"$d/root/etc/ssh/sshd_config"; printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >"$d/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; : >"$d/events"; }
-run() { UNIT_MISSING="${UNIT_MISSING:-0}" TEST_ROOT="$t/$1/root" STATE="$t/$1/state" EVENTS="$t/$1/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" LOCKED_USER="${LOCKED_USER:-}" PASSWD_QUERY_ERROR="${PASSWD_QUERY_ERROR:-0}" GROUP_QUERY_ERROR="${GROUP_QUERY_ERROR:-0}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" SLOW_RELOAD="${SLOW_RELOAD:-0}" RELOAD_FAIL="${RELOAD_FAIL:-0}" HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" "$mapped/bin/omarchy-migrate-sshd-key-only"; }
+run() { ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" REQUIRED_RSA_SIZE="${REQUIRED_RSA_SIZE:-}" REVOKED_KEYS="${REVOKED_KEYS:-}" UNIT_MISSING="${UNIT_MISSING:-0}" TEST_ROOT="$t/$1/root" STATE="$t/$1/state" EVENTS="$t/$1/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" LOCKED_USER="${LOCKED_USER:-}" PASSWD_QUERY_ERROR="${PASSWD_QUERY_ERROR:-0}" GROUP_QUERY_ERROR="${GROUP_QUERY_ERROR:-0}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" SLOW_RELOAD="${SLOW_RELOAD:-0}" RELOAD_FAIL="${RELOAD_FAIL:-0}" HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" "$mapped/bin/omarchy-migrate-sshd-key-only"; }
 prepare shared; touch "$t/shared/state/"{active,enabled}; run shared; run shared; [[ -e $t/shared/state/active ]]; ! grep -q 'systemctl disable' "$t/shared/events"
 prepare no-key; rm "$t/no-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/no-key/state/"{active,enabled}; run no-key; [[ ! -e $t/no-key/state/active ]]
 prepare matched; touch "$t/matched/state/"{active,enabled}; MATCH_BAD_USER=later run matched; [[ ! -e $t/matched/state/active ]]
@@ -90,6 +92,15 @@ for opt in 'cert-authority' 'command="false"' 'from="!*,*"' 'expiry-time="202001
   run "restricted-$n"; [[ ! -e $t/restricted-$n/state/active ]] || { echo "restricted key counted as usable: $opt" >&2; exit 1; }
 done
 prepare flags; printf 'no-agent-forwarding,No-Port-Forwarding %s\n' "$key" >"$t/flags/root/home/keyed/.ssh/authorized_keys"; touch "$t/flags/state/"{active,enabled}; run flags; [[ -e $t/flags/state/active ]]
+# A key that parses but that the account's effective policy refuses proves no
+# login: its algorithm is excluded, an RSA key is under RequiredRSASize, or the
+# key is listed in RevokedKeys.
+prepare algorithm; touch "$t/algorithm/state/"{active,enabled}; ACCEPTED_ALGORITHMS=ecdsa-sha2-nistp256,rsa-sha2-512 run algorithm; [[ ! -e $t/algorithm/state/active ]]
+/usr/bin/ssh-keygen -q -t rsa -b 2048 -N '' -f "$t/rsa"
+prepare rsa-size; cp "$t/rsa.pub" "$t/rsa-size/root/home/keyed/.ssh/authorized_keys"; touch "$t/rsa-size/state/"{active,enabled}; REQUIRED_RSA_SIZE=3072 run rsa-size; [[ ! -e $t/rsa-size/state/active ]]
+prepare rsa-ok; cp "$t/rsa.pub" "$t/rsa-ok/root/home/keyed/.ssh/authorized_keys"; touch "$t/rsa-ok/state/"{active,enabled}; run rsa-ok; [[ -e $t/rsa-ok/state/active ]]
+/usr/bin/ssh-keygen -q -k -f "$t/krl" "$t/key.pub"
+prepare revoked; touch "$t/revoked/state/"{active,enabled}; REVOKED_KEYS="$t/krl" run revoked; [[ ! -e $t/revoked/state/active ]]
 # Entries that are not login accounts must not decide the machine's SSH state,
 # whatever their names or homes look like.
 prepare system-entries; printf 'svc.name:x:2:2:Service:/var/empty:/usr/bin/nologin\nOdd Name:x:3:3::relative:/usr/bin/false\n\n' >>"$t/system-entries/root/etc/passwd"; touch "$t/system-entries/state/"{active,enabled}; run system-entries; [[ -e $t/system-entries/state/active ]]
@@ -119,3 +130,10 @@ printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >"$m/etc/1
 if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a pending legacy repair completed without its machine phase"; fi
 grep -qF "sudo -N -- /usr/bin/omarchy-migrate-sshd-key-only" "$m/calls" || fail "a pending legacy repair did not run its machine phase" "$(cat "$m/calls" 2>/dev/null)"
 pass "later accounts complete without privileges once the legacy file is gone, and stay pending while it remains"
+
+# A failed entry revocation must still revoke again on the way out.
+: >"$m/calls"; rm -f "$m/revoked-once"
+printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\nif [[ $1 == -k && ! -e %s/revoked-once ]]; then touch %s/revoked-once; exit 1; fi\n[[ $1 == -k ]]\n' "$m" "$m" "$m" >"$m/sudo"
+if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a failed entry revocation was ignored"; fi
+[[ $(grep -c '^sudo -k$' "$m/calls") == 2 ]] || fail "a failed entry revocation did not revoke again on exit" "$(cat "$m/calls")"
+pass "a failed entry revocation still revokes on exit"

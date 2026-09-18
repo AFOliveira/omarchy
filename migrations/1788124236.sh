@@ -25,7 +25,9 @@ skip() {
 # machine-wide completion state, so migrations run by another account no-op.
 # Current setup and the key-only migration replace it with the key-only file,
 # which completes this repair the same way for every later account.
-if [[ -e $config || -L $config || -e $key_only_config || -L $key_only_config ]]; then
+# Only the regular file Omarchy writes counts; anything else there is not a
+# completed conversion, and the later key-only migration handles it.
+if [[ -e $config || -L $config ]] || [[ -f $key_only_config && ! -L $key_only_config ]]; then
   exit 0
 fi
 
