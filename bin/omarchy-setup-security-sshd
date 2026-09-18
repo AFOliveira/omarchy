@@ -201,21 +201,37 @@ run_cleanup() {
 }
 # The final revocation stays a direct child of this shell: under
 # timestamp_type=ppid, and without a terminal, sudo keys the cached
-# authorization by its parent, so an intermediary such as timeout would revoke
-# some other record and still succeed. A sibling watchdog bounds it instead,
-# and a failed attempt, such as one a signal to the whole group killed, is
-# retried.
+# authorization by its parent, so an intermediary would revoke some other
+# record and still succeed. Its stdout is a pipe only it holds, so its exit
+# arrives as end-of-file and read's own timeout bounds it, with no watchdog
+# process to lose or leave behind; a signal interrupting read does not end the
+# wait. At the deadline it is killed only while /proc still shows it as this
+# shell's live child. A failed attempt, such as one a signal to the whole
+# group killed, is retried.
+revoke_sudo_once() {
+  local bound=30 pipe reader writer revoke started status stat state ppid
+  exec {pipe}<> <(:)
+  exec {reader}<"/dev/fd/$pipe" {writer}>"/dev/fd/$pipe" {pipe}>&-
+  /usr/bin/sudo -k 2>/dev/null >&"$writer" {reader}<&- &
+  revoke=$!
+  exec {writer}>&-
+  started=$SECONDS
+  while (( SECONDS - started < bound )); do
+    read -r -t 1 -u "$reader" _ && continue
+    status=$?
+    (( status > 128 )) || break
+  done
+  exec {reader}<&-
+  if read -r stat 2>/dev/null <"/proc/$revoke/stat"; then
+    read -r state ppid _ <<<"${stat##*) }"
+    [[ $state == "Z" || $ppid != "$$" ]] || kill -KILL "$revoke" 2>/dev/null || true
+  fi
+  wait_for_cleanup_child "$revoke"
+}
 revoke_cleanup_sudo() {
-  local attempt revoke
+  local attempt
   for attempt in 1 2 3; do
-    /usr/bin/sudo -k >/dev/null 2>&1 &
-    revoke=$!
-    {
-      watchdog_status=0
-      /usr/bin/timeout 30 /usr/bin/tail --pid="$revoke" -f /dev/null >/dev/null 2>&1 || watchdog_status=$?
-      (( watchdog_status != 124 )) || kill -KILL "$revoke" 2>/dev/null || true
-    } &
-    wait_for_cleanup_child "$revoke" && return 0
+    revoke_sudo_once && return 0
   done
   return 1
 }

@@ -24,32 +24,51 @@ else
   # Once cleanup starts, a signal is held rather than acted on: the exit
   # revocation must finish. It stays a direct child of this shell, since under
   # timestamp_type=ppid, and without a terminal, sudo keys the cached
-  # authorization by its parent. A sibling watchdog bounds it, and a failed
-  # attempt, such as one a signal to the whole group killed, is retried.
+  # authorization by its parent. Its stdout is a pipe only it holds, so its
+  # exit arrives as end-of-file and read's own timeout bounds it, with no
+  # watchdog process to lose or leave behind. At the deadline it is killed only
+  # while /proc still shows it as this shell's live child. A failed attempt,
+  # such as one a signal to the whole group killed, is retried.
   ssh_migration_cleaning=false
   handle_ssh_migration_signal() {
     [[ $ssh_migration_cleaning == "true" ]] && return
     ssh_migration_cleaning=true
     exit "$1"
   }
+  revoke_ssh_migration_sudo_once() {
+    local bound=30 pipe reader writer revoke started status stat state ppid
+    exec {pipe}<> <(:)
+    exec {reader}<"/dev/fd/$pipe" {writer}>"/dev/fd/$pipe" {pipe}>&-
+    /usr/bin/sudo -k 2>/dev/null >&"$writer" {reader}<&- &
+    revoke=$!
+    exec {writer}>&-
+    started=$SECONDS
+    while (( SECONDS - started < bound )); do
+      read -r -t 1 -u "$reader" _ && continue
+      status=$?
+      (( status > 128 )) || break
+    done
+    exec {reader}<&-
+    if read -r stat 2>/dev/null <"/proc/$revoke/stat"; then
+      read -r state ppid _ <<<"${stat##*) }"
+      [[ $state == "Z" || $ppid != "$$" ]] || kill -KILL "$revoke" 2>/dev/null || true
+    fi
+    while :; do
+      wait "$revoke" && status=0 || status=$?
+      kill -0 "$revoke" 2>/dev/null || break
+    done
+    return "$status"
+  }
   cleanup_ssh_migration_sudo() {
-    local status=$ssh_migration_status attempt revoke revoke_status=1
+    local status=$ssh_migration_status attempt revoked=false
     trap - EXIT
     for attempt in 1 2 3; do
-      /usr/bin/sudo -k >/dev/null 2>&1 &
-      revoke=$!
-      {
-        watchdog_status=0
-        /usr/bin/timeout 30 /usr/bin/tail --pid="$revoke" -f /dev/null >/dev/null 2>&1 || watchdog_status=$?
-        (( watchdog_status != 124 )) || kill -KILL "$revoke" 2>/dev/null || true
-      } &
-      while :; do
-        wait "$revoke" && revoke_status=0 || revoke_status=$?
-        kill -0 "$revoke" 2>/dev/null || break
-      done
-      (( revoke_status != 0 )) || break
+      if revoke_ssh_migration_sudo_once; then
+        revoked=true
+        break
+      fi
     done
-    (( revoke_status == 0 )) || status=1
+    [[ $revoked == "true" ]] || status=1
     exit "$status"
   }
   # Traps first, so a failure or signal during the entry revocation still
