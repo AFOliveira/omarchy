@@ -24,15 +24,23 @@ limine_active_lines() {
   (( status <= 1 )) || return 2
 }
 
-# 0 when every given parameter is an exact command-line token, 1 when one is
-# not, 2 when the drop-in cannot be read. Tokens are delimited by whitespace
-# and quotes, as in KERNEL_CMDLINE[default]+=" ... pm_async=off ...".
-limine_has_tokens() {
-  local active wanted token found
-  local -a tokens
+# Without privileges, only the drop-in's text is available. It decides whether
+# to ask root to look, never whether the repair is done: 0 when every given
+# text occurs on an active line, 1 when one does not, 2 when unreadable.
+limine_mentions() {
+  local active wanted
   active=$(limine_active_lines) || return 2
-  active=${active//[\"\']/ }
-  read -r -a tokens <<<"${active//$'\n'/ }"
+  for wanted in "$@"; do [[ $active == *"$wanted"* ]] || return 1; done
+}
+
+# Root decisions use Limine's own view of the effective command line, after
+# its quoting, =/+= ordering and per-kernel keys: 0 when every given parameter
+# is an exact token, 1 when one is not, 2 when Limine cannot be asked.
+effective_cmdline_has() {
+  local cmdline wanted token found
+  local -a tokens
+  cmdline=$(/usr/bin/limine-entry-tool --get-cmdline 2>/dev/null) || return 2
+  read -r -a tokens <<<"${cmdline//$'\n'/ }"
   for wanted in "$@"; do
     found=1
     for token in "${tokens[@]}"; do
@@ -58,7 +66,7 @@ needs_machine_repair() {
     return 0
   fi
   if [[ -f $limine_conf ]]; then
-    limine_has_tokens pcie_ports=compat && return 0 || { status=$?; (( status == 1 )) || return 2; }
+    limine_mentions pcie_ports=compat && return 0 || { status=$?; (( status == 1 )) || return 2; }
   fi
   if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then return 0; fi
   if tiny_dfr_installed; then
@@ -70,7 +78,7 @@ needs_machine_repair() {
   # The marker records a successful rebuild of the new parameters and nothing
   # else, so a rebuild is pending only while they are configured without it.
   if [[ -f $limine_conf ]] && [[ ! -e $repair_marker ]]; then
-    limine_has_tokens pm_async=off mem_sleep_default=deep && return 0 || { status=$?; (( status == 1 )) || return 2; }
+    limine_mentions pm_async=off mem_sleep_default=deep && return 0 || { status=$?; (( status == 1 )) || return 2; }
   fi
   return 1
 }
@@ -87,8 +95,22 @@ repair_machine() {
     return 1
   fi
   if [[ -f $limine_conf ]]; then
-    if limine_has_tokens pcie_ports=compat; then
-      /usr/bin/sed -E -i '/^[[:space:]]*#/!s/(^|[[:space:]"'"'"'])pcie_ports=compat($|[[:space:]"'"'"'])/\1pm_async=off mem_sleep_default=deep\2/g' "$limine_conf" || return 1
+    if effective_cmdline_has pcie_ports=compat; then
+      # Each pass consumes one delimiter, so adjacent repeats need another.
+      local pass before
+      for (( pass = 0; pass < 8; pass++ )); do
+        before=$(/usr/bin/cat -- "$limine_conf") || return 1
+        /usr/bin/sed -E -i '/^[[:space:]]*#/!s/(^|[[:space:]"'"'"'=])pcie_ports=compat($|[[:space:]"'"'"'])/\1pm_async=off mem_sleep_default=deep\2/g' "$limine_conf" || return 1
+        [[ $(/usr/bin/cat -- "$limine_conf") != "$before" ]] || break
+      done
+      # A form this rewrite does not understand leaves the repair pending.
+      if effective_cmdline_has pcie_ports=compat; then
+        echo "Could not remove pcie_ports=compat from the effective Limine command line; leaving the T2 repair pending." >&2
+        return 1
+      else
+        status=$?
+        (( status == 1 )) || return 1
+      fi
       rebuild=1
     else
       status=$?
@@ -116,7 +138,7 @@ EOF
     fi
   fi
   if [[ -f $limine_conf ]] && [[ ! -e $repair_marker ]]; then
-    if limine_has_tokens pm_async=off mem_sleep_default=deep; then
+    if effective_cmdline_has pm_async=off mem_sleep_default=deep; then
       rebuild=1
     else
       status=$?
@@ -128,7 +150,8 @@ EOF
   # run from rebuilding once they are configured.
   if (( rebuild )); then
     /usr/bin/limine-mkinitcpio || return 1
-    limine_has_tokens pm_async=off mem_sleep_default=deep || return 1
+    effective_cmdline_has pm_async=off mem_sleep_default=deep || return 1
+    if effective_cmdline_has pcie_ports=compat; then return 1; else status=$?; (( status == 1 )) || return 1; fi
     /usr/bin/install -Dm644 /dev/null "$repair_marker" || return 1
   fi
 }

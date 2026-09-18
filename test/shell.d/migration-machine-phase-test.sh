@@ -91,6 +91,28 @@ wait "$bt_pid_one"; wait "$bt_pid_two"
 [[ -e $bt_dispatch_marker && $(grep -c '^start$' "$bt_dispatch_log") == 1 && $(grep -c '^on$' "$bt_dispatch_log") == 1 ]] || fail "Bluetooth full dispatch is not serialized and replay safe"
 pass "Bluetooth full no-argument dispatch preserves sudo arguments, clean environment, flock serialization, recheck, and marker replay"
 
+
+# Stand-in for limine-entry-tool --get-cmdline: applies = and += in order for
+# the default key to the drop-in's active lines, stripping one pair of double
+# quotes, the way Limine resolves the installer's format. T2_EFFECTIVE, when
+# set, overrides the answer to model a form the rewrite cannot change.
+write_entry_stub() {
+  cat >"$1" <<SH
+#!/bin/bash
+[[ \${1:-} == --get-cmdline ]] || exit 64
+[[ -z \${T2_EFFECTIVE:-} ]] || { printf '%s\n' "\$T2_EFFECTIVE"; exit 0; }
+cmdline=""
+[[ -f '$2' ]] || { echo; exit 0; }
+while IFS= read -r line; do
+  [[ \$line =~ ^[[:space:]]*# ]] && continue
+  [[ \$line =~ ^KERNEL_CMDLINE\\[default\\](\\+?)=(.*)\$ ]] || continue
+  value=\${BASH_REMATCH[2]}; [[ \$value == \\"*\\" ]] && { value=\${value#\\"}; value=\${value%\\"}; }
+  if [[ -n \${BASH_REMATCH[1]} ]]; then cmdline+=" \$value"; else cmdline=\$value; fi
+done <'$2'
+printf '%s\n' "\$cmdline"
+SH
+  chmod +x "$1"
+}
 t2_bin="$tmp/t2-bin"; mkdir "$t2_bin"
 cat >"$t2_bin/lspci" <<'SH'
 #!/bin/bash
@@ -116,7 +138,8 @@ echo rebuild >>"$T2_LOG"
 SH
 chmod +x "$t2_bin"/*
 t2_body="$tmp/t2-body.sh"; script_copy 1785944594 "$t2_body"
-sed -i -e "s|/usr/bin/lspci|$t2_bin/lspci|g" -e "s|/usr/bin/pacman|$t2_bin/pacman|g" -e "s|/usr/bin/systemctl|$t2_bin/systemctl|g" -e "s|/usr/bin/limine-mkinitcpio|$t2_bin/limine|g" -e "s|/var/lib/omarchy/migrations/1785944594|$tmp/t2.marker|g" -e "s|/etc/limine-entry-tool.d/t2-mac.conf|$tmp/t2.conf|g" -e "s|/etc/t2fand.conf|$tmp/fan.conf|g" -e "s|/proc/cmdline|$tmp/cmdline|g" "$t2_body"
+write_entry_stub "$t2_bin/entry" "$tmp/t2.conf"
+sed -i -e "s|/usr/bin/lspci|$t2_bin/lspci|g" -e "s|/usr/bin/pacman|$t2_bin/pacman|g" -e "s|/usr/bin/systemctl|$t2_bin/systemctl|g" -e "s|/usr/bin/limine-mkinitcpio|$t2_bin/limine|g" -e "s|/usr/bin/limine-entry-tool|$t2_bin/entry|g" -e "s|/var/lib/omarchy/migrations/1785944594|$tmp/t2.marker|g" -e "s|/etc/limine-entry-tool.d/t2-mac.conf|$tmp/t2.conf|g" -e "s|/etc/t2fand.conf|$tmp/fan.conf|g" -e "s|/proc/cmdline|$tmp/cmdline|g" "$t2_body"
 # A copy whose Limine reader can be made to fail with an I/O-style status.
 printf '#!/bin/bash\n[[ ${T2_GREP_FAIL:-0} != 1 ]] || exit 2\nexec /usr/bin/grep "$@"\n' >"$t2_bin/grep"; chmod +x "$t2_bin/grep"
 t2_grep_body="$tmp/t2-grep-body.sh"; sed -e "s|/usr/bin/grep -v|$t2_bin/grep -v|" "$t2_body" >"$t2_grep_body"
@@ -157,6 +180,26 @@ for near in 'KERNEL_CMDLINE[default]+=" not_pm_async=off mem_sleep_default=deepf
   [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 treated a near-miss token as a parameter: $near"
   grep -qxF "$near" "$tmp/t2.conf" || fail "T2 rewrote a near-miss token: $near"
 done
+# Decisions follow Limine's effective command line, not the drop-in's text:
+# a later = override, another kernel's key, and an unquoted assignment.
+t2_case() {
+  rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf '%b\n' "$1" >"$tmp/t2.conf"
+  T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
+}
+t2_case 'KERNEL_CMDLINE[default]+=" pcie_ports=compat"\nKERNEL_CMDLINE[default]=" quiet"'
+[[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 acted on an overridden parameter"
+grep -qF 'pcie_ports=compat' "$tmp/t2.conf" || fail "T2 rewrote a parameter Limine does not apply"
+t2_case 'KERNEL_CMDLINE[linux-zen]+=" pm_async=off mem_sleep_default=deep"'
+[[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 certified parameters that belong to another kernel"
+t2_case 'KERNEL_CMDLINE[default]+=pm_async=off mem_sleep_default=deep'
+[[ -e $tmp/t2.marker && $(grep -c '^rebuild$' "$tmp/t2.log") == 1 ]] || fail "T2 missed an unquoted assignment Limine applies"
+# Repeated old tokens are all replaced before completion is certified.
+t2_case 'KERNEL_CMDLINE[default]+=" pcie_ports=compat pcie_ports=compat"'
+[[ -e $tmp/t2.marker ]] && ! grep -q 'pcie_ports=compat' "$tmp/t2.conf" || fail "T2 left a repeated old parameter behind" "$(cat "$tmp/t2.conf")"
+# A form the rewrite cannot change stays pending rather than certified.
+rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf 'KERNEL_CMDLINE[default]+=" pcie_ports=compat"\n' >"$tmp/t2.conf"
+if T2_PRESENT=1 T2_EFFECTIVE='quiet pcie_ports=compat' T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine; then fail "T2 completed while Limine still applies the old parameter"; fi
+[[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 rebuilt or certified with the old parameter still effective"
 # A drop-in that cannot be read is neither configured nor unconfigured.
 rm -f "$tmp/t2.marker"; printf 'KERNEL_CMDLINE[default]+=" pcie_ports=compat"\n' >"$tmp/t2.conf"
 if T2_PRESENT=1 T2_GREP_FAIL=1 T2_LOG="$tmp/t2.log" root_run "$t2_grep_body" --machine; then fail "a Limine read error was treated as nothing to repair"; fi
@@ -201,7 +244,8 @@ shift 2
 exec "\$@"
 SH
 chmod +x "$t2_dispatch_lspci" "$t2_dispatch_pacman" "$t2_dispatch_limine" "$t2_dispatch_sudo"
-sed -i -e "s|/usr/bin/lspci|$t2_dispatch_lspci|g" -e "s|/usr/bin/pacman|$t2_dispatch_pacman|g" -e "s|/usr/bin/limine-mkinitcpio|$t2_dispatch_limine|g" -e "s|/usr/bin/sudo|$t2_dispatch_sudo|g" -e "s|/run/omarchy-t2-hardware-migration.lock|$t2_dispatch_lock|g" -e "s|/usr/share/omarchy/migrations/1785944594.sh|$t2_dispatch|g" -e "s|/var/lib/omarchy/migrations/1785944594|$t2_dispatch_marker|g" -e "s|/etc/limine-entry-tool.d/t2-mac.conf|$t2_dispatch_conf|g" -e "s|/etc/t2fand.conf|$t2_dispatch_fan|g" -e "s|/proc/cmdline|$t2_dispatch_cmdline|g" "$t2_dispatch"
+write_entry_stub "$tmp/t2-dispatch-entry" "$t2_dispatch_conf"
+sed -i -e "s|/usr/bin/limine-entry-tool|$tmp/t2-dispatch-entry|g" -e "s|/usr/bin/lspci|$t2_dispatch_lspci|g" -e "s|/usr/bin/pacman|$t2_dispatch_pacman|g" -e "s|/usr/bin/limine-mkinitcpio|$t2_dispatch_limine|g" -e "s|/usr/bin/sudo|$t2_dispatch_sudo|g" -e "s|/run/omarchy-t2-hardware-migration.lock|$t2_dispatch_lock|g" -e "s|/usr/share/omarchy/migrations/1785944594.sh|$t2_dispatch|g" -e "s|/var/lib/omarchy/migrations/1785944594|$t2_dispatch_marker|g" -e "s|/etc/limine-entry-tool.d/t2-mac.conf|$t2_dispatch_conf|g" -e "s|/etc/t2fand.conf|$t2_dispatch_fan|g" -e "s|/proc/cmdline|$t2_dispatch_cmdline|g" "$t2_dispatch"
 if root_run "$t2_dispatch" --machine; then fail "T2 failed rebuild publishes completion in full retry fixture"; fi
 [[ ! -e $t2_dispatch_marker && $(grep -c '^rebuild$' "$t2_dispatch_log") == 1 ]] || fail "T2 failed rebuild did not remain pending"
 root_run "$t2_dispatch"
