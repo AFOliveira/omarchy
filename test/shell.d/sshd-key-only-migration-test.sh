@@ -61,7 +61,7 @@ SH
 # fail, as an interrupted enumeration would.
 cat >"$b/find" <<'SH'
 #!/bin/bash
-if [[ ${FIND_FAIL:-0} == 1 && ${*: -1} == -print0 ]]; then printf '%s\0' "$1/a.conf"; exit 1; fi
+if [[ ${FIND_FAIL:-0} == 1 && ${*: -1} == -print0 ]]; then printf '%s\0' "$1/20-trusted.conf"; exit 1; fi
 exec /usr/bin/find "$@"
 SH
 # MARKER_LOOKUP_FAIL makes looking up the completion marker fail with an I/O
@@ -146,6 +146,9 @@ for error in passwd groups; do prepare "admission-error-$error"; touch "$t/admis
 prepare query-error; touch "$t/query-error/state/"{active,enabled}; ACTIVE_QUERY_ERROR=1; if run query-error; then exit 1; fi; unset ACTIVE_QUERY_ERROR; [[ -e $t/query-error/state/active && -e $t/query-error/state/enabled && ! -e $t/query-error/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf && -e $t/query-error/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]]
 prepare unsafe-query-error; rm "$t/unsafe-query-error/root/home/keyed/.ssh/authorized_keys"; touch "$t/unsafe-query-error/state/"{active,enabled}; ENABLED_QUERY_ERROR=1; if run unsafe-query-error; then exit 1; fi; unset ENABLED_QUERY_ERROR; [[ -e $t/unsafe-query-error/state/active && -e $t/unsafe-query-error/state/enabled ]]
 prepare symlink-key; mv "$t/symlink-key/root/home/keyed/.ssh/authorized_keys" "$t/symlink-key/root/home/key"; ln -s ../key "$t/symlink-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/symlink-key/state/"{active,enabled}; run symlink-key; [[ ! -e $t/symlink-key/state/active ]]
+# A key-only path that is not a regular file proves nothing; the migration
+# disables an exposed daemon rather than trust it.
+prepare keyonly-symlink; rm -f "$t/keyonly-symlink/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; ln -s /dev/null "$t/keyonly-symlink/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; touch "$t/keyonly-symlink/state/"{active,enabled}; run keyonly-symlink; [[ ! -e $t/keyonly-symlink/state/active ]] || { echo "a symlinked key-only file left sshd running" >&2; exit 1; }
 # A configuration anyone but root can write proves nothing about the policy
 # the daemon will read, so the migration disables rather than trusts it.
 prepare quoted-include; echo 'Include "/etc/ssh/untrusted file.conf"' >>"$t/quoted-include/root/etc/ssh/sshd_config"; echo 'Port 22' >"$t/quoted-include/root/etc/ssh/untrusted file.conf"; chmod 0666 "$t/quoted-include/root/etc/ssh/untrusted file.conf"; touch "$t/quoted-include/state/"{active,enabled}; run quoted-include; [[ ! -e $t/quoted-include/state/active ]] || { echo "a quoted include of a writable file was trusted" >&2; exit 1; }
@@ -214,7 +217,7 @@ if /usr/bin/bash "$mapped/bin/omarchy-migrate-sshd-key-only" -p >/dev/null 2>&1;
 # ---- Setup's machine phase: --setup UID -- KEY... ----
 /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/other"; other=$(<"$t/other.pub")
 sprep() { prepare "$1"; rm -f "$t/$1/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; echo 'nologin:x:1002:1002::/home/nologin:/usr/bin/nologin' >>"$t/$1/root/etc/passwd"; }
-srun() { local name=$1; shift; env -u SUDO_UID TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" MARKER_LOOKUP_FAIL="${MARKER_LOOKUP_FAIL:-0}" AWK_FAIL="${AWK_FAIL:-0}" FIND_FAIL="${FIND_FAIL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
+srun() { local name=$1; shift; env -u SUDO_UID DISABLE_FAIL="${DISABLE_FAIL:-0}" TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" MARKER_LOOKUP_FAIL="${MARKER_LOOKUP_FAIL:-0}" AWK_FAIL="${AWK_FAIL:-0}" FIND_FAIL="${FIND_FAIL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
 cfg() { printf '%s' "$t/$1/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; }
 marker() { printf '%s' "$t/$1/root/var/lib/omarchy/migrations/1788163637"; }
 untouched() { [[ ! -e $(cfg "$1") && ! -e $t/$1/state/active && ! -e $t/$1/state/enabled && ! -e $t/$1/state/rule && ! -e $(marker "$1") ]] || { echo "$1 changed the machine" >&2; exit 1; }; }
@@ -274,7 +277,9 @@ srun s-cfg-empty-ok --setup 1000 -- "$key" >/dev/null || { echo "setup refused a
 sprep s-cfg-parse; AWK_FAIL=1 srun s-cfg-parse --setup 1000 -- "$key" >"$t/s-cfg-parse.out" 2>&1 && { echo "setup trusted a configuration it could not parse" >&2; exit 1; }
 untouched s-cfg-parse; grep -q 'is not a root-owned file only root can write' "$t/s-cfg-parse.out" || { echo "a parser failure was refused for another reason" >&2; cat "$t/s-cfg-parse.out" >&2; exit 1; }
 # Nor does a listing of an Include directory that fails part way.
-sprep s-cfg-list; FIND_FAIL=1 srun s-cfg-list --setup 1000 -- "$key" >"$t/s-cfg-list.out" 2>&1 && { echo "setup trusted an Include directory it could not list" >&2; exit 1; }
+# The entry it does report is a real, trusted file, so only the failed
+# listing itself can refuse.
+sprep s-cfg-list; echo 'Port 22' >"$t/s-cfg-list/root/etc/ssh/sshd_config.d/20-trusted.conf"; FIND_FAIL=1 srun s-cfg-list --setup 1000 -- "$key" >"$t/s-cfg-list.out" 2>&1 && { echo "setup trusted an Include directory it could not list" >&2; exit 1; }
 untouched s-cfg-list; grep -q 'is not a root-owned file only root can write' "$t/s-cfg-list.out" || { echo "a listing failure was refused for another reason" >&2; cat "$t/s-cfg-list.out" >&2; exit 1; }
 # The same nested include, only root-writable, is accepted.
 sprep s-cfg-nested-ok; echo 'Include extra.conf' >>"$t/s-cfg-nested-ok/root/etc/ssh/sshd_config"; echo 'Include nested/*.conf' >"$t/s-cfg-nested-ok/root/etc/ssh/extra.conf"; mkdir -p "$t/s-cfg-nested-ok/root/etc/ssh/nested"; echo 'Port 22' >"$t/s-cfg-nested-ok/root/etc/ssh/nested/a.conf"
@@ -296,6 +301,11 @@ sprep s-admin; printf 'PasswordAuthentication yes\n' >"$(cfg s-admin)"; chmod 06
 if MATCH_BAD_USER=keyed srun s-admin --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi
 [[ $(stat -c '%a' "$(cfg s-admin)"; cat "$(cfg s-admin)") == "$before" && -e $t/s-admin/state/active && -e $t/s-admin/state/enabled ]] || { echo "setup did not restore the administrator's configuration" >&2; exit 1; }
 [[ $(grep '^systemctl reload' "$t/s-admin/events" | wc -l) == 1 ]] || { echo "the running daemon was not given the restored configuration" >&2; exit 1; }
+# A daemon setup enabled but cannot disable keeps the key-only policy too,
+# or it would start at the next boot with the restored one.
+sprep s-enabled; if LIMIT_FAIL=1 DISABLE_FAIL=1 srun s-enabled --setup 1000 -- "$key" >"$t/s-enabled.out" 2>&1; then exit 1; fi
+grep -qxF 'AuthenticationMethods publickey' "$(cfg s-enabled)" && [[ -e $t/s-enabled/state/enabled && ! -e $(marker s-enabled) ]] || { echo "an enabled daemon was left beneath a restored policy" >&2; exit 1; }
+grep -q 'CRITICAL: SSH setup rollback was incomplete' "$t/s-enabled.out" || { echo "an incomplete rollback was not reported" >&2; exit 1; }
 # A daemon setup started but cannot stop keeps the key-only policy beneath it.
 sprep s-stuck; if LIMIT_FAIL=1 STOP_FAIL=1 srun s-stuck --setup 1000 -- "$key" >"$t/s-stuck.out" 2>&1; then exit 1; fi
 grep -qxF 'AuthenticationMethods publickey' "$(cfg s-stuck)" && [[ -e $t/s-stuck/state/active && ! -e $(marker s-stuck) ]] || { echo "a daemon that could not be stopped was left beneath a restored policy" >&2; exit 1; }

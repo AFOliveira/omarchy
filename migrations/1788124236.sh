@@ -2,7 +2,6 @@ echo "Disable SSH password authentication, or sshd itself when no key is authori
 
 config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf
 key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf
-key_only_complete=/var/lib/omarchy/migrations/1788163637
 authorized_keys="$HOME/.ssh/authorized_keys"
 
 as_root() {
@@ -24,14 +23,13 @@ skip() {
 
 # The fixed setup command writes this file itself. Its presence is also the
 # machine-wide completion state, so migrations run by another account no-op.
-# Current setup and the key-only migration replace it with the key-only file,
-# which completes this repair the same way for every later account.
-# Only a conversion Omarchy validated counts: the regular key-only file plus
-# the root-owned marker written after it was published. An interrupted setup
-# can leave the file alone, and the later key-only migration handles that.
-if [[ -e $config || -L $config ]] ||
-  [[ -f $key_only_config && ! -L $key_only_config && -f $key_only_complete && ! -L $key_only_complete &&
-    $(/usr/bin/stat -c %u -- "$key_only_complete" 2>/dev/null) == 0 ]]; then
+# Current setup and the key-only migration replace it with the key-only file.
+# Whatever state that file is in, certified, left by an interrupted setup, or
+# not a regular file, it belongs to the key-only migration that runs right
+# after this one: it validates the file or disables sshd under the machine
+# lock setup also holds. Acting on it here, outside that lock, could disable
+# a daemon a setup running for another account is about to certify.
+if [[ -e $config || -L $config || -e $key_only_config || -L $key_only_config ]]; then
   exit 0
 fi
 

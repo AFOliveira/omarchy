@@ -722,7 +722,7 @@ commit_outcome() {
 }
 
 rollback_setup_machine() {
-  local failed=false stop_failed=false firewall_status restored=false
+  local failed=false keep_key_only=false firewall_status restored=false
 
   if [[ $firewall_rule_added == "true" ]]; then
     # Armed before the mutation. The rule was proven absent beforehand, so
@@ -735,16 +735,16 @@ rollback_setup_machine() {
     /usr/bin/ufw reload >/dev/null 2>&1 || failed=true
   fi
   if [[ $service_enabled == "true" && $service_was_enabled != "true" ]]; then
-    /usr/bin/systemctl disable sshd.service >/dev/null 2>&1 || failed=true
+    /usr/bin/systemctl disable sshd.service >/dev/null 2>&1 || { failed=true; keep_key_only=true; }
   fi
   if [[ $service_started == "true" && $service_was_active != "true" ]]; then
-    /usr/bin/systemctl stop sshd.service >/dev/null 2>&1 || { failed=true; stop_failed=true; }
+    /usr/bin/systemctl stop sshd.service >/dev/null 2>&1 || { failed=true; keep_key_only=true; }
   fi
   if [[ $hardening_touched == "true" ]]; then
-    if [[ $stop_failed == "true" ]]; then
-      # A daemon still running must not be left beneath a restored policy
-      # that may allow passwords.
-      echo "sshd could not be stopped; keeping the key-only configuration${hardening_backup:+ (previous file saved as $hardening_backup)}." >&2
+    if [[ $keep_key_only == "true" ]]; then
+      # A daemon still running, or still enabled to start at boot, must not
+      # be left beneath a restored policy that may allow passwords.
+      echo "sshd could not be stopped or disabled; keeping the key-only configuration${hardening_backup:+ (previous file saved as $hardening_backup)}." >&2
     elif [[ -n $hardening_backup ]]; then
       # The backup is in the same root-owned directory, so rename restores
       # the administrator's exact owner, group and mode atomically.

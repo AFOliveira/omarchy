@@ -129,17 +129,18 @@ KEY_ONLY_PRESENT=1 KEY_ONLY_COMPLETE=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED
 [[ ! -s $test_dir/converted.calls ]] || fail "a machine converted to key-only must not be touched by the older migration" "$(cat "$test_dir/converted.calls")"
 pass "SSH migration no-ops when a certified key-only conversion exists"
 
-# An interrupted setup can leave the key-only file without certifying it; that
-# is not a completed conversion.
-KEY_ONLY_PRESENT=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration uncertified >/dev/null
-sshd_disabled uncertified || fail "an uncertified key-only file was treated as a completed conversion"
-pass "SSH migration does not treat an uncertified key-only file as completion"
-
-# Only the regular file Omarchy writes marks completion; a symlink there must
-# not leave a keyless password-only server running.
-KEY_ONLY_SYMLINK=1 KEY_ONLY_COMPLETE=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration symlinked >/dev/null
-sshd_disabled symlinked || fail "a symlinked key-only config was treated as a completed conversion"
-pass "SSH migration does not treat a symlinked key-only config as completion"
+# An uncertified or symlinked key-only file is left to the key-only migration
+# that runs next, which validates it or disables sshd under the machine lock
+# (sshd-key-only-migration-test.sh); this one must not act on it unlocked.
+for state in uncertified symlinked; do
+  if [[ $state == uncertified ]]; then KEY_ONLY_PRESENT=1; else KEY_ONLY_SYMLINK=1; fi
+  AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration "$state" >/dev/null
+  unset KEY_ONLY_PRESENT KEY_ONLY_SYMLINK
+  [[ ! -s $test_dir/$state.calls ]] || fail "the older migration acted on a $state key-only file outside the machine lock" "$(cat "$test_dir/$state.calls")"
+done
+grep -qF '/usr/bin/omarchy-migrate-sshd-key-only' "$ROOT/migrations/1788163637.sh" ||
+  fail "the key-only migration that takes over is missing"
+pass "SSH migration leaves any key-only file to the locked key-only migration"
 
 # Without a usable key, sshd only accepts password logins — the hole the old
 # setup command could leave open. The migration closes it by disabling sshd.
