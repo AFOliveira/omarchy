@@ -31,8 +31,10 @@ dropin_dir=/etc/ssh/sshd_config.d
 passwd_file=/etc/passwd
 login_defs=/etc/login.defs
 machine_lock=/run/omarchy-sshd-key-only-migration.lock
+completion_marker=/var/lib/omarchy/migrations/1788163637
 eligible_names=()
 keyed_names=()
+declare -A keyed_homes=()
 
 runtime_owner_mode=$(/usr/bin/stat -Lc '%u:%a:%F' -- /run) || exit 1
 [[ ! -L /run && $(/usr/bin/readlink -e -- /run) == /run && $runtime_owner_mode == "0:755:directory" ]] || {
@@ -126,6 +128,17 @@ account_has_usable_key() {
   return 1
 }
 
+# A key that parses may still be refused for this account by its effective
+# policy; only a key sshd would accept proves an administrative login.
+account_has_accepted_key() {
+  local home=$1 dump=$2 line
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    omarchy_sshd_key_line_accepted "$line" "$dump" && return 0
+  done <"$home/.ssh/authorized_keys"
+  return 1
+}
+
 valid_account_name() {
   [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}[$]?$ ]]
 }
@@ -196,6 +209,7 @@ enumerate_login_accounts() {
     eligible_names+=("$name")
     if account_has_usable_key "$name" "$uid" "$home"; then
       keyed_names+=("$name")
+      keyed_homes[$name]=$home
     fi
   done <"$passwd_file"
   ((${#eligible_names[@]} > 0))
@@ -236,7 +250,8 @@ effective_is_key_only() {
     dump=$(/usr/bin/sshd -T -C "user=$name,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22") || return 1
     dump_is_key_only "$dump" || return 1
     for keyed in "${keyed_names[@]}"; do
-      if [[ $keyed == "$name" ]] && account_is_admitted "$name" "$dump"; then admitted_key=1; fi
+      if [[ $keyed == "$name" ]] && account_is_admitted "$name" "$dump" && omarchy_sshd_policy_allows_login "$dump" &&
+        account_has_accepted_key "${keyed_homes[$name]}" "$dump"; then admitted_key=1; fi
     done
   done
   ((admitted_key))
@@ -297,3 +312,7 @@ fi
 if legacy_is_omarchy_managed; then
   /usr/bin/rm -f -- "$legacy_config"
 fi
+# Only a validated, loaded conversion certifies completion. The key-only file
+# alone does not: setup installs it before validating it, so an interrupted
+# setup can leave one behind.
+/usr/bin/install -D -o root -g root -m 0644 /dev/null "$completion_marker"

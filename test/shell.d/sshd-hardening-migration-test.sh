@@ -82,12 +82,20 @@ run_migration() {
   if [[ ${KEY_ONLY_PRESENT:-0} == 1 ]]; then
     printf 'PasswordAuthentication no\n' >"${config%/*}/00-omarchy-key-only.conf"
   fi
+  if [[ ${KEY_ONLY_COMPLETE:-0} == 1 ]]; then
+    : >"$root/key-only-complete"
+  fi
+  if [[ ${KEY_ONLY_SYMLINK:-0} == 1 ]]; then
+    ln -sfn /dev/null "${config%/*}/00-omarchy-key-only.conf"
+  fi
 
   # Keep the privileged production destination fixed in the shipped migration.
   # For this isolated test only, rewrite that one assignment in the input fed to
   # bash so no scenario can touch the host's /etc.
   sed -e "s|^config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf$|config=$config|" \
-    -e "s|^key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf$|key_only_config=${config%/*}/00-omarchy-key-only.conf|" "$migration" |
+    -e "s|^key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf$|key_only_config=${config%/*}/00-omarchy-key-only.conf|" \
+    -e "s|^key_only_complete=/var/lib/omarchy/migrations/1788163637$|key_only_complete=$root/key-only-complete|" \
+    -e "s|2>/dev/null) == 0 ]]|2>/dev/null) == $(id -u) ]]|" "$migration" |
     HOME="$home" CALL_LOG="$test_dir/$scenario.calls" PATH="$stub_bin:$PATH" \
       SSHD_ENABLED="${SSHD_ENABLED:-0}" SSHD_ACTIVE="${SSHD_ACTIVE:-0}" \
       SSHD_SYNTAX_VALID="${SSHD_SYNTAX_VALID:-1}" \
@@ -117,9 +125,21 @@ pass "SSH migration no-ops when the hardening config already exists"
 # A second account can still have this migration pending after the first one
 # converted the machine to the key-only config and removed the file above. It
 # must treat that as complete rather than disabling sshd for a keyless account.
-KEY_ONLY_PRESENT=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration converted >/dev/null
+KEY_ONLY_PRESENT=1 KEY_ONLY_COMPLETE=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration converted >/dev/null
 [[ ! -s $test_dir/converted.calls ]] || fail "a machine converted to key-only must not be touched by the older migration" "$(cat "$test_dir/converted.calls")"
-pass "SSH migration no-ops when the key-only config already exists"
+pass "SSH migration no-ops when a certified key-only conversion exists"
+
+# An interrupted setup can leave the key-only file without certifying it; that
+# is not a completed conversion.
+KEY_ONLY_PRESENT=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration uncertified >/dev/null
+sshd_disabled uncertified || fail "an uncertified key-only file was treated as a completed conversion"
+pass "SSH migration does not treat an uncertified key-only file as completion"
+
+# Only the regular file Omarchy writes marks completion; a symlink there must
+# not leave a keyless password-only server running.
+KEY_ONLY_SYMLINK=1 KEY_ONLY_COMPLETE=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration symlinked >/dev/null
+sshd_disabled symlinked || fail "a symlinked key-only config was treated as a completed conversion"
+pass "SSH migration does not treat a symlinked key-only config as completion"
 
 # Without a usable key, sshd only accepts password logins — the hole the old
 # setup command could leave open. The migration closes it by disabling sshd.
