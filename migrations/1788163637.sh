@@ -22,8 +22,10 @@ if ((EUID == 0)); then
   /usr/bin/omarchy-migrate-sshd-key-only
 else
   # Once cleanup starts, a signal is held rather than acted on: the exit
-  # revocation must finish, and timeout bounds it instead. timeout runs sudo
-  # in its own process group, and an attempt that fails anyway is retried.
+  # revocation must finish. It stays a direct child of this shell, since under
+  # timestamp_type=ppid, and without a terminal, sudo keys the cached
+  # authorization by its parent. A sibling watchdog bounds it, and a failed
+  # attempt, such as one a signal to the whole group killed, is retried.
   ssh_migration_cleaning=false
   handle_ssh_migration_signal() {
     [[ $ssh_migration_cleaning == "true" ]] && return
@@ -31,12 +33,16 @@ else
     exit "$1"
   }
   cleanup_ssh_migration_sudo() {
-    local status=$? attempt revoke revoke_status=1
-    ssh_migration_cleaning=true
+    local status=$ssh_migration_status attempt revoke revoke_status=1
     trap - EXIT
     for attempt in 1 2 3; do
-      /usr/bin/timeout -k 5 30 /usr/bin/sudo -k >/dev/null 2>&1 &
+      /usr/bin/sudo -k >/dev/null 2>&1 &
       revoke=$!
+      {
+        watchdog_status=0
+        /usr/bin/timeout 30 /usr/bin/tail --pid="$revoke" -f /dev/null >/dev/null 2>&1 || watchdog_status=$?
+        (( watchdog_status != 124 )) || kill -KILL "$revoke" 2>/dev/null || true
+      } &
       while :; do
         wait "$revoke" && revoke_status=0 || revoke_status=$?
         kill -0 "$revoke" 2>/dev/null || break
@@ -47,8 +53,9 @@ else
     exit "$status"
   }
   # Traps first, so a failure or signal during the entry revocation still
-  # revokes on the way out.
-  trap cleanup_ssh_migration_sudo EXIT
+  # revokes on the way out. One assignment-only command records the status
+  # and marks cleanup active, so no handler can run between the two.
+  trap 'ssh_migration_status=$? ssh_migration_cleaning=true; cleanup_ssh_migration_sudo' EXIT
   trap 'handle_ssh_migration_signal 129' HUP
   trap 'handle_ssh_migration_signal 130' INT
   trap 'handle_ssh_migration_signal 143' TERM

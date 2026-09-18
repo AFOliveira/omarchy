@@ -165,7 +165,7 @@ sshd_enabled_state() {
 # During cleanup, each command runs as a waited-on background child and a
 # signal is forwarded to it; one arriving before its PID is known is held and
 # forwarded as soon as it is. The final revocation is never forwarded a
-# signal; timeout bounds it instead.
+# signal; a watchdog bounds it instead.
 CLEANUP_ACTIVE=false
 CLEANUP_CHILD=""
 CLEANUP_SIGNAL_PENDING=false
@@ -199,20 +199,29 @@ run_cleanup() {
   CLEANUP_CHILD=""
   return "$status"
 }
-# timeout runs sudo in its own process group, so a signal to this group does
-# not reach it either; an attempt that fails anyway is retried.
+# The final revocation stays a direct child of this shell: under
+# timestamp_type=ppid, and without a terminal, sudo keys the cached
+# authorization by its parent, so an intermediary such as timeout would revoke
+# some other record and still succeed. A sibling watchdog bounds it instead,
+# and a failed attempt, such as one a signal to the whole group killed, is
+# retried.
 revoke_cleanup_sudo() {
-  local attempt
+  local attempt revoke
   for attempt in 1 2 3; do
-    /usr/bin/timeout -k 5 30 /usr/bin/sudo -k >/dev/null 2>&1 &
-    wait_for_cleanup_child "$!" && return 0
+    /usr/bin/sudo -k >/dev/null 2>&1 &
+    revoke=$!
+    {
+      watchdog_status=0
+      /usr/bin/timeout 30 /usr/bin/tail --pid="$revoke" -f /dev/null >/dev/null 2>&1 || watchdog_status=$?
+      (( watchdog_status != 124 )) || kill -KILL "$revoke" 2>/dev/null || true
+    } &
+    wait_for_cleanup_child "$revoke" && return 0
   done
   return 1
 }
 
 rollback_setup() {
-  local exit_status=$?
-  CLEANUP_ACTIVE=true
+  local exit_status=$CLEANUP_EXIT_STATUS
   local rollback_failed=false config_restored=false
   trap - EXIT
 
@@ -310,7 +319,9 @@ rollback_setup() {
 
   exit "$exit_status"
 }
-trap rollback_setup EXIT
+# One assignment-only command records the status and marks cleanup active, so
+# no signal handler can run between the two and abandon the rollback.
+trap 'CLEANUP_EXIT_STATUS=$? CLEANUP_ACTIVE=true; rollback_setup' EXIT
 trap 'handle_setup_signal 129' HUP
 trap 'handle_setup_signal 130' INT
 trap 'handle_setup_signal 143' TERM

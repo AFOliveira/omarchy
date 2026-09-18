@@ -184,20 +184,21 @@ if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a failed entry 
 pass "a failed entry revocation still revokes on exit"
 
 # The exit revocation is not something a signal stops: a TERM sent to the
-# migration while it runs is held, and the revocation completes. It runs under
-# timeout, so the migration is timeout's parent.
+# migration while it runs is held, and the revocation completes. It must also
+# run under the same parent as the entry revocation, which sudo keys
+# timestamps by under ppid.
 : >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
 cat >"$m/sudo" <<SH
 #!/bin/bash
 echo "sudo \$*" >>"$m/calls"
 [[ \$1 == -k ]] || exit 1
 if [[ -e $m/revoked-once ]]; then
-  p=\$PPID; [[ \$(ps -o comm= -p "\$p") != timeout ]] || p=\$(ps -o ppid= -p "\$p" | tr -d ' ')
-  echo "\$p" >"$m/migration.pid"
-  if [[ \${REVOKE_HANG:-0} == 1 ]]; then sleep 30 & wait \$!; fi
+  echo "\$PPID" >"$m/migration.pid"
+  if [[ \${REVOKE_HANG:-0} == 1 ]]; then sleep 30 & echo \$! >>"$m/hang.pids"; wait \$!; fi
   sleep 1; echo revoked >>"$m/calls"
+else
+  echo "\$PPID" >"$m/revoked-once"
 fi
-touch "$m/revoked-once"
 SH
 chmod +x "$m/sudo"
 printf 'PasswordAuthentication no\n' >"$m/etc/10-omarchy-hardening.conf"
@@ -207,17 +208,20 @@ for (( i = 0; i < 200; i++ )); do [[ -s $m/migration.pid ]] && break; sleep 0.05
 kill -TERM "$(<"$m/migration.pid")" 2>/dev/null || true
 if wait "$runner" 2>/dev/null; then fail "a migration whose machine phase failed reported success"; fi
 grep -qx revoked "$m/calls" || fail "a TERM to the migration interrupted its exit revocation" "$(cat "$m/calls")"
+[[ $(<"$m/migration.pid") == "$(<"$m/revoked-once")" ]] || fail "the exit revocation ran under a different parent than the entry revocation"
 pass "a TERM during the exit revocation does not stop it"
 
 # An exit revocation that hangs is bounded, retried, and fails the migration.
 : >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-sed 's#/usr/bin/timeout -k 5 30 #/usr/bin/timeout -k 1 1 #' "$m/migration" >"$m/migration-fast"
-grep -q 'timeout -k 1 1 ' "$m/migration-fast" || fail "test could not shorten the revocation bound"
+sed 's#/usr/bin/timeout 30 /usr/bin/tail#/usr/bin/timeout 1 /usr/bin/tail#' "$m/migration" >"$m/migration-fast"
+grep -q 'timeout 1 /usr/bin/tail' "$m/migration-fast" || fail "test could not shorten the revocation bound"
 REVOKE_HANG=1 bash -euo pipefail "$m/migration-fast" >/dev/null 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then pkill -KILL -f "sleep 30" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung exit revocation held the migration forever"; fi
+if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$m/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung exit revocation held the migration forever"; fi
 if wait "$runner" 2>/dev/null; then fail "a migration whose exit revocation never completed reported success"; fi
 [[ $(grep -c '^sudo -k$' "$m/calls") == 4 ]] || fail "a hung exit revocation was not retried" "$(cat "$m/calls")"
-pkill -KILL -f "sleep 30" 2>/dev/null || true
+xargs -r kill -KILL <"$m/hang.pids" 2>/dev/null || true
 rm -f "$m/etc/10-omarchy-hardening.conf"
+grep -qF "trap 'ssh_migration_status=\$? ssh_migration_cleaning=true; cleanup_ssh_migration_sudo' EXIT" "$ROOT/migrations/1788163637.sh" ||
+  fail "the migration's EXIT trap does not mark cleanup active in its first command"
 pass "a hung exit revocation is bounded and retried"

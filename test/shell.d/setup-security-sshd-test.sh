@@ -64,15 +64,16 @@ cat >"$stub/sudo" <<'SH'
 set -euo pipefail
 echo "sudo $*" >>"$EVENTS"
 if [[ ${1:-} == -k ]]; then
-  # The first revocation is setup's entry; a later one is cleanup's final one,
-  # which runs under timeout, so setup is timeout's parent.
+  # The first revocation is setup's entry, a later one cleanup's final one.
+  # Each records its parent, which sudo keys timestamps by under ppid.
   if [[ -e $STATE/k-seen ]]; then
-    p=$PPID; [[ $(ps -o comm= -p "$p") != timeout ]] || p=$(ps -o ppid= -p "$p" | tr -d ' ')
-    echo "$p" >"$STATE/setup.pid"
+    echo "$PPID" >"$STATE/setup.pid"; echo "$PPID" >>"$STATE/final-k.ppid"
     if [[ ${REVOKE_SLOW:-0} == 1 ]]; then touch "$STATE/revoking"; sleep 1; echo revoked >>"$EVENTS"; fi
-    if [[ ${REVOKE_HANG:-0} == 1 ]]; then sleep 30 & echo $! >"$STATE/hang.pid"; wait $!; fi
+    if [[ ${REVOKE_HANG:-0} == 1 ]]; then sleep 30 & echo $! >>"$STATE/hang.pids"; wait $!; fi
+  else
+    echo "$PPID" >"$STATE/k-seen"
   fi
-  touch "$STATE/k-seen"; exit 0
+  exit 0
 fi
 map() { [[ $1 == /etc/* || $1 == /var/* ]] && printf '%s%s' "$FAKE_ROOT" "$1" || printf %s "$1"; }
 case $1 in
@@ -128,8 +129,8 @@ sed \
   -e "s#/usr/bin/mv#$stub/mv#g" \
   "$ROOT/bin/omarchy-setup-security-sshd" >"$mapped_sshd"
 # A copy whose final revocation gives up quickly, to test that bound.
-sed 's#/usr/bin/timeout -k 5 30 #/usr/bin/timeout -k 1 1 #' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
-grep -q 'timeout -k 1 1 ' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
+sed 's#/usr/bin/timeout 30 /usr/bin/tail#/usr/bin/timeout 1 /usr/bin/tail#' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
+grep -q 'timeout 1 /usr/bin/tail' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
 chmod 0755 "$mapped_root/bin/"*
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/key"
@@ -278,16 +279,23 @@ kill -TERM "$(<"$tmp/revoke-signal/state/setup.pid")" 2>/dev/null || true
 wait "$runner" 2>/dev/null || true
 grep -qx revoked "$tmp/revoke-signal/events" || fail "a TERM to setup interrupted its final revocation" "$(tail -n3 "$tmp/revoke-signal/events")"
 ! grep -q 'could not invalidate' "$tmp/revoke-signal.out" || fail "a completed final revocation was reported as failed"
+[[ $(<"$tmp/revoke-signal/state/final-k.ppid") == "$(<"$tmp/revoke-signal/state/k-seen")" ]] ||
+  fail "the final revocation ran under a different parent than setup's own sudo calls"
 unset LIMIT_FAIL REVOKE_SLOW
 # A final revocation that hangs is bounded and reported, not waited on forever.
 LIMIT_FAIL=1 REVOKE_HANG=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
 run revoke-hang "--key=$key" >"$tmp/revoke-hang.out" 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then pkill -KILL -f "sleep 30" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung final revocation held setup forever"; fi
+if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-hang/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung final revocation held setup forever"; fi
 wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
 grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-hang.out" || fail "a hung final revocation was not reported" "$(cat "$tmp/revoke-hang.out")"
 [[ $(grep -c '^sudo -k$' "$tmp/revoke-hang/events") == 4 ]] || fail "a hung final revocation was not retried" "$(cat "$tmp/revoke-hang/events")"
+xargs -r kill -KILL <"$tmp/revoke-hang/state/hang.pids" 2>/dev/null || true
 unset LIMIT_FAIL REVOKE_HANG SETUP_BIN
+# A signal can arrive as a non-signal failure enters cleanup; the EXIT trap's
+# first command both records the status and marks cleanup active.
+grep -qxF "trap 'CLEANUP_EXIT_STATUS=\$? CLEANUP_ACTIVE=true; rollback_setup' EXIT" "$ROOT/bin/omarchy-setup-security-sshd" ||
+  fail "setup's EXIT trap does not mark cleanup active in its first command"
 # The completion certificate never outlives an incomplete setup: an earlier
 # one is invalidated, and a signal right after writing it removes it again.
 name=marker-signal; mkdir -p "$tmp/$name/root/var/lib/omarchy/migrations"; : >"$tmp/$name/root/var/lib/omarchy/migrations/1788163637"
