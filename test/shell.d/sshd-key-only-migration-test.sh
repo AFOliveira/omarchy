@@ -110,6 +110,23 @@ prepare revoked; touch "$t/revoked/state/"{active,enabled}; REVOKED_KEYS="$t/krl
 printf '# revoked\n%s\n' "$key" >"$t/revoked.txt"; cp "$t/rsa.pub" "$t/other-revoked.txt"
 prepare revoked-text; touch "$t/revoked-text/state/"{active,enabled}; REVOKED_KEYS="$t/revoked.txt" run revoked-text; [[ ! -e $t/revoked-text/state/active ]]
 prepare unrevoked-text; touch "$t/unrevoked-text/state/"{active,enabled}; REVOKED_KEYS="$t/other-revoked.txt" run unrevoked-text; [[ -e $t/unrevoked-text/state/active ]]
+# sshd refuses every key when a text list has a line that is not a bare key,
+# so such a list proves no login either.
+printf 'this-is-not-a-key\n' >"$t/malformed-revoked.txt"; printf 'restrict %s\n' "$(<"$t/rsa.pub")" >"$t/options-revoked.txt"
+printf 'ssh-ed25519 AAAA\n' >"$t/baddata-revoked.txt"
+# CRLF endings are valid for sshd; the listed key is still revoked.
+read -r key_type key_data _ <<<"$key"; printf '%s %s\r\n' "$key_type" "$key_data" >"$t/crlf-listed.txt"
+prepare crlf-revoked; touch "$t/crlf-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/crlf-listed.txt" run crlf-revoked
+[[ ! -e $t/crlf-revoked/state/active ]] || { echo "a CRLF revocation list did not revoke its key" >&2; exit 1; }
+for list in malformed options baddata; do
+  prepare "$list-revoked"; touch "$t/$list-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/$list-revoked.txt" run "$list-revoked"
+  [[ ! -e $t/$list-revoked/state/active ]] || { echo "a $list revocation list was treated as revoking nothing" >&2; exit 1; }
+done
+# A certificate listed for some other key is a valid entry and revokes only it.
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/ca"; /usr/bin/ssh-keygen -q -s "$t/ca" -I other -n other "$t/rsa.pub"
+cp "$t/rsa-cert.pub" "$t/cert-revoked.txt"
+prepare cert-revoked; touch "$t/cert-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/cert-revoked.txt" run cert-revoked
+[[ -e $t/cert-revoked/state/active ]] || { echo "a valid certificate entry was treated as a malformed revocation list" >&2; exit 1; }
 # An account sshd refuses outright, or forces into a command, proves no login.
 prepare refused; touch "$t/refused/state/"{active,enabled}; REFUSE_CONNECTION=yes run refused; [[ ! -e $t/refused/state/active ]]
 prepare forced; touch "$t/forced/state/"{active,enabled}; FORCE_COMMAND=/usr/bin/false run forced; [[ ! -e $t/forced/state/active ]]
@@ -165,3 +182,18 @@ printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\nif [[ $1 == -k && ! -e %s/revo
 if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a failed entry revocation was ignored"; fi
 [[ $(grep -c '^sudo -k$' "$m/calls") == 2 ]] || fail "a failed entry revocation did not revoke again on exit" "$(cat "$m/calls")"
 pass "a failed entry revocation still revokes on exit"
+
+# A TERM sent only to the migration while its exit revocation hangs reaches
+# that sudo, so the migration still ends.
+: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
+printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\nif [[ $1 == -k && -e %s/revoked-once ]]; then echo "$PPID" >%s/migration.pid; sleep 30 & wait $!; fi\n[[ $1 == -k ]] && touch %s/revoked-once\n[[ $1 == -k ]]\n' "$m" "$m" "$m" "$m" >"$m/sudo"
+printf 'PasswordAuthentication no\n' >"$m/etc/10-omarchy-hardening.conf"
+bash -euo pipefail "$m/migration" >/dev/null 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -s $m/migration.pid ]] && break; sleep 0.05; done
+[[ -s $m/migration.pid ]] || fail "the migration never reached its exit revocation"
+kill -TERM "$(<"$m/migration.pid")" 2>/dev/null || true
+for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$runner" 2>/dev/null; then pkill -KILL -f "sleep 30" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a TERM to the migration did not reach its hung exit revocation"; fi
+wait "$runner" 2>/dev/null || true
+rm -f "$m/etc/10-omarchy-hardening.conf"
+pass "a TERM during the exit revocation reaches the revoking command"
