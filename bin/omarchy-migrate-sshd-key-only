@@ -132,7 +132,7 @@ valid_login_shell() {
 # prove nothing about who can log in.
 authorized_keys_path_is_safe() {
   local uid=$1 home=$2
-  local authorized_keys="$home/.ssh/authorized_keys" canonical home_owner home_mode ssh_owner ssh_mode key_owner key_mode
+  local authorized_keys="$home/.ssh/authorized_keys" canonical home_owner home_mode ssh_owner ssh_mode key_owner key_mode probe
 
   [[ -d $home && ! -L $home ]] || return 1
   canonical=$(/usr/bin/realpath -e -- "$home" 2>/dev/null) || return 1
@@ -140,9 +140,12 @@ authorized_keys_path_is_safe() {
   [[ -d $home/.ssh && ! -L $home/.ssh && -f $authorized_keys && ! -L $authorized_keys ]] || return 1
   [[ $(/usr/bin/realpath -e -- "$home/.ssh") == "$home/.ssh" &&
     $(/usr/bin/realpath -e -- "$authorized_keys") == "$authorized_keys" ]] || return 1
-  read -r home_owner home_mode < <(/usr/bin/stat -Lc '%u %a' -- "$home") || return 1
-  read -r ssh_owner ssh_mode < <(/usr/bin/stat -Lc '%u %a' -- "$home/.ssh") || return 1
-  read -r key_owner key_mode < <(/usr/bin/stat -Lc '%u %a' -- "$authorized_keys") || return 1
+  probe=$(/usr/bin/stat -Lc '%u %a' -- "$home") || return 1
+  read -r home_owner home_mode <<<"$probe"
+  probe=$(/usr/bin/stat -Lc '%u %a' -- "$home/.ssh") || return 1
+  read -r ssh_owner ssh_mode <<<"$probe"
+  probe=$(/usr/bin/stat -Lc '%u %a' -- "$authorized_keys") || return 1
+  read -r key_owner key_mode <<<"$probe"
   [[ $home_owner == 0 || $home_owner == "$uid" ]] || return 1
   [[ $ssh_owner == 0 || $ssh_owner == "$uid" ]] || return 1
   [[ $key_owner == 0 || $key_owner == "$uid" ]] || return 1
@@ -177,7 +180,7 @@ valid_account_name() {
 }
 
 account_is_admitted() {
-  local name=$1 dump=$2 directive token status_line status account_groups group admitted
+  local name=$1 dump=$2 directive token status_line status account_groups group admitted listing
   local -a values groups
 
   status_line=$(LC_ALL=C /usr/bin/passwd -S -- "$name" 2>/dev/null) || return 1
@@ -190,7 +193,9 @@ account_is_admitted() {
   for group in "${groups[@]}"; do valid_account_name "$group" || return 1; done
 
   for directive in allowusers denyusers allowgroups denygroups; do
-    mapfile -t values < <(/usr/bin/awk -v wanted="$directive" 'tolower($1) == wanted { for (i=2; i<=NF; i++) print $i }' <<<"$dump")
+    listing=$(/usr/bin/awk -v wanted="$directive" 'tolower($1) == wanted { for (i=2; i<=NF; i++) print $i }' <<<"$dump") || return 1
+    values=()
+    [[ -z $listing ]] || mapfile -t values <<<"$listing"
     case "$directive" in
       allowusers)
         ((${#values[@]} == 0)) || {
@@ -251,10 +256,11 @@ enumerate_login_accounts() {
 # Every directory from the system root down to DIR must be real, root-owned
 # and writable by no one else, so nothing below it can be swapped.
 trusted_directory() {
-  local dir=$1 owner mode top=${root_prefix:-/}
+  local dir=$1 owner mode probe top=${root_prefix:-/}
   while :; do
     [[ -d $dir && ! -L $dir ]] || return 1
-    read -r owner mode < <(/usr/bin/stat -c '%u %a' -- "$dir") || return 1
+    probe=$(/usr/bin/stat -c '%u %a' -- "$dir") || return 1
+    read -r owner mode <<<"$probe"
     [[ $owner == 0 && $mode =~ ^[0-7]+$ ]] && ! ((8#$mode & 022)) || return 1
     [[ $dir != "$top" && $dir != "/" ]] || return 0
     dir=${dir%/*}
@@ -263,9 +269,10 @@ trusted_directory() {
 }
 
 trusted_file() {
-  local file=$1 owner mode
+  local file=$1 owner mode probe
   [[ -f $file && ! -L $file ]] || return 1
-  read -r owner mode < <(/usr/bin/stat -c '%u %a' -- "$file") || return 1
+  probe=$(/usr/bin/stat -c '%u %a' -- "$file") || return 1
+  read -r owner mode <<<"$probe"
   [[ $owner == 0 && $mode =~ ^[0-7]+$ ]] && ! ((8#$mode & 022)) || return 1
   trusted_directory "${file%/*}"
 }
@@ -279,11 +286,11 @@ trusted_file() {
 # guessed at, since a pattern read wrongly would match nothing and leave the
 # real file unchecked.
 config_graph_is_trusted() {
-  local file=$1 depth=${2:-0} pattern match
-  local -a patterns matches
+  local file=$1 depth=${2:-0} pattern match listing directory
+  local -a patterns=() matches
   (( depth <= 16 )) || return 1
   trusted_file "$file" || return 1
-  mapfile -t patterns < <(/usr/bin/awk '
+  listing=$(/usr/bin/awk '
     {
       line=$0; sub(/^[[:space:]]+/, "", line)
       if (line == "" || substr(line, 1, 1) == "#") next
@@ -294,10 +301,22 @@ config_graph_is_trusted() {
       n=split(rest, f, /[[:space:]]+/); for (i=1; i<=n; i++) print f[i]
     }
   ' "$file") || return 1
+  [[ -z $listing ]] || mapfile -t patterns <<<"$listing"
   for pattern in "${patterns[@]}"; do
     [[ $pattern != $'\001' && $pattern != "~"* ]] || return 1
     [[ $pattern == /* ]] || pattern=/etc/ssh/$pattern
-    mapfile -t matches < <(compgen -G "$root_prefix$pattern" || true)
+    # A match can appear later wherever the pattern points, so that place
+    # must be trusted even while nothing matches: the pattern's directory,
+    # or the nearest part of it that exists. Wildcards in the directory part
+    # could reach anywhere and are refused.
+    directory=${pattern%/*}
+    [[ $directory != *[*?[]* ]] || return 1
+    directory=$root_prefix${directory:-/}
+    while [[ -n $directory && ! -e $directory && ! -L $directory ]]; do directory=${directory%/*}; done
+    trusted_directory "${directory:-/}" || return 1
+    listing=$(compgen -G "$root_prefix$pattern") || listing=""
+    matches=()
+    [[ -z $listing ]] || mapfile -t matches <<<"$listing"
     for match in "${matches[@]}"; do
       config_graph_is_trusted "$match" $(( depth + 1 )) || return 1
     done
@@ -320,11 +339,12 @@ precedence_is_provable() {
   ' "$main_config" || return 1
   # Drop-ins are read in byte order; compare in it too, whatever the caller's
   # locale, which could otherwise ignore punctuation such as a leading "0-".
-  local entry LC_ALL=C
+  local entry listing LC_ALL=C
+  listing=$(/usr/bin/find "$dropin_dir" -mindepth 1 -maxdepth 1 -name '*.conf' -printf '%f\n' | /usr/bin/sort) || return 1
   while IFS= read -r entry; do
-    [[ $entry == "${key_only_config##*/}" ]] && continue
+    [[ -n $entry && $entry != "${key_only_config##*/}" ]] || continue
     [[ $entry > "${key_only_config##*/}" ]] || return 1
-  done < <(/usr/bin/find "$dropin_dir" -mindepth 1 -maxdepth 1 -name '*.conf' -printf '%f\n' | LC_ALL=C /usr/bin/sort)
+  done <<<"$listing"
 }
 
 dump_is_key_only() {

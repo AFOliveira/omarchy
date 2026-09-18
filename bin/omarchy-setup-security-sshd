@@ -138,7 +138,7 @@ valid_key() {
 }
 
 account_home_accepts_authorized_keys() {
-  local canonical owner mode
+  local canonical owner mode probe
 
   [[ -d $ACCOUNT_HOME && ! -L $ACCOUNT_HOME ]] || {
     echo "$ACCOUNT_HOME must be a real directory before SSH can be made key-only." >&2
@@ -149,7 +149,8 @@ account_home_accepts_authorized_keys() {
     echo "$ACCOUNT_HOME must not resolve through a symbolic link." >&2
     return 1
   }
-  read -r owner mode < <(/usr/bin/stat -Lc '%u %a' -- "$ACCOUNT_HOME") || return 1
+  probe=$(/usr/bin/stat -Lc '%u %a' -- "$ACCOUNT_HOME") || return 1
+  read -r owner mode <<<"$probe"
   [[ $owner == 0 || $owner == "$CURRENT_UID" ]] && [[ $mode =~ ^[0-7]+$ ]] &&
     ! ((8#$mode & 0022)) || {
     echo "$ACCOUNT_HOME must be owned by the account (or root) and not group/world writable before SSH can be made key-only." >&2
