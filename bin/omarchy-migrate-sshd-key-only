@@ -398,14 +398,23 @@ CONF
 }
 
 migrate_machine() {
-  local created=0 active_status
+  local created=0 active_status enabled_status
 
   # Only repair the exact two-directive file emitted by old Omarchy. Preserve
   # an administrator-authored file at either name byte-for-byte.
   if [[ -e $legacy_config || -L $legacy_config ]]; then
     legacy_is_omarchy_managed || exit 0
   elif [[ ! -e $key_only_config && ! -L $key_only_config ]]; then
-    exit 0
+    # No Omarchy file at all. Old setup enabled sshd before importing a key,
+    # so a daemon that is enabled or running may be accepting passwords;
+    # one that is neither needs nothing.
+    service_active_state && active_status=0 || active_status=$?
+    service_enabled_state && enabled_status=0 || enabled_status=$?
+    if (( active_status == 2 || enabled_status == 2 )); then
+      echo "Could not determine whether sshd.service is active or enabled; refusing to complete the SSH migration." >&2
+      exit 1
+    fi
+    (( active_status == 0 || enabled_status == 0 )) || exit 0
   fi
   if [[ -e $key_only_config || -L $key_only_config ]] && [[ ! -f $key_only_config || -L $key_only_config ]]; then
     disable_affected

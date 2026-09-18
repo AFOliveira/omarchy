@@ -146,6 +146,20 @@ for error in passwd groups; do prepare "admission-error-$error"; touch "$t/admis
 prepare query-error; touch "$t/query-error/state/"{active,enabled}; ACTIVE_QUERY_ERROR=1; if run query-error; then exit 1; fi; unset ACTIVE_QUERY_ERROR; [[ -e $t/query-error/state/active && -e $t/query-error/state/enabled && ! -e $t/query-error/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf && -e $t/query-error/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]]
 prepare unsafe-query-error; rm "$t/unsafe-query-error/root/home/keyed/.ssh/authorized_keys"; touch "$t/unsafe-query-error/state/"{active,enabled}; ENABLED_QUERY_ERROR=1; if run unsafe-query-error; then exit 1; fi; unset ENABLED_QUERY_ERROR; [[ -e $t/unsafe-query-error/state/active && -e $t/unsafe-query-error/state/enabled ]]
 prepare symlink-key; mv "$t/symlink-key/root/home/keyed/.ssh/authorized_keys" "$t/symlink-key/root/home/key"; ln -s ../key "$t/symlink-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/symlink-key/state/"{active,enabled}; run symlink-key; [[ ! -e $t/symlink-key/state/active ]]
+# With no Omarchy file at all, an exposed daemon, one old setup enabled
+# before any key, is made key-only when an account has a usable key and
+# disabled when none has; one that is neither enabled nor running is left
+# alone, and an unanswered service query leaves the migration pending.
+prepare bare-keyed; rm -f "$t/bare-keyed/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; touch "$t/bare-keyed/state/"{active,enabled}; run bare-keyed
+grep -qxF 'AuthenticationMethods publickey' "$t/bare-keyed/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf" && [[ -e $t/bare-keyed/state/active && -f $t/bare-keyed/root/var/lib/omarchy/migrations/1788163637 ]] ||
+  { echo "an exposed keyed daemon was not made key-only" >&2; exit 1; }
+prepare bare-keyless; rm -f "$t/bare-keyless/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-keyless/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-keyless/state/enabled"; run bare-keyless
+[[ ! -e $t/bare-keyless/state/enabled && ! -e $t/bare-keyless/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] || { echo "an exposed keyless daemon was not disabled" >&2; exit 1; }
+prepare bare-idle; rm -f "$t/bare-idle/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; run bare-idle
+[[ ! -e $t/bare-idle/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] && ! grep -qv '^systemctl is-' "$t/bare-idle/events" || { echo "an unexposed daemon was changed" >&2; exit 1; }
+prepare bare-query; rm -f "$t/bare-query/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; touch "$t/bare-query/state/"{active,enabled}
+if ACTIVE_QUERY_ERROR=1 run bare-query; then echo "an unknown service state completed the migration" >&2; exit 1; fi
+[[ -e $t/bare-query/state/active && ! -e $t/bare-query/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] || { echo "an unknown service state changed the machine" >&2; exit 1; }
 # A key-only path that is not a regular file proves nothing; the migration
 # disables an exposed daemon rather than trust it.
 prepare keyonly-symlink; rm -f "$t/keyonly-symlink/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; ln -s /dev/null "$t/keyonly-symlink/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; touch "$t/keyonly-symlink/state/"{active,enabled}; run keyonly-symlink; [[ ! -e $t/keyonly-symlink/state/active ]] || { echo "a symlinked key-only file left sshd running" >&2; exit 1; }
@@ -349,12 +363,13 @@ pass "per-user migration delegates one fixed cold root machine phase"
 # rights must still complete: no prompt, no privileged call.
 m=$(mktemp -d); trap 'rm -rf -- "$t" "$m"' EXIT
 printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\n[[ ${SUDO_FAIL:-0} != 1 ]]\n' "$m" >"$m/sudo"; chmod +x "$m/sudo"
+printf '#!/bin/bash\ncase $1 in is-enabled) echo "${SSHD_ENABLED_STATE:-disabled}";; is-active) echo "${SSHD_ACTIVE_STATE:-inactive}";; esac\n' >"$m/systemctl"; chmod +x "$m/systemctl"
 mkdir -p "$m/etc" "$m/var"
 sed -e "s#^legacy_config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf\$#legacy_config=$m/etc/10-omarchy-hardening.conf#" \
   -e "s#^key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf\$#key_only_config=$m/etc/00-omarchy-key-only.conf#" \
   -e "s#^completion_marker=/var/lib/omarchy/migrations/1788163637\$#completion_marker=$m/var/1788163637#" \
   -e "s#/usr/bin/omarchy-migrate-sshd-key-only#$m/helper#g" \
-  -e "s#/usr/bin/sudo#$m/sudo#g" "$ROOT/migrations/1788163637.sh" >"$m/migration"
+  -e "s#/usr/bin/sudo#$m/sudo#g" -e "s#/usr/bin/systemctl#$m/systemctl#g" "$ROOT/migrations/1788163637.sh" >"$m/migration"
 grep -q "^legacy_config=$m/" "$m/migration" && grep -q "^key_only_config=$m/" "$m/migration" && grep -q "^completion_marker=$m/" "$m/migration" ||
   fail "test could not redirect the migration's machine paths"
 # A key-only file that was never certified, such as one an interrupted setup
@@ -372,6 +387,19 @@ pass "an uncertified key-only file is validated and a certified conversion is no
 bash -euo pipefail "$m/migration" >/dev/null || fail "a converted machine blocks a later account without sudo"
 [[ ! -e $m/calls ]] || fail "a converted machine still prompts a later account" "$(cat "$m/calls")"
 pass "later accounts complete without privileges once the legacy file is gone"
+# With no Omarchy file, only a daemon that may be exposed reaches the machine
+# phase; an unknown service state counts as exposed.
+for state in enabled:inactive disabled:active static:inactive unknown:unknown; do
+  : >"$m/calls"
+  SSHD_ENABLED_STATE=${state%%:*} SSHD_ACTIVE_STATE=${state##*:} bash -euo pipefail "$m/migration" >/dev/null || fail "an exposed daemon's migration failed"
+  [[ $(<"$m/calls") == "sudo -N -- $m/helper" ]] || fail "a daemon that may be exposed ($state) skipped the machine phase" "$(cat "$m/calls")"
+done
+for state in disabled:inactive masked:failed not-found:inactive; do
+  rm -f "$m/calls"
+  SSHD_ENABLED_STATE=${state%%:*} SSHD_ACTIVE_STATE=${state##*:} bash -euo pipefail "$m/migration" >/dev/null || fail "an unexposed daemon's migration failed"
+  [[ ! -e $m/calls ]] || fail "an unexposed daemon ($state) reached the machine phase" "$(cat "$m/calls")"
+done
+pass "with no Omarchy file, only a daemon that may be exposed reaches the machine phase"
 
 # A pending repair makes exactly one privileged call, sudo -N to the fixed
 # root phase, and nothing to revoke: no sudo -k before, after or on failure.
