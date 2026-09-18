@@ -100,8 +100,13 @@ service_enabled_state() {
   esac
 }
 
+restore_runtime_mask() {
+  /usr/bin/systemctl mask --runtime sshd.service >/dev/null 2>&1 ||
+    echo "CRITICAL: could not restore the runtime mask on sshd.service." >&2
+}
+
 disable_affected() {
-  local active_status enabled_status
+  local active_status enabled_status runtime_masked=false
   service_active_state && active_status=0 || active_status=$?
   service_enabled_state && enabled_status=0 || enabled_status=$?
   if (( active_status == 2 || enabled_status == 2 )); then
@@ -109,10 +114,36 @@ disable_affected() {
     return 1
   fi
   (( active_status == 0 || enabled_status == 0 )) || return 0
+  # systemctl disable ignores a masked unit and still succeeds, so a runtime
+  # mask is lifted for the disable and put back afterwards, on every exit.
+  if [[ $(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) == "masked-runtime" ]]; then
+    runtime_masked=true
+    trap restore_runtime_mask EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    /usr/bin/systemctl unmask --runtime sshd.service || {
+      echo "Could not lift the runtime mask on sshd.service to disable it; rerun omarchy-migrate with administrator privileges." >&2
+      exit 1
+    }
+  fi
   /usr/bin/systemctl disable --now sshd.service || {
     echo "Could not disable SSH after key-only policy verification failed; rerun omarchy-migrate with administrator privileges." >&2
     exit 1
   }
+  # Success from systemctl is not proof the enablement is gone; ask.
+  service_enabled_state && enabled_status=0 || enabled_status=$?
+  (( enabled_status == 1 )) || {
+    echo "sshd.service is still enabled after disabling it; refusing to complete the SSH migration." >&2
+    exit 1
+  }
+  if [[ $runtime_masked == "true" ]]; then
+    trap - EXIT HUP INT TERM
+    /usr/bin/systemctl mask --runtime sshd.service || {
+      echo "CRITICAL: could not restore the runtime mask on sshd.service." >&2
+      exit 1
+    }
+  fi
   echo "Disabled sshd because a machine account with usable key-only access could not be proven. Run omarchy-setup-security-sshd to repair it."
 }
 
