@@ -52,10 +52,10 @@ omarchy_sshd_key_line_permits_login() {
 # Parsing a key proves nothing about whether sshd will accept it for this
 # account: a later drop-in can remove its algorithm from PubkeyAcceptedAlgorithms,
 # an RSA key can be shorter than RequiredRSASize, and RevokedKeys can list it.
-# Check the line against an effective `sshd -T -C` dump for the account. An
-# optional runner (for example the sudo command) reads a root-only KRL.
+# Check the line against an effective `sshd -T -C` dump for the account. Run
+# as root, which can read a root-only KRL.
 omarchy_sshd_key_line_accepted() {
-  local line=$1 dump=$2 runner=${3:-} type key bits algorithms required revoked
+  local line=$1 dump=$2 type key bits algorithms required revoked
   local -a fields
 
   omarchy_sshd_key_line_permits_login "$line" || return 1
@@ -84,21 +84,21 @@ omarchy_sshd_key_line_accepted() {
 
   revoked=$(/usr/bin/awk 'tolower($1) == "revokedkeys" { print $2; exit }' <<<"$dump")
   if [[ -n $revoked && ${revoked,,} != none ]]; then
-    omarchy_sshd_key_not_revoked "$revoked" "$type" "$key" "$runner" || return 1
+    omarchy_sshd_key_not_revoked "$revoked" "$type" "$key" || return 1
   fi
 }
 
 # RevokedKeys is either an OpenSSH KRL or a text list of public keys; only the
 # KRL form is understood by ssh-keygen -Q. Any read or parse error fails closed.
 omarchy_sshd_key_not_revoked() {
-  local file=$1 type=$2 key=$3 runner=${4:-} magic listing line known_types
+  local file=$1 type=$2 key=$3 magic listing line known_types
   local -a fields
-  magic=$($runner /usr/bin/head -c 6 -- "$file" 2>/dev/null) || return 1
+  magic=$(/usr/bin/head -c 6 -- "$file" 2>/dev/null) || return 1
   if [[ $magic == SSHKRL ]]; then
-    $runner /usr/bin/ssh-keygen -Q -f "$file" /dev/stdin <<<"$type $key" >/dev/null 2>&1
+    /usr/bin/ssh-keygen -Q -f "$file" /dev/stdin <<<"$type $key" >/dev/null 2>&1
     return
   fi
-  listing=$($runner /usr/bin/cat -- "$file" 2>/dev/null) || return 1
+  listing=$(/usr/bin/cat -- "$file" 2>/dev/null) || return 1
   # sshd requires every other line to start with a public key of a type it
   # knows, certificates included, and refuses authentication when one does
   # not, so a malformed list revokes everything. Ask OpenSSH which types it

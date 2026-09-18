@@ -85,265 +85,52 @@ if [[ -n $KEY && -n $GITHUB_USER ]]; then
   exit 2
 fi
 
-SERVICE_WAS_ACTIVE=false
-SERVICE_WAS_ENABLED=false
-SERVICE_STARTED=false
-SERVICE_ENABLED=false
-FIREWALL_RULE_WAS_PRESENT=false
-FIREWALL_RULE_ADDED=false
-HARDENING_CONFIG=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf
-COMPLETION_MARKER=/var/lib/omarchy/migrations/1788163637
-HARDENING_BACKUP=""
-HARDENING_WAS_PRESENT=false
-HARDENING_TOUCHED=false
 AUTHORIZED_KEYS_TEMP=""
 AUTHORIZED_KEYS_BACKUP=""
 AUTHORIZED_KEYS_WAS_PRESENT=false
 AUTHORIZED_KEYS_TOUCHED=false
-SETUP_COMPLETE=false
-COMPLETION_MARKER_ARMED=false
+AUTHORIZED_KEYS_COMMITTED=false
+MACHINE_PHASE=/usr/bin/omarchy-migrate-sshd-key-only
 
-setup_sshd_package() {
-  echo "Installing the OpenSSH server prerequisites..."
-  /usr/bin/omarchy-pkg-add openssh
-}
-
-# 0 when the Omarchy rule is present, 1 when UFW proves it absent, 2 when UFW
-# could not be asked. An unanswered query must never read as "absent": the
-# rollback would then delete a rule the administrator already had.
-omarchy_firewall_rule_state() {
-  local added
-  added=$(/usr/bin/sudo ufw show added 2>/dev/null) || return 2
-  /usr/bin/grep -Eq "^ufw limit 22/tcp comment ['\"]?omarchy-sshd['\"]?$" <<<"$added" && return 0
-  return 1
-}
-
-record_existing_state() {
-  local active_status enabled_status
-  sshd_active_state && active_status=0 || active_status=$?
-  sshd_enabled_state && enabled_status=0 || enabled_status=$?
-  if (( active_status == 2 || enabled_status == 2 )); then
-    echo "Could not determine the existing sshd.service state; refusing SSH setup." >&2
-    return 1
-  fi
-  ((active_status != 0)) || SERVICE_WAS_ACTIVE=true
-  ((enabled_status != 0)) || SERVICE_WAS_ENABLED=true
-  if ! /usr/bin/omarchy-cmd-missing ufw; then
-    local firewall_status
-    omarchy_firewall_rule_state && firewall_status=0 || firewall_status=$?
-    if (( firewall_status == 2 )); then
-      echo "Could not determine the existing UFW rules; refusing SSH setup." >&2
-      return 1
+# Only the account's own key import is undone here, and only until it commits.
+# Once the keys are in authorized_keys they stay there, whatever the machine
+# phase does: its failure is not proof that the keys are no longer needed.
+cleanup_keys() {
+  local status=$KEYS_CLEANUP_STATUS
+  trap - EXIT
+  set +e
+  [[ -z $AUTHORIZED_KEYS_TEMP ]] || /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP"
+  if [[ $AUTHORIZED_KEYS_TOUCHED == "true" && $AUTHORIZED_KEYS_COMMITTED != "true" ]]; then
+    if [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
+      if /usr/bin/mv -fT -- "$AUTHORIZED_KEYS_BACKUP" "$AUTHORIZED_KEYS"; then
+        AUTHORIZED_KEYS_BACKUP=""
+      else
+        echo "CRITICAL: could not restore $AUTHORIZED_KEYS; the previous file is kept as $AUTHORIZED_KEYS_BACKUP." >&2
+        (( status != 0 )) || status=1
+      fi
+    elif [[ $AUTHORIZED_KEYS_WAS_PRESENT != "true" ]]; then
+      /usr/bin/rm -f -- "$AUTHORIZED_KEYS" || {
+        echo "CRITICAL: could not remove the partially imported $AUTHORIZED_KEYS." >&2
+        (( status != 0 )) || status=1
+      }
     fi
-    ((firewall_status != 0)) || FIREWALL_RULE_WAS_PRESENT=true
+  elif [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
+    /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" ||
+      echo "WARNING: could not remove $AUTHORIZED_KEYS_BACKUP" >&2
   fi
+  exit "$status"
 }
-
-sshd_active_state() {
-  local state
-  state=$(/usr/bin/sudo systemctl is-active sshd.service 2>/dev/null) || true
-  case "$state" in
-    active | activating | reloading | deactivating) return 0 ;;
-    inactive | failed) return 1 ;;
-    *) return 2 ;;
-  esac
-}
-
-sshd_enabled_state() {
-  local state
-  state=$(/usr/bin/sudo systemctl is-enabled sshd.service 2>/dev/null) || true
-  case "$state" in
-    enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient) return 0 ;;
-    disabled | masked | masked-runtime | not-found) return 1 ;;
-    *) return 2 ;;
-  esac
-}
-
-# Once cleanup starts it must finish, so before it a signal ends setup, which
-# rolls back, and during it a signal is held. Every cleanup command, and the
-# final revocation, instead has its own bound, and none is ever signalled by a
-# PID that could have been reused.
-CLEANUP_ACTIVE=false
-CLEANUP_COMMAND_BOUND=120
-CLEANUP_REVOKE_BOUND=30
-handle_setup_signal() {
-  [[ $CLEANUP_ACTIVE != "true" ]] || return 0
-  CLEANUP_ACTIVE=true
+KEYS_CLEANUP_ACTIVE=false
+handle_keys_signal() {
+  [[ $KEYS_CLEANUP_ACTIVE != "true" ]] || return 0
+  KEYS_CLEANUP_ACTIVE=true
   exit "$1"
 }
-# The keeper is the second process of each bounded job, so it shares the
-# command's process group, whose ID is the command's PID and stays reserved
-# while the keeper lives. It polls that PID, treating only "No such process"
-# as gone, and at its deadline kills its own group, which cannot be anyone
-# else's. It ignores job-control signals, so neither an interrupt at the
-# terminal nor this shell's death leaves the command unbounded. It runs
-# without the caller's environment and fails fast without /proc.
-CLEANUP_KEEPER='trap "" HUP INT QUIT TERM TSTP TTIN TTOU
-read -r _ _ _ _ group _ </proc/self/stat || exit 3
-[[ $group =~ ^[0-9]+$ ]] || exit 3
-started=$SECONDS
-while status=$(kill -0 "$group" 2>&1) || [[ $status != *"No such process"* ]]; do
-  (( SECONDS - started < $1 )) || kill -KILL -- "-$group"
-  /usr/bin/sleep 0.2
-done'
-# Runs a command as a foreground job under job control: a direct child of
-# this shell, which sudo needs under timestamp_type=ppid or without a
-# terminal, in a process group of its own, so a signal to this shell's group
-# does not reach it. A signal to this shell waits for the job, which the
-# keeper bounds. Its status is the command's.
-run_bounded() {
-  local - bound=$1 status
-  shift
-  set -m
-  "$@" >&2 | /usr/bin/env -i /usr/bin/bash -p -c "$CLEANUP_KEEPER" omarchy-cleanup-keeper "$bound"
-  status=("${PIPESTATUS[@]}")
-  set +m
-  (( status[1] == 0 )) || return 125
-  return "${status[0]}"
-}
-run_cleanup() {
-  run_bounded "$CLEANUP_COMMAND_BOUND" "$@"
-}
-# A failed attempt, such as one killed at its deadline, is retried. Bash's
-# report of a job killed at its deadline is noise.
-revoke_cleanup_sudo() {
-  local attempt
-  for attempt in 1 2 3; do
-    run_bounded "$CLEANUP_REVOKE_BOUND" /usr/bin/sudo -k 2>/dev/null && return 0
-  done
-  return 1
-}
-
-rollback_setup() {
-  local exit_status=$CLEANUP_EXIT_STATUS
-  local rollback_failed=false config_restored=false
-  trap - EXIT
-
-  [[ -z $AUTHORIZED_KEYS_TEMP ]] || run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP" || true
-
-  if [[ $SETUP_COMPLETE != "true" ]]; then
-    # First, so nothing below can leave a certification of a restored config.
-    if [[ $COMPLETION_MARKER_ARMED == "true" ]]; then
-      run_cleanup /usr/bin/sudo rm -f "$COMPLETION_MARKER" >/dev/null 2>&1 || rollback_failed=true
-    fi
-    if [[ $FIREWALL_RULE_ADDED == "true" ]]; then
-      # Armed before the mutation, so a signal cannot leave our rule behind.
-      # The rule was proven absent beforehand, so deleting it is always ours to
-      # do; a failed delete only counts when UFW does not then show it gone,
-      # as happens when the signal arrived before the rule was added.
-      if ! run_cleanup /usr/bin/sudo ufw --force delete limit 22/tcp comment "omarchy-sshd" >/dev/null 2>&1; then
-        local firewall_status
-        run_cleanup omarchy_firewall_rule_state && firewall_status=0 || firewall_status=$?
-        (( firewall_status == 1 )) || rollback_failed=true
-      fi
-      run_cleanup /usr/bin/sudo ufw reload >/dev/null 2>&1 || rollback_failed=true
-    fi
-    if [[ $SERVICE_ENABLED == "true" && $SERVICE_WAS_ENABLED != "true" ]]; then
-      run_cleanup /usr/bin/sudo systemctl disable sshd.service >/dev/null 2>&1 || rollback_failed=true
-    fi
-    if [[ $SERVICE_STARTED == "true" && $SERVICE_WAS_ACTIVE != "true" ]]; then
-      run_cleanup /usr/bin/sudo systemctl stop sshd.service >/dev/null 2>&1 || rollback_failed=true
-    fi
-    if [[ $HARDENING_TOUCHED == "true" ]]; then
-      if [[ -n $HARDENING_BACKUP ]]; then
-        # The backup is in the same root-owned directory, so rename restores
-        # the administrator's exact owner/group/mode atomically.
-        if run_cleanup /usr/bin/sudo mv -fT -- "$HARDENING_BACKUP" "$HARDENING_CONFIG" >/dev/null 2>&1; then
-          HARDENING_BACKUP=""
-          config_restored=true
-        else
-          rollback_failed=true
-        fi
-      elif [[ $HARDENING_WAS_PRESENT != "true" ]]; then
-        if run_cleanup /usr/bin/sudo rm -f "$HARDENING_CONFIG" >/dev/null 2>&1; then
-          config_restored=true
-        else
-          rollback_failed=true
-        fi
-      fi
-      # If an existing daemon consumed our temporary config, apply the
-      # restored, validated administrator config. If it is no longer valid,
-      # leave the already-running key-only policy in memory (fail secure).
-      if [[ $SERVICE_WAS_ACTIVE == "true" && $config_restored == "true" ]]; then
-        if run_cleanup /usr/bin/sudo sshd -t >/dev/null 2>&1; then
-          run_cleanup /usr/bin/sudo systemctl reload sshd.service >/dev/null 2>&1 || rollback_failed=true
-        else
-          rollback_failed=true
-        fi
-      fi
-    fi
-    if [[ $HARDENING_TOUCHED != "true" && -n $HARDENING_BACKUP ]]; then
-      # Interrupted between taking the backup and replacing the config.
-      run_cleanup /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || rollback_failed=true
-      HARDENING_BACKUP=""
-    fi
-    if [[ $AUTHORIZED_KEYS_TOUCHED == "true" ]]; then
-      if [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
-        if run_cleanup /usr/bin/mv -fT -- "$AUTHORIZED_KEYS_BACKUP" "$AUTHORIZED_KEYS"; then
-          AUTHORIZED_KEYS_BACKUP=""
-        else
-          rollback_failed=true
-        fi
-      elif [[ $AUTHORIZED_KEYS_WAS_PRESENT != "true" ]]; then
-        run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS" || rollback_failed=true
-      fi
-    elif [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
-      run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" || rollback_failed=true
-      AUTHORIZED_KEYS_BACKUP=""
-    fi
-  elif [[ -n $HARDENING_BACKUP ]]; then
-    run_cleanup /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || {
-      echo "WARNING: SSH setup succeeded but could not remove $HARDENING_BACKUP" >&2
-    }
-  fi
-  if [[ $SETUP_COMPLETE == "true" && -n $AUTHORIZED_KEYS_BACKUP ]]; then
-    run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" ||
-      echo "WARNING: SSH setup succeeded but could not remove $AUTHORIZED_KEYS_BACKUP" >&2
-  fi
-
-  if [[ $rollback_failed == "true" ]]; then
-    echo "CRITICAL: SSH setup rollback was incomplete; inspect sshd.service, UFW, and $HARDENING_CONFIG immediately." >&2
-    ((exit_status != 0)) || exit_status=1
-  fi
-
-  if ! revoke_cleanup_sudo; then
-    echo "CRITICAL: SSH setup could not invalidate cached sudo authorization." >&2
-    ((exit_status != 0)) || exit_status=1
-  fi
-
-  exit "$exit_status"
-}
-# Cleanup depends on bounded jobs; prove they work here before anything
-# privileged, so an environment without them refuses setup instead of
-# leaving cleanup unbounded.
-if ! run_bounded 5 /usr/bin/true 2>/dev/null; then
-  echo "Could not start a bounded cleanup job; refusing to start SSH setup." >&2
-  exit 1
-fi
-# One assignment-only command records the status and marks cleanup active, so
-# no signal handler can run between the two and abandon the rollback.
-trap 'CLEANUP_EXIT_STATUS=$? CLEANUP_ACTIVE=true; rollback_setup' EXIT
-trap 'handle_setup_signal 129' HUP
-trap 'handle_setup_signal 130' INT
-trap 'handle_setup_signal 143' TERM
-
-open_firewall() {
-  if /usr/bin/omarchy-cmd-missing ufw; then
-    echo "UFW is not installed; skipping firewall rule."
-    return
-  fi
-
-  echo "Opening the SSH port in the firewall (rate limited against brute force)..."
-  if [[ $FIREWALL_RULE_WAS_PRESENT != "true" ]]; then
-    FIREWALL_RULE_ADDED=true
-    /usr/bin/sudo ufw limit 22/tcp comment "omarchy-sshd" >/dev/null || return 1
-    omarchy_firewall_rule_state || {
-      echo "UFW did not publish the expected Omarchy SSH rule." >&2
-      return 1
-    }
-  fi
-  /usr/bin/sudo ufw reload >/dev/null
-}
+trap 'KEYS_CLEANUP_STATUS=$? KEYS_CLEANUP_ACTIVE=true; cleanup_keys' EXIT
+trap 'handle_keys_signal 129' HUP
+trap 'handle_keys_signal 130' INT
+trap 'handle_keys_signal 131' QUIT
+trap 'handle_keys_signal 143' TERM
 
 valid_key() {
   [[ $1 != *$'\n'* ]] && omarchy_sshd_key_line_permits_login "$1" &&
@@ -430,7 +217,7 @@ authorize_pasted_key() {
 }
 
 authorize_collected_keys() {
-  local ssh_dir owner key
+  local ssh_dir lock lock_fd owner key
   ((${#COLLECTED_KEYS[@]} > 0)) || {
     echo "No valid SSH public key was collected." >&2
     return 1
@@ -443,7 +230,21 @@ authorize_collected_keys() {
   }
   /usr/bin/chmod 0700 "$ssh_dir"
   owner=$(/usr/bin/stat -Lc '%u' -- "$ssh_dir" 2>/dev/null || true)
-  [[ $owner == "$(/usr/bin/id -u)" ]] || return 1
+  [[ $owner == "$CURRENT_UID" ]] || return 1
+
+  # Serializes Omarchy key imports for this account; other editors are not
+  # covered. The lock file stays, so a later import locks the same inode.
+  lock="$ssh_dir/.omarchy-authorized-keys.lock"
+  if [[ -L $lock ]] || { [[ -e $lock ]] && [[ ! -f $lock ]]; }; then
+    echo "$lock is not a regular file; refusing to import keys." >&2
+    return 1
+  fi
+  exec {lock_fd}>>"$lock"
+  /usr/bin/flock -n "$lock_fd" || {
+    echo "Another Omarchy SSH key import is running for this account; try again once it has finished." >&2
+    return 1
+  }
+
   if [[ -e $AUTHORIZED_KEYS || -L $AUTHORIZED_KEYS ]]; then
     [[ -f $AUTHORIZED_KEYS && ! -L $AUTHORIZED_KEYS ]] || {
       echo "$AUTHORIZED_KEYS is not a regular file; refusing to replace it." >&2
@@ -460,7 +261,7 @@ authorize_collected_keys() {
     /usr/bin/cat "$AUTHORIZED_KEYS" >"$AUTHORIZED_KEYS_TEMP" || return 1
   fi
   for key in "${COLLECTED_KEYS[@]}"; do
-    if /usr/bin/grep -qxF "$key" "$AUTHORIZED_KEYS_TEMP"; then
+    if /usr/bin/grep -qxF -- "$key" "$AUTHORIZED_KEYS_TEMP"; then
       echo "Key already authorized: $(/usr/bin/ssh-keygen -lf /dev/stdin <<<"$key")"
     else
       printf '%s\n' "$key" >>"$AUTHORIZED_KEYS_TEMP" || return 1
@@ -471,212 +272,21 @@ authorize_collected_keys() {
   AUTHORIZED_KEYS_TOUCHED=true
   /usr/bin/mv -fT -- "$AUTHORIZED_KEYS_TEMP" "$AUTHORIZED_KEYS"
   AUTHORIZED_KEYS_TEMP=""
-}
-
-validate_hardening_precedence() {
-  local first_dropin
-  # Fail if sshd can establish authentication or Match state before the stock
-  # drop-in include. Our first-expanded file then supplies both global and
-  # Match-context defaults before any later administrator Match can run.
-  /usr/bin/sudo /usr/bin/awk '
-    function clean(line) { sub(/[[:space:]]*#.*/, "", line); sub(/^[[:space:]]+/, "", line); return line }
-    {
-      line = clean($0)
-      if (line ~ /^[[:space:]]*$/) next
-      split(line, field, /[[:space:]]+/)
-      key = tolower(field[1])
-      if (!included) {
-        if (key == "include" && line ~ /^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+\/etc\/ssh\/sshd_config\.d\/\*\.conf[[:space:]]*$/) {
-          included = 1
-          next
-        }
-        if (key == "include" || key == "match" || key == "passwordauthentication" ||
-            key == "kbdinteractiveauthentication" || key == "authenticationmethods") exit 1
-      }
-    }
-    END { if (!included) exit 1 }
-  ' /etc/ssh/sshd_config || {
-    echo "sshd_config must include /etc/ssh/sshd_config.d/*.conf before authentication or Match directives." >&2
-    return 1
-  }
-
-  first_dropin=$(/usr/bin/sudo /usr/bin/find /etc/ssh/sshd_config.d -mindepth 1 -maxdepth 1 -name '*.conf' -printf '%f\n' |
-    LC_ALL=C /usr/bin/sort | /usr/bin/head -n1)
-  [[ $first_dropin == "${HARDENING_CONFIG##*/}" ]] || {
-    echo "$HARDENING_CONFIG is not the first expanded sshd drop-in; refusing ambiguous authentication precedence." >&2
-    return 1
-  }
-}
-
-effective_policy_is_key_only() {
-  local dump="$1"
-  grep -qixF "passwordauthentication no" <<<"$dump" &&
-    grep -qixF "kbdinteractiveauthentication no" <<<"$dump" &&
-    grep -qixF "authenticationmethods publickey" <<<"$dump" &&
-    grep -qixF "pubkeyauthentication yes" <<<"$dump" &&
-    grep -qixF "authorizedkeysfile .ssh/authorized_keys" <<<"$dump"
-}
-
-valid_system_name() {
-  [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}[$]?$ ]]
-}
-
-account_is_admitted() {
-  local name=$1 dump=$2 directive token status_line status account_groups group admitted
-  local -a values groups
-
-  status_line=$(LC_ALL=C /usr/bin/passwd -S -- "$name" 2>/dev/null) || return 1
-  read -r token status _ <<<"$status_line"
-  [[ $token == "$name" && ( $status == "P" || $status == "NP" ) ]] || return 1
-  account_groups=$(/usr/bin/id -Gn -- "$name" 2>/dev/null) || return 1
-  read -r -a groups <<<"$account_groups"
-  ((${#groups[@]} > 0)) || return 1
-  for group in "${groups[@]}"; do valid_system_name "$group" || return 1; done
-
-  for directive in allowusers denyusers allowgroups denygroups; do
-    mapfile -t values < <(/usr/bin/awk -v wanted="$directive" 'tolower($1) == wanted { for (i=2; i<=NF; i++) print $i }' <<<"$dump")
-    case "$directive" in
-      allowusers)
-        ((${#values[@]} == 0)) || {
-          admitted=0
-          for token in "${values[@]}"; do valid_system_name "$token" || return 1; [[ $token != "$name" ]] || admitted=1; done
-          ((admitted)) || return 1
-        }
-        ;;
-      denyusers)
-        for token in "${values[@]}"; do valid_system_name "$token" || return 1; [[ $token != "$name" ]] || return 1; done
-        ;;
-      allowgroups)
-        ((${#values[@]} == 0)) || {
-          admitted=0
-          for token in "${values[@]}"; do
-            valid_system_name "$token" || return 1
-            for group in "${groups[@]}"; do [[ $token != "$group" ]] || admitted=1; done
-          done
-          ((admitted)) || return 1
-        }
-        ;;
-      denygroups)
-        for token in "${values[@]}"; do
-          valid_system_name "$token" || return 1
-          for group in "${groups[@]}"; do [[ $token != "$group" ]] || return 1; done
-        done
-        ;;
-    esac
-  done
-}
-
-current_account_name() {
-  printf '%s' "$ACCOUNT_NAME"
-}
-
-# Only called after a key is authorized. Disabling password authentication
-# before then could lock the owner out of the machine.
-disable_password_auth() {
-  local effective_config matched_config account_name
-
-  if [[ ! -s $AUTHORIZED_KEYS ]]; then
-    echo -e "\e[31mCannot disable SSH password authentication without an authorized key.\e[0m" >&2
-    return 1
-  fi
-
-  echo "Disabling SSH password authentication, now that a key is authorized..."
-  if /usr/bin/sudo test -e "$HARDENING_CONFIG" || /usr/bin/sudo test -L "$HARDENING_CONFIG"; then
-    if ! /usr/bin/sudo test -f "$HARDENING_CONFIG" || /usr/bin/sudo test -L "$HARDENING_CONFIG"; then
-      echo "$HARDENING_CONFIG is not a regular file; preserving it and refusing setup." >&2
-      return 1
-    fi
-    HARDENING_WAS_PRESENT=true
-    if ! HARDENING_BACKUP=$(/usr/bin/sudo mktemp /etc/ssh/sshd_config.d/.00-omarchy-key-only.backup.XXXXXX) ||
-      ! /usr/bin/sudo cp -a "$HARDENING_CONFIG" "$HARDENING_BACKUP"; then
-      [[ -z $HARDENING_BACKUP ]] || /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || true
-      HARDENING_BACKUP=""
-      return 1
-    fi
-  fi
-  HARDENING_TOUCHED=true
-  # Root consumes an inherited descriptor, never a caller-owned temporary
-  # pathname that another process can swap after validation.
-  if ! /usr/bin/sudo install -DT -o root -g root -m 0644 /dev/stdin "$HARDENING_CONFIG" <<'CONF'; then
-# Written by omarchy-setup-security-sshd once an SSH key was authorized.
-# Delete this file and reload sshd to allow password logins again.
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-AuthenticationMethods publickey
-PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
-Match all
-  PasswordAuthentication no
-  KbdInteractiveAuthentication no
-  AuthenticationMethods publickey
-  PubkeyAuthentication yes
-  AuthorizedKeysFile .ssh/authorized_keys
-CONF
-    return 1
-  fi
-
-  validate_hardening_precedence
-
-  # Arch creates host keys on first daemon start. Generate them explicitly so
-  # the complete configuration can be validated without starting a listener.
-  /usr/bin/sudo ssh-keygen -A
-
-  # Validate before reloading: a config sshd rejects would otherwise take the
-  # service down on its next restart, potentially stranding a remote owner.
-  if ! /usr/bin/sudo sshd -t; then
-    echo -e "\e[31msshd rejected the hardening config; removing it and leaving passwords on.\e[0m" >&2
-    return 1
-  fi
-
-  # Syntax alone is insufficient because sshd uses the first value it reads for
-  # these settings. An earlier administrator rule could leave passwords enabled.
-  # Match keywords case-insensitively: OpenSSH 9.x dumps them lowercase, 10.x
-  # in CamelCase.
-  account_name=$(current_account_name) || return 1
-  if ! effective_config=$(/usr/bin/sudo sshd -T) || ! effective_policy_is_key_only "$effective_config" ||
-    ! matched_config=$(/usr/bin/sudo sshd -T -C "user=$account_name,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22") ||
-    ! effective_policy_is_key_only "$matched_config" || ! account_is_admitted "$account_name" "$matched_config"; then
-    echo -e "\e[31msshd did not apply the password-authentication restrictions; removing the ineffective config.\e[0m" >&2
-    return 1
-  fi
-  if ! omarchy_sshd_policy_allows_login "$matched_config"; then
-    echo -e "\e[31msshd refuses or forces a command for $account_name; removing the config.\e[0m" >&2
-    return 1
-  fi
-  if ! collected_key_accepted "$matched_config"; then
-    echo -e "\e[31msshd would not accept any of the collected keys for $account_name (key algorithm, RSA size, or revocation); removing the config.\e[0m" >&2
-    return 1
-  fi
-}
-
-collected_key_accepted() {
-  local dump=$1 key
-  for key in "${COLLECTED_KEYS[@]}"; do
-    omarchy_sshd_key_line_accepted "$key" "$dump" /usr/bin/sudo && return 0
-  done
-  return 1
-}
-
-publish_sshd() {
-  if [[ $SERVICE_WAS_ACTIVE == "true" ]]; then
-    # Preserve established administrator sessions while applying the validated
-    # key-only policy to the already-running daemon.
-    /usr/bin/sudo systemctl reload sshd.service
-  else
-    SERVICE_STARTED=true
-    /usr/bin/sudo systemctl start sshd.service || return 1
-  fi
-
-  if [[ $SERVICE_WAS_ENABLED != "true" ]]; then
-    SERVICE_ENABLED=true
-    /usr/bin/sudo systemctl enable sshd.service || return 1
+  AUTHORIZED_KEYS_COMMITTED=true
+  exec {lock_fd}>&-
+  if [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
+    /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" || echo "WARNING: could not remove $AUTHORIZED_KEYS_BACKUP" >&2
+    AUTHORIZED_KEYS_BACKUP=""
   fi
 }
 
 echo -e "\e[32mSetting up SSH server access with key-based authentication.\n\e[0m"
 
-/usr/bin/sudo -k >/dev/null 2>&1 || {
-  echo "Could not invalidate cached sudo authorization; refusing SSH setup." >&2
+# The machine phase runs once, as root, through sudo -N: sudo may use an
+# authorization it already has but never creates or refreshes one, so this
+# workflow leaves nothing cached to revoke.
+omarchy_security_sudo_supports_no_update || {
+  echo "This sudo does not support --no-update; refusing SSH setup." >&2
   exit 1
 }
 
@@ -695,28 +305,17 @@ fi
 
 account_home_accepts_authorized_keys
 authorize_collected_keys
+echo "Keys authorized. They will remain authorized if server setup fails."
 
-# No caller-resolved executable runs after this point. The key and all remote
-# input have already been validated, so the reusable credential needed for the
-# multi-command rollback-capable system transaction cannot be handed to a
-# downloaded tool, prompt helper, or detached child from this workflow.
-# Install first: without the package the unit does not exist yet, and its
-# state could not be recorded. Installing openssh neither enables nor starts it.
-setup_sshd_package
-record_existing_state
-# Setup is about to change the SSH configuration, so any earlier
-# certification no longer describes it. Removing it arms its rollback too.
-COMPLETION_MARKER_ARMED=true
-/usr/bin/sudo rm -f "$COMPLETION_MARKER"
-disable_password_auth
-publish_sshd
-open_firewall
-# Certify the conversion for the SSH migrations only once it is published.
-# Rollback removes it again unless SETUP_COMPLETE is reached.
-/usr/bin/sudo install -D -o root -g root -m 0644 /dev/null "$COMPLETION_MARKER"
-
-SETUP_COMPLETE=true
-
-echo -e "\e[32m\nPerfect! The SSH server is running and your key is authorized.\e[0m"
-echo "Password logins are off; this machine now accepts authorized keys only."
-echo "You can now connect with: ssh $ACCOUNT_NAME@$(hostname)"
+echo
+echo "Setting up the SSH server as root..."
+if /usr/bin/sudo -N -- "$MACHINE_PHASE" --setup "$CURRENT_UID" -- "${COLLECTED_KEYS[@]}"; then
+  echo -e "\e[32m\nPerfect! The SSH server is running and your key is authorized.\e[0m"
+  echo "Password logins are off; this machine now accepts authorized keys only."
+  echo "You can now connect with: ssh $ACCOUNT_NAME@$(/usr/bin/hostname)"
+else
+  status=$?
+  echo -e "\e[31mSSH server setup did not report success.\e[0m" >&2
+  echo "It rolls back what it changed when it can, and says so above when it cannot; do not assume the server is unchanged. Your keys remain authorized." >&2
+  exit "$status"
+fi

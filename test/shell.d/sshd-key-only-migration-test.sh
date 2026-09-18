@@ -4,7 +4,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 require_command unshare
 t=$(mktemp -d); trap 'rm -rf -- "$t"' EXIT
 
-unshare --user --map-root-user --mount /usr/bin/bash -s "$ROOT" "$t" <<'NAMESPACE'
+unshare --user --map-root-user --mount /usr/bin/bash -s "$ROOT" "$t" <<'NAMESPACE' >"$t/namespace.out" 2>&1 || { cat "$t/namespace.out" >&2; fail "the machine phase namespace suite failed"; }
 set -euo pipefail
 repo=$1 t=$2; b="$t/bin"; mapped="$t/omarchy"; mkdir -p "$b" "$mapped/bin" "$t/run"; chmod 0755 "$t/run"
 cat >"$b/systemctl" <<'SH'
@@ -14,7 +14,48 @@ case $1 in
 is-active) [[ ${ACTIVE_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo inactive; exit 4; }; [[ -e $STATE/active ]] && { echo active; exit 0; } || { echo inactive; exit 3; };;
 is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo not-found; exit 4; }; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; };;
 reload) if [[ ${SLOW_RELOAD:-0} == 1 ]]; then mkdir "$STATE/held" 2>/dev/null || touch "$STATE/overlap"; sleep .15; rmdir "$STATE/held" 2>/dev/null || true; fi; [[ ${RELOAD_FAIL:-0} != 1 ]];;
-disable) rm -f "$STATE/active" "$STATE/enabled";; esac
+disable) if [[ ${2:-} == --now ]]; then rm -f "$STATE/active" "$STATE/enabled"; else [[ ${DISABLE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/enabled"; fi;;
+start) [[ ${START_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/active";;
+enable) [[ ${ENABLE_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/enabled";;
+stop) [[ ${STOP_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; [[ ${STOP_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/active";; esac
+SH
+cat >"$b/ufw" <<'SH'
+#!/bin/bash
+echo "ufw $*" >>"$EVENTS"
+case $1 in
+show) [[ ${UFW_QUERY_ERROR:-0} != 1 ]] || exit 1; [[ ! -e $STATE/rule ]] || echo "ufw limit 22/tcp comment 'omarchy-sshd'";;
+limit) [[ ${LIMIT_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/rule";;
+--force) rm -f "$STATE/rule";;
+reload) [[ ${UFW_RELOAD_SIGNAL:-0} != 1 || ! -e $STATE/rule ]] || kill -TERM "$PPID";; esac
+SH
+cat >"$b/getent" <<'SH'
+#!/bin/bash
+[[ $1 == passwd ]] || exit 2
+/usr/bin/awk -F: -v uid="$2" '$3 == uid { print; found=1; exit } END { exit !found }' "$TEST_ROOT/etc/passwd"
+SH
+# The real setpriv cannot switch to an unmapped UID in this namespace; the
+# stand-in records the switch and runs the command.
+cat >"$b/setpriv" <<'SH'
+#!/bin/bash
+echo "setpriv $1 $2" >>"$EVENTS"
+while [[ $1 != -- ]]; do shift; done; shift
+exec "$@"
+SH
+cat >"$b/omarchy-pkg-add" <<'SH'
+#!/bin/bash
+echo "package $*" >>"$EVENTS"
+[[ ${PACKAGE_FAIL:-0} != 1 ]]
+SH
+cat >"$b/omarchy-cmd-missing" <<'SH'
+#!/bin/bash
+[[ ${UFW_MISSING:-0} == 1 ]]
+SH
+# MARKER_SIGNAL delivers TERM the moment the completion marker is renamed
+# into place, after the commit.
+cat >"$b/mv" <<'SH'
+#!/bin/bash
+/usr/bin/mv "$@" || exit
+[[ ${MARKER_SIGNAL:-0} != 1 || ${*: -1} != */1788163637 ]] || kill -TERM "$PPID"
 SH
 cat >"$b/passwd" <<'SH'
 #!/bin/bash
@@ -49,16 +90,14 @@ echo "RefuseConnection ${REFUSE_CONNECTION:-no}"; echo "ForceCommand ${FORCE_COM
 [[ -z ${DENY_GROUPS:-} ]] || echo "DenyGroups $DENY_GROUPS"
 SH
 chmod 0755 "$b"/*; cp "$repo/bin/omarchy-security-functions" "$repo/bin/omarchy-sshd-functions" "$mapped/bin/"
-sed -e "s#legacy_config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf#legacy_config=\$TEST_ROOT/etc/ssh/sshd_config.d/10-omarchy-hardening.conf#" \
- -e "s#key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf#key_only_config=\$TEST_ROOT/etc/ssh/sshd_config.d/00-omarchy-key-only.conf#" \
- -e "s#main_config=/etc/ssh/sshd_config#main_config=\$TEST_ROOT/etc/ssh/sshd_config#" -e "s#dropin_dir=/etc/ssh/sshd_config.d#dropin_dir=\$TEST_ROOT/etc/ssh/sshd_config.d#" \
- -e "s#passwd_file=/etc/passwd#passwd_file=\$TEST_ROOT/etc/passwd#" -e "s#login_defs=/etc/login.defs#login_defs=\$TEST_ROOT/etc/login.defs#" \
+sed -e 's#^root_prefix=""$#root_prefix=$TEST_ROOT#' \
  -e "s#machine_lock=/run/omarchy-sshd-key-only-migration.lock#machine_lock=$t/run/lock#" \
- -e "s#completion_marker=/var/lib/omarchy/migrations/1788163637#completion_marker=\$TEST_ROOT/var/lib/omarchy/migrations/1788163637#" \
  -e "s#-- /run#-- $t/run#g" -e "s#-L /run#-L $t/run#g" -e "s#== /run#== $t/run#g" \
  -e "s#/usr/bin/systemctl#$b/systemctl#g" -e "s#/usr/bin/ssh-keygen#$b/ssh-keygen#g" -e "s#/usr/bin/sshd#$b/sshd#g" \
- -e "s#/usr/bin/passwd#$b/passwd#g" -e "s#/usr/bin/id#$b/id#g" \
+ -e "s#/usr/bin/passwd#$b/passwd#g" -e "s#/usr/bin/id#$b/id#g" -e "s#/usr/bin/getent#$b/getent#g" -e "s#/usr/bin/setpriv#$b/setpriv#g" \
+ -e "s#/usr/bin/omarchy-pkg-add#$b/omarchy-pkg-add#g" -e "s#/usr/bin/omarchy-cmd-missing#$b/omarchy-cmd-missing#g" -e "s#/usr/bin/ufw#$b/ufw#g" -e "s#/usr/bin/mv#$b/mv#g" \
  "$repo/bin/omarchy-migrate-sshd-key-only" >"$mapped/bin/omarchy-migrate-sshd-key-only"; chmod 0755 "$mapped/bin/"*
+grep -qx 'root_prefix=$TEST_ROOT' "$mapped/bin/omarchy-migrate-sshd-key-only" || { echo "test could not redirect the machine paths" >&2; exit 1; }
 /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/key"; key=$(<"$t/key.pub")
 prepare() { local d="$t/$1"; mkdir -p "$d/root/etc/ssh/sshd_config.d" "$d/root/home/keyed/.ssh" "$d/root/home/later" "$d/state"; chmod 700 "$d/root/home/"{keyed,keyed/.ssh,later}; printf '%s\n' "$key" >"$d/root/home/keyed/.ssh/authorized_keys"; chmod 600 "$d/root/home/keyed/.ssh/authorized_keys"; cat >"$d/root/etc/passwd" <<EOF
 root:x:0:0:root:/root:/usr/bin/nologin
@@ -84,10 +123,16 @@ for error in passwd groups; do prepare "admission-error-$error"; touch "$t/admis
 prepare query-error; touch "$t/query-error/state/"{active,enabled}; ACTIVE_QUERY_ERROR=1; if run query-error; then exit 1; fi; unset ACTIVE_QUERY_ERROR; [[ -e $t/query-error/state/active && -e $t/query-error/state/enabled && ! -e $t/query-error/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf && -e $t/query-error/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]]
 prepare unsafe-query-error; rm "$t/unsafe-query-error/root/home/keyed/.ssh/authorized_keys"; touch "$t/unsafe-query-error/state/"{active,enabled}; ENABLED_QUERY_ERROR=1; if run unsafe-query-error; then exit 1; fi; unset ENABLED_QUERY_ERROR; [[ -e $t/unsafe-query-error/state/active && -e $t/unsafe-query-error/state/enabled ]]
 prepare symlink-key; mv "$t/symlink-key/root/home/keyed/.ssh/authorized_keys" "$t/symlink-key/root/home/key"; ln -s ../key "$t/symlink-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/symlink-key/state/"{active,enabled}; run symlink-key; [[ ! -e $t/symlink-key/state/active ]]
+# Drop-ins are read in byte order: "0-admin.conf" comes before Omarchy's file
+# even in a locale whose collation would ignore the dash.
+prepare dropin-first; echo 'PasswordAuthentication yes' >"$t/dropin-first/root/etc/ssh/sshd_config.d/0-admin.conf"; touch "$t/dropin-first/state/"{active,enabled}; LC_ALL=en_US.UTF-8 run dropin-first; [[ ! -e $t/dropin-first/state/active ]] || { echo "a drop-in read before Omarchy's was not seen" >&2; exit 1; }
 prepare stopped; touch "$t/stopped/state/enabled"; run stopped; [[ -e $t/stopped/state/enabled ]]; ! grep -q 'systemctl reload' "$t/stopped/events"
 prepare reload-fail; touch "$t/reload-fail/state/"{active,enabled}; RELOAD_FAIL=1 run reload-fail; [[ ! -e $t/reload-fail/state/active && ! -e $t/reload-fail/state/enabled && -e $t/reload-fail/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
 prepare syntax-fail; touch "$t/syntax-fail/state/"{active,enabled}; T_FAIL=1 run syntax-fail; [[ ! -e $t/syntax-fail/state/active && ! -e $t/syntax-fail/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]]
-prepare concurrent; touch "$t/concurrent/state/"{active,enabled}; SLOW_RELOAD=1 run concurrent & a=$!; SLOW_RELOAD=1 run concurrent & c=$!; wait "$a"; wait "$c"; [[ ! -e $t/concurrent/state/overlap ]]
+# Two machine phases never overlap: a second one while the lock is held fails
+# without changing anything, and a retry afterwards completes.
+prepare concurrent; touch "$t/concurrent/state/"{active,enabled}; SLOW_RELOAD=1 run concurrent & a=$!; SLOW_RELOAD=1 run concurrent & c=$!; wait "$a" || true; wait "$c" || true; [[ ! -e $t/concurrent/state/overlap ]]
+run concurrent; [[ -f $t/concurrent/root/var/lib/omarchy/migrations/1788163637 ]]
 prepare admin; echo 'PasswordAuthentication yes' >"$t/admin/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; touch "$t/admin/state/"{active,enabled}; before=$(sha256sum "$t/admin/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"); run admin; after=$(sha256sum "$t/admin/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"); [[ $before == "$after" && -e $t/admin/state/active && ! -s $t/admin/events ]]
 # ssh-keygen -lf accepts these, but none proves a usable administrative login.
 n=0
@@ -138,8 +183,87 @@ prepare malformed-uid; echo 'broken:x:notanumber:1::/home/broken:/usr/bin/bash' 
 # and the migration completes instead of staying pending forever.
 prepare unit-missing; rm "$t/unit-missing/root/home/keyed/.ssh/authorized_keys"; UNIT_MISSING=1 run unit-missing; ! grep -q 'systemctl disable' "$t/unit-missing/events"
 if /usr/bin/bash "$mapped/bin/omarchy-migrate-sshd-key-only" -p >/dev/null 2>&1; then exit 1; fi
+
+# ---- Setup's machine phase: --setup UID -- KEY... ----
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/other"; other=$(<"$t/other.pub")
+sprep() { prepare "$1"; rm -f "$t/$1/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; echo 'nologin:x:1002:1002::/home/nologin:/usr/bin/nologin' >>"$t/$1/root/etc/passwd"; }
+srun() { local name=$1; shift; env -u SUDO_UID TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
+cfg() { printf '%s' "$t/$1/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; }
+marker() { printf '%s' "$t/$1/root/var/lib/omarchy/migrations/1788163637"; }
+untouched() { [[ ! -e $(cfg "$1") && ! -e $t/$1/state/active && ! -e $t/$1/state/enabled && ! -e $t/$1/state/rule && ! -e $(marker "$1") ]] || { echo "$1 changed the machine" >&2; exit 1; }; }
+rolled() { untouched "$1"; ! compgen -G "$t/$1/root/etc/ssh/sshd_config.d/.00-omarchy-key-only*" >/dev/null && ! compgen -G "$t/$1/root/var/lib/omarchy/migrations/.1788163637.*" >/dev/null || { echo "$1 left staging files" >&2; exit 1; }; }
+
+sprep s-fresh; srun s-fresh --setup 1000 -- "$key" >"$t/s-fresh.out"
+[[ -e $t/s-fresh/state/active && -e $t/s-fresh/state/enabled && -e $t/s-fresh/state/rule ]] || { echo "setup did not publish sshd and its rule" >&2; exit 1; }
+grep -qxF 'AuthenticationMethods publickey' "$(cfg s-fresh)" && [[ $(stat -c '%u %a' "$(cfg s-fresh)") == "0 644" ]] || { echo "setup did not install a root-owned key-only config" >&2; exit 1; }
+[[ $(<"$(marker s-fresh)") == "omarchy-setup-security-sshd "* && $(stat -c '%u %a' "$(marker s-fresh)") == "0 644" ]] || { echo "setup did not commit with its own marker" >&2; exit 1; }
+p=$(grep -n '^package openssh' "$t/s-fresh/events" | cut -d: -f1); q=$(grep -n '^systemctl is-active' "$t/s-fresh/events" | head -1 | cut -d: -f1); r=$(grep -n '^setpriv --reuid=1000 --regid=1000' "$t/s-fresh/events" | head -1 | cut -d: -f1)
+[[ -n $p && -n $q && -n $r ]] && (( r < p && p < q )) || { echo "setup did not check the keys as the account, then install openssh, before reading service state" >&2; exit 1; }
+[[ $(grep -c '^setpriv ' "$t/s-fresh/events") == 2 ]] || { echo "setup did not recheck the keys before publishing" >&2; exit 1; }
+! compgen -G "$t/s-fresh/root/etc/ssh/sshd_config.d/.00-omarchy-key-only*" >/dev/null || { echo "setup left staging files" >&2; exit 1; }
+echo 'ok-root - setup publishes a proven key-only sshd and commits with its marker'
+
+# Anything but the two interfaces, a malformed UID, an unusable key or one the
+# account has not authorized is refused before anything changes.
+n=0
+for args in '--setup 01 -- K' '--setup x -- K' '--setup 1000 K' '--setup 1000 --' '--bogus' '--setup 1000 -- R' '--setup 1000 -- N' '--setup 1000 -- O' '--setup 1001 -- K' '--setup 1002 -- K' '--setup 4242 -- K'; do
+  n=$((n+1)); sprep "s-bad-$n"; read -r -a a <<<"$args"
+  for i in "${!a[@]}"; do case ${a[$i]} in K) a[$i]=$key;; R) a[$i]="restrict $key";; N) a[$i]="$key"$'\n'"$other";; O) a[$i]=$other;; esac; done
+  if srun "s-bad-$n" "${a[@]}" >/dev/null 2>&1; then echo "machine phase accepted: $args" >&2; exit 1; fi
+  untouched "s-bad-$n"; ! grep -qv '^setpriv ' "$t/s-bad-$n/events" || { echo "machine phase acted on: $args" >&2; cat "$t/s-bad-$n/events" >&2; exit 1; }
+done
+sprep s-caller; if CALLER_UID=1001 srun s-caller --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup ran for an account other than sudo's caller" >&2; exit 1; fi; untouched s-caller; [[ ! -s $t/s-caller/events ]]
+sprep s-symlink; mv "$t/s-symlink/root/home/keyed/.ssh/authorized_keys" "$t/s-symlink/root/home/key"; ln -s ../key "$t/s-symlink/root/home/keyed/.ssh/authorized_keys"
+if srun s-symlink --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup trusted a symlinked authorized_keys" >&2; exit 1; fi; untouched s-symlink
+sprep s-marker; mkdir -p "$t/s-marker/root/var/lib/omarchy/migrations"; ln -s /dev/null "$(marker s-marker)"
+if srun s-marker --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup accepted a symlinked marker" >&2; exit 1; fi; [[ ! -e $(cfg s-marker) && -L $(marker s-marker) ]]
+sprep s-query; UFW_QUERY_ERROR=1 srun s-query --setup 1000 -- "$key" >/dev/null 2>&1 && exit 1; untouched s-query
+echo 'ok-root - setup refuses bad requests, other accounts, unsafe files and unknown firewall state before any change'
+
+# Every failure before the commit rolls back each armed change.
+n=0
+for failure in T_FAIL MATCH_BAD_USER=keyed REFUSE_CONNECTION=yes ACCEPTED_ALGORITHMS=rsa-sha2-512 START_FAIL ENABLE_FAIL LIMIT_FAIL; do
+  n=$((n+1)); sprep "s-fail-$n"
+  if [[ $failure == *=* ]]; then export "${failure?}"; else export "$failure=1"; fi
+  if srun "s-fail-$n" --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup succeeded despite $failure" >&2; exit 1; fi
+  unset T_FAIL MATCH_BAD_USER REFUSE_CONNECTION ACCEPTED_ALGORITHMS START_FAIL ENABLE_FAIL LIMIT_FAIL
+  rolled "s-fail-$n"
+done
+# An existing configuration and a running daemon get back exactly what they had.
+sprep s-admin; printf 'PasswordAuthentication yes\n' >"$(cfg s-admin)"; chmod 0640 "$(cfg s-admin)"; before=$(stat -c '%a' "$(cfg s-admin)"; cat "$(cfg s-admin)"); touch "$t/s-admin/state/"{active,enabled}
+if MATCH_BAD_USER=keyed srun s-admin --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi
+[[ $(stat -c '%a' "$(cfg s-admin)"; cat "$(cfg s-admin)") == "$before" && -e $t/s-admin/state/active && -e $t/s-admin/state/enabled ]] || { echo "setup did not restore the administrator's configuration" >&2; exit 1; }
+[[ $(grep '^systemctl reload' "$t/s-admin/events" | wc -l) == 1 ]] || { echo "the running daemon was not given the restored configuration" >&2; exit 1; }
+# A daemon setup started but cannot stop keeps the key-only policy beneath it.
+sprep s-stuck; if LIMIT_FAIL=1 STOP_FAIL=1 srun s-stuck --setup 1000 -- "$key" >"$t/s-stuck.out" 2>&1; then exit 1; fi
+grep -qxF 'AuthenticationMethods publickey' "$(cfg s-stuck)" && [[ -e $t/s-stuck/state/active && ! -e $(marker s-stuck) ]] || { echo "a daemon that could not be stopped was left beneath a restored policy" >&2; exit 1; }
+grep -q 'CRITICAL: SSH setup rollback was incomplete' "$t/s-stuck.out" || { echo "an incomplete rollback was not reported" >&2; exit 1; }
+# A stale certification is invalidated before the configuration changes, and
+# a failed setup leaves none.
+sprep s-stale; mkdir -p "$t/s-stale/root/var/lib/omarchy/migrations"; : >"$(marker s-stale)"; if T_FAIL=1 srun s-stale --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi; rolled s-stale
+# A drop-in that would be read first means the key-only file cannot win.
+sprep s-first; echo 'PasswordAuthentication yes' >"$t/s-first/root/etc/ssh/sshd_config.d/0-admin.conf"; if srun s-first --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi; rolled s-first
+echo 'ok-root - setup rolls back every armed change on failure, restores administrator state, and keeps key-only beneath a daemon it cannot stop'
+
+# The marker rename is the commit: a signal just before it rolls back, one just
+# after it keeps the completed setup; a signal during rollback does not
+# abandon it.
+sprep s-before; if UFW_RELOAD_SIGNAL=1 srun s-before --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi; rolled s-before
+sprep s-after; if MARKER_SIGNAL=1 srun s-after --setup 1000 -- "$key" >/dev/null 2>&1; then echo "a signalled setup reported success" >&2; exit 1; fi
+grep -qxF 'AuthenticationMethods publickey' "$(cfg s-after)" && [[ -e $t/s-after/state/active && -e $t/s-after/state/rule && $(<"$(marker s-after)") == "omarchy-setup-security-sshd "* ]] || { echo "a committed setup was rolled back" >&2; exit 1; }
+sprep s-cleanup; if LIMIT_FAIL=1 STOP_SIGNAL=1 srun s-cleanup --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi; rolled s-cleanup
+echo 'ok-root - the marker is the commit point, and a signal during rollback does not abandon it'
+
+# Setup shares the migration's lock and fails rather than waits while it is
+# held; nothing changes, and a retry succeeds.
+sprep s-busy; exec {held}>"$t/run/lock"; flock -n "$held"
+if srun s-busy --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup ran while the machine lock was held" >&2; exit 1; else status=$?; fi
+exec {held}>&-; (( status == 75 )); untouched s-busy; [[ ! -s $t/s-busy/events ]]
+srun s-busy --setup 1000 -- "$key" >/dev/null; [[ -e $(marker s-busy) ]]
+echo 'ok-root - setup and the migration never overlap'
 NAMESPACE
 pass "machine SSH migration preserves shared access, validates all users, serializes, and fails closed"
+while IFS= read -r line; do pass "${line#ok-root - }"; done < <(grep '^ok-root - ' "$t/namespace.out")
 grep -qF '/usr/bin/sudo -N -- /usr/bin/omarchy-migrate-sshd-key-only' "$ROOT/migrations/1788163637.sh" || fail "migration lacks fixed machine dispatch"
 ! grep -Eq 'authorized_keys|getent passwd|/usr/bin/id -u' "$ROOT/migrations/1788163637.sh" || fail "migration still uses invoking-user state"
 pass "per-user migration delegates one fixed cold root machine phase"
@@ -147,7 +271,7 @@ pass "per-user migration delegates one fixed cold root machine phase"
 # After the first account converted the machine, a later account without sudo
 # rights must still complete: no prompt, no privileged call.
 m=$(mktemp -d); trap 'rm -rf -- "$t" "$m"' EXIT
-printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\n[[ $1 == -k ]]\n' "$m" >"$m/sudo"; chmod +x "$m/sudo"
+printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\n[[ ${SUDO_FAIL:-0} != 1 ]]\n' "$m" >"$m/sudo"; chmod +x "$m/sudo"
 mkdir -p "$m/etc" "$m/var"
 sed -e "s#^legacy_config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf\$#legacy_config=$m/etc/10-omarchy-hardening.conf#" \
   -e "s#^key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf\$#key_only_config=$m/etc/00-omarchy-key-only.conf#" \
@@ -170,87 +294,17 @@ rm -f "$m/etc/00-omarchy-key-only.conf" "$m/var/1788163637" "$m/calls"
 pass "an uncertified key-only file is validated and a certified conversion is not"
 bash -euo pipefail "$m/migration" >/dev/null || fail "a converted machine blocks a later account without sudo"
 [[ ! -e $m/calls ]] || fail "a converted machine still prompts a later account" "$(cat "$m/calls")"
-: >"$m/calls"
+pass "later accounts complete without privileges once the legacy file is gone"
+
+# A pending repair makes exactly one privileged call, sudo -N to the fixed
+# root phase, and nothing to revoke: no sudo -k before, after or on failure.
 printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >"$m/etc/10-omarchy-hardening.conf"
-if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a pending legacy repair completed without its machine phase"; fi
-grep -qF "sudo -N -- $m/helper" "$m/calls" || fail "a pending legacy repair did not run its machine phase" "$(cat "$m/calls" 2>/dev/null)"
-pass "later accounts complete without privileges once the legacy file is gone, and stay pending while it remains"
-
-# A failed entry revocation must still revoke again on the way out.
-: >"$m/calls"; rm -f "$m/revoked-once"
-printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\nif [[ $1 == -k && ! -e %s/revoked-once ]]; then touch %s/revoked-once; exit 1; fi\n[[ $1 == -k ]]\n' "$m" "$m" "$m" >"$m/sudo"
-if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a failed entry revocation was ignored"; fi
-[[ $(grep -c '^sudo -k$' "$m/calls") == 2 ]] || fail "a failed entry revocation did not revoke again on exit" "$(cat "$m/calls")"
-pass "a failed entry revocation still revokes on exit"
-
-# The exit revocation is not something a signal stops: a TERM sent to the
-# migration while it runs is held, and the revocation completes. It must also
-# run under the same parent as the entry revocation, which sudo keys
-# timestamps by under ppid.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-cat >"$m/sudo" <<SH
-#!/bin/bash
-echo "sudo \$*" >>"$m/calls"
-[[ \$1 == -k ]] || exit 1
-if [[ -e $m/revoked-once ]]; then
-  echo "\$PPID" >"$m/migration.pid"
-  if [[ \${REVOKE_ORPHAN:-0} == 1 ]]; then sleep 30 & echo revoked >>"$m/calls"; exit 0; fi
-  if [[ \${REVOKE_HANG:-0} == 1 ]]; then [[ \${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & wait \$!; fi
-  sleep 1; echo revoked >>"$m/calls"
-else
-  echo "\$PPID" >"$m/revoked-once"
-fi
-SH
-chmod +x "$m/sudo"
-printf 'PasswordAuthentication no\n' >"$m/etc/10-omarchy-hardening.conf"
-bash -euo pipefail "$m/migration" >/dev/null 2>&1 & runner=$!
-for (( i = 0; i < 200; i++ )); do [[ -s $m/migration.pid ]] && break; sleep 0.05; done
-[[ -s $m/migration.pid ]] || fail "the migration never reached its exit revocation"
-kill -TERM "$(<"$m/migration.pid")" 2>/dev/null || true
-if wait "$runner" 2>/dev/null; then fail "a migration whose machine phase failed reported success"; fi
-grep -qx revoked "$m/calls" || fail "a TERM to the migration interrupted its exit revocation" "$(cat "$m/calls")"
-[[ $(<"$m/migration.pid") == "$(<"$m/revoked-once")" ]] || fail "the exit revocation ran under a different parent than the entry revocation"
-# Where bounded jobs cannot work, the migration stays pending before anything
-# privileged rather than revoke unbounded.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-sed 's#</proc/self/stat#</proc/self/omarchy-missing#' "$m/migration" >"$m/migration-nojob"
-grep -qF '</proc/self/omarchy-missing' "$m/migration-nojob" || fail "test could not break the cleanup keeper"
-if bash -euo pipefail "$m/migration-nojob" >/dev/null 2>&1; then fail "a migration without bounded jobs reported success"; fi
-[[ ! -s $m/calls ]] || fail "a migration without bounded jobs ran sudo" "$(cat "$m/calls")"
-pass "a TERM during the exit revocation does not stop it"
-
-# An exit revocation that hangs is bounded, retried, and fails the migration.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-sed 's#ssh_migration_revoke_bound=30$#ssh_migration_revoke_bound=1#' "$m/migration" >"$m/migration-fast"
-grep -q 'ssh_migration_revoke_bound=1$' "$m/migration-fast" || fail "test could not shorten the revocation bound"
-REVOKE_HANG=1 bash -euo pipefail "$m/migration-fast" >/dev/null 2>&1 & runner=$!
-for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-kill -0 "$runner" 2>/dev/null && fail "a hung exit revocation held the migration forever"
-if wait "$runner" 2>/dev/null; then fail "a migration whose exit revocation never completed reported success"; fi
-[[ $(grep -c '^sudo -k$' "$m/calls") == 4 ]] || fail "a hung exit revocation was not retried" "$(cat "$m/calls")"
-# Nor does a signal to the migration's whole process group unbound it, even
-# when the hung revocation ignores that signal. The migration leads its group.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-REVOKE_HANG=1 REVOKE_IGNORE_TERM=1 setsid bash -euo pipefail "$m/migration-fast" >/dev/null 2>&1 & runner=$!
-for (( i = 0; i < 200; i++ )); do [[ -s $m/migration.pid ]] && break; sleep 0.05; done
-[[ -s $m/migration.pid ]] || fail "the migration never reached its exit revocation"
-kill -TERM -- "-$(<"$m/migration.pid")" 2>/dev/null || true
-for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-kill -0 "$runner" 2>/dev/null && fail "a group signal left a hung exit revocation unbounded"
-if wait "$runner" 2>/dev/null; then fail "a migration whose exit revocation never completed reported success"; fi
-# A revoker that exits but leaves something running has still revoked: its
-# exit, not its leftover, ends the wait, and nothing of it is killed.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-# With the full 30-second bound, finishing within 15 seconds proves the wait
-# ended at the revoker's exit rather than the deadline.
-REVOKE_ORPHAN=1 bash -euo pipefail "$m/migration" >/dev/null 2>&1 & runner=$!
-for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-kill -0 "$runner" 2>/dev/null && fail "a revoker's leftover process held the migration forever"
-wait "$runner" 2>/dev/null || true
-[[ $(grep -c '^sudo -k$' "$m/calls") == 2 ]] || fail "a revocation that succeeded was retried" "$(cat "$m/calls")"
+: >"$m/calls"
+bash -euo pipefail "$m/migration" >/dev/null || fail "a pending legacy repair failed its machine phase"
+[[ $(<"$m/calls") == "sudo -N -- $m/helper" ]] || fail "a pending legacy repair did not make exactly one sudo -N call" "$(cat "$m/calls")"
+: >"$m/calls"
+if SUDO_FAIL=1 bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a failed machine phase completed the migration"; fi
+[[ $(<"$m/calls") == "sudo -N -- $m/helper" ]] || fail "a failed machine phase made further privileged calls" "$(cat "$m/calls")"
+! grep -q 'sudo -k' "$ROOT/migrations/1788163637.sh" || fail "the migration still revokes a timestamp it never creates"
 rm -f "$m/etc/10-omarchy-hardening.conf"
-grep -qF "trap 'ssh_migration_status=\$? ssh_migration_cleaning=true; cleanup_ssh_migration_sudo' EXIT" "$ROOT/migrations/1788163637.sh" ||
-  fail "the migration's EXIT trap does not mark cleanup active in its first command"
-kills=$(grep -nE '(^|[^[:alnum:]_])kill ' "$ROOT/migrations/1788163637.sh" | grep -vE 'kill -0 "\$group"|kill -KILL -- "-\$group"' || true)
-[[ -z $kills ]] || fail "the migration signals a process outside its keeper" "$kills"
-pass "a hung exit revocation is bounded and retried"
+pass "a pending repair makes one sudo -N call to the root phase and revokes nothing"
