@@ -159,124 +159,57 @@ sshd_enabled_state() {
   esac
 }
 
-# Once cleanup starts it must finish, yet a command it runs must not become
-# impossible to stop: a signal sent only to this shell would otherwise wait
-# behind a hung child. Before cleanup, a signal ends setup, which rolls back.
-# During cleanup, each command runs as a waited-on background child and a
-# signal is forwarded to it; one arriving before its PID is known is held and
-# forwarded as soon as it is. The final revocation is never forwarded a
-# signal; a watchdog bounds it instead.
+# Once cleanup starts it must finish, so before it a signal ends setup, which
+# rolls back, and during it a signal is held. Every cleanup command, and the
+# final revocation, instead has its own bound, and none is ever signalled by a
+# PID that could have been reused.
 CLEANUP_ACTIVE=false
-CLEANUP_CHILD=""
-CLEANUP_SIGNAL_PENDING=false
-CLEANUP_WAIT_INTERRUPTED=false
-CLEANUP_REVOKE_SERIAL=0
+CLEANUP_COMMAND_BOUND=120
+CLEANUP_REVOKE_BOUND=30
 handle_setup_signal() {
-  if [[ $CLEANUP_ACTIVE != "true" ]]; then
-    CLEANUP_ACTIVE=true
-    exit "$1"
-  else
-    CLEANUP_WAIT_INTERRUPTED=true
-    if [[ -n $CLEANUP_CHILD ]]; then
-      kill -TERM "$CLEANUP_CHILD" 2>/dev/null || true
-    else
-      CLEANUP_SIGNAL_PENDING=true
-    fi
-  fi
+  [[ $CLEANUP_ACTIVE != "true" ]] || return 0
+  CLEANUP_ACTIVE=true
+  exit "$1"
 }
-# wait returns early when a trapped signal arrives; only then is it repeated,
-# never by probing a PID that may already belong to someone else. A repeat
-# that finds the status already collected keeps the one collected.
-wait_for_cleanup_child() {
-  local status=127 result
-  while :; do
-    CLEANUP_WAIT_INTERRUPTED=false
-    wait "$1" && result=0 || result=$?
-    (( result == 127 && status != 127 )) || status=$result
-    [[ $CLEANUP_WAIT_INTERRUPTED == "true" && $result != 127 ]] || break
-  done
-  return "$status"
+# The keeper is the second process of each bounded job, so it shares the
+# command's process group, whose ID is the command's PID and stays reserved
+# while the keeper lives. It polls that PID, treating only "No such process"
+# as gone, and at its deadline kills its own group, which cannot be anyone
+# else's. It ignores job-control signals, so neither an interrupt at the
+# terminal nor this shell's death leaves the command unbounded. It runs
+# without the caller's environment and fails fast without /proc.
+CLEANUP_KEEPER='trap "" HUP INT QUIT TERM TSTP TTIN TTOU
+read -r _ _ _ _ group _ </proc/self/stat || exit 3
+[[ $group =~ ^[0-9]+$ ]] || exit 3
+started=$SECONDS
+while status=$(kill -0 "$group" 2>&1) || [[ $status != *"No such process"* ]]; do
+  (( SECONDS - started < $1 )) || kill -KILL -- "-$group"
+  /usr/bin/sleep 0.2
+done'
+# Runs a command as a foreground job under job control: a direct child of
+# this shell, which sudo needs under timestamp_type=ppid or without a
+# terminal, in a process group of its own, so a signal to this shell's group
+# does not reach it. A signal to this shell waits for the job, which the
+# keeper bounds. Its status is the command's.
+run_bounded() {
+  local - bound=$1 status
+  shift
+  set -m
+  "$@" >&2 | /usr/bin/env -i /usr/bin/bash -p -c "$CLEANUP_KEEPER" omarchy-cleanup-keeper "$bound"
+  status=("${PIPESTATUS[@]}")
+  set +m
+  (( status[1] == 0 )) || return 125
+  return "${status[0]}"
 }
 run_cleanup() {
-  local status
-  CLEANUP_SIGNAL_PENDING=false
-  "$@" &
-  CLEANUP_CHILD=$!
-  if [[ $CLEANUP_SIGNAL_PENDING == "true" ]]; then
-    kill -TERM "$CLEANUP_CHILD" 2>/dev/null || true
-  fi
-  wait_for_cleanup_child "$CLEANUP_CHILD" && status=0 || status=$?
-  CLEANUP_CHILD=""
-  return "$status"
+  run_bounded "$CLEANUP_COMMAND_BOUND" "$@"
 }
-# The final revocation stays a direct child of this shell: under
-# timestamp_type=ppid, and without a terminal, sudo keys the cached
-# authorization by its parent, so an intermediary would revoke some other
-# record and still succeed. Job control gives it a process group of its own
-# in the same session, so a signal to this shell's group does not reach it.
-# The wait is bounded by reading reports on a descriptor reserved before the
-# first privileged call, and a failed attempt is retried.
-# The keeper shares the revoker's process group. It reports that group, then
-# polls the revoker's PID, which cannot be reused while the keeper holds it as
-# the group ID, so "No such process" means the revoker exited and was reaped.
-# It then waits for this shell's release, so the group ID stays reserved
-# until the shell is finished with it. It runs without the caller's
-# environment, and exits 0, so the job status is the revoker's.
-CLEANUP_REVOKE_KEEPER='read -r _ _ _ _ group _ </proc/self/stat
-printf "group %s %s\n" "$group" "$1" >&3
-while status=$(kill -0 "$group" 2>&1) || [[ $status != *"No such process"* ]]; do
-  read -r -t 0.2 -u 4 _ _ || true
-done
-printf "done - %s\n" "$1" >&3
-while read -r -u 4 word serial; do
-  [[ $word != release || $serial != "$1" ]] || exit 0
-done'
-# Pauses up to a second, or until a signal arrives, without a child process.
-cleanup_pause() {
-  read -r -t 1 -u "$CLEANUP_CLOCK" _ || true
-}
-revoke_sudo_once() {
-  local - bound=30 serial keeper word value tag group="" finished=false started
-  set -o pipefail
-  CLEANUP_REVOKE_SERIAL=$(( CLEANUP_REVOKE_SERIAL + 1 ))
-  serial=$CLEANUP_REVOKE_SERIAL
-  set -m
-  /usr/bin/sudo -k >/dev/null 2>&1 |
-    /usr/bin/env -i /usr/bin/bash -p -c "$CLEANUP_REVOKE_KEEPER" omarchy-revoke-keeper "$serial" 3>&"$CLEANUP_CLOCK" 4<&"$CLEANUP_HOLD" &
-  keeper=$!
-  set +m
-  started=$SECONDS
-  while (( SECONDS - started < bound )); do
-    read -r -t 1 -u "$CLEANUP_CLOCK" word value tag || continue
-    [[ $tag == "$serial" ]] || continue
-    if [[ $word == "group" ]]; then
-      group=$value
-    elif [[ $word == "done" ]]; then
-      finished=true
-      break
-    fi
-  done
-  if [[ $finished == "true" ]]; then
-    printf 'release %s\n' "$serial" >&"$CLEANUP_HOLD"
-    # Bash reports a job it started under job control; that report is noise.
-    wait_for_cleanup_child "$keeper" 2>/dev/null
-    return
-  fi
-  # Past the deadline, the group is killed while the keeper still reserves
-  # its ID; without the keeper's report there is nothing safe to signal.
-  [[ -n $group ]] || return 1
-  kill -KILL -- "-$group" 2>/dev/null || true
-  started=$SECONDS
-  while kill -0 -- "-$group" 2>/dev/null && (( SECONDS - started < 2 )); do cleanup_pause; done
-  # One that survives even this is abandoned rather than waited on forever.
-  ! kill -0 -- "-$group" 2>/dev/null || return 1
-  wait_for_cleanup_child "$keeper" 2>/dev/null || true
-  return 1
-}
+# A failed attempt, such as one killed at its deadline, is retried. Bash's
+# report of a job killed at its deadline is noise.
 revoke_cleanup_sudo() {
   local attempt
   for attempt in 1 2 3; do
-    revoke_sudo_once && return 0
+    run_bounded "$CLEANUP_REVOKE_BOUND" /usr/bin/sudo -k 2>/dev/null && return 0
   done
   return 1
 }
@@ -380,13 +313,11 @@ rollback_setup() {
 
   exit "$exit_status"
 }
-# Cleanup's bounded revocation reads its reports and releases its keeper on
-# these. Reserve them before anything privileged, so running out of
-# descriptors refuses setup instead of leaving the final revocation unbounded.
-CLEANUP_CLOCK=""
-CLEANUP_HOLD=""
-if ! { exec {CLEANUP_CLOCK}<> <(:); } 2>/dev/null || ! { exec {CLEANUP_HOLD}<> <(:); } 2>/dev/null; then
-  echo "Could not reserve a descriptor for SSH setup cleanup; refusing to start." >&2
+# Cleanup depends on bounded jobs; prove they work here before anything
+# privileged, so an environment without them refuses setup instead of
+# leaving cleanup unbounded.
+if ! run_bounded 5 /usr/bin/true 2>/dev/null; then
+  echo "Could not start a bounded cleanup job; refusing to start SSH setup." >&2
   exit 1
 fi
 # One assignment-only command records the status and marks cleanup active, so
