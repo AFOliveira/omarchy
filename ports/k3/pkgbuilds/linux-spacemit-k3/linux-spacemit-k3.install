@@ -1,0 +1,25 @@
+# U-Boot loads the device tree from the vendor boot partition (GPT name
+# "bootfs") before it starts the loader, so a kernel update has to put the
+# matching device tree there; the kernel package itself stays in /usr.
+_release=6.18.3-generic
+_board=k3_com260
+
+_sync_dtb() {
+  local dtb=/usr/lib/modules/${_release}/dtbs/spacemit/${_board}.dtb
+  [[ -f $dtb ]] || return 0
+  local target tmp=""
+  target=$(findmnt -rno TARGET -S PARTLABEL=bootfs 2>/dev/null | head -1)
+  if [[ -z $target ]]; then
+    tmp=$(mktemp -d) && mount PARTLABEL=bootfs "$tmp" 2>/dev/null && target=$tmp
+  fi
+  if [[ -z $target ]]; then
+    echo "warning: vendor boot partition (bootfs) not found; U-Boot's device tree was not refreshed" >&2
+    [[ -n $tmp ]] && rmdir "$tmp"
+    return 0
+  fi
+  install -Dm644 "$dtb" "$target/spacemit/${_release}/${_board}.dtb"
+  if [[ -n $tmp ]]; then umount "$tmp"; rmdir "$tmp"; fi
+}
+
+post_install() { _sync_dtb; }
+post_upgrade() { _sync_dtb; }

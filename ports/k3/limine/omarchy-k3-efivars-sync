@@ -1,0 +1,36 @@
+#!/bin/bash
+# omarchy:summary=Save UEFI variables changed from Linux to U-Boot's variable store on the ESP
+# omarchy:hidden=true
+#
+# U-Boot on this board keeps UEFI variables in a file on the ESP and lets the OS
+# change them at runtime (EFI_RT_VOLATILE_STORE), but only in memory. It publishes
+# the whole store as the VarToFile variable and the file's name, relative to the
+# ESP, as RTStorageVolatile; the OS makes runtime changes (efibootmgr, a boot
+# loader installer) survive a reboot by writing the one into the other. That is
+# U-Boot's documented mechanism (commit 00da8d65a3), done here atomically and only
+# when something changed.
+set -euo pipefail
+
+guid=b2ac5fc9-92b7-4acd-aeac-11e818c3130c
+vars=/sys/firmware/efi/efivars
+esp=${ESP_PATH:-/boot}
+
+[[ -r $vars/VarToFile-$guid && -r $vars/RTStorageVolatile-$guid ]] || exit 0
+mountpoint -q "$esp" || { echo "$esp is not mounted" >&2; exit 1; }
+
+# efivarfs puts the 4-byte attribute word in front of every value
+name=$(tail -c +5 "$vars/RTStorageVolatile-$guid" | tr -d '\0')
+[[ $name =~ ^[A-Za-z0-9._-]+$ ]] || { echo "unexpected variable file name: $name" >&2; exit 1; }
+target=$esp/$name
+
+tmp=$(mktemp "$esp/.$name.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+tail -c +5 "$vars/VarToFile-$guid" > "$tmp"
+[[ -s $tmp ]] || { echo "VarToFile is empty" >&2; exit 1; }
+if [[ -f $target ]] && cmp -s "$tmp" "$target"; then
+  exit 0
+fi
+sync "$tmp"
+mv -f "$tmp" "$target"
+sync "$esp"
+echo "Saved UEFI variables to $target"

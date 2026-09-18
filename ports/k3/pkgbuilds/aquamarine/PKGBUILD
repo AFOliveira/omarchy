@@ -1,0 +1,32 @@
+pkgname=aquamarine
+pkgver=0.14.0
+pkgrel=2.1
+pkgdesc='Rendering backend with corrected nested Wayland configure ordering'
+arch=('riscv64')
+url='https://github.com/hyprwm/aquamarine'
+license=('BSD-3-Clause')
+depends=('hyprutils' 'libdisplay-info' 'libdrm' 'libglvnd' 'libinput' 'seatd'
+  'mesa' 'pixman' 'systemd-libs' 'wayland' 'libhyprutils.so')
+makedepends=('cmake' 'ninja' 'hyprwayland-scanner' 'wayland-protocols' 'hwdata')
+provides=('libaquamarine.so')
+options=('!debug' '!lto')
+_commit=a79fb21b2e2a82dd061a6d071802bcf38bd5c383
+source=("aquamarine-a79fb21.tar.gz::$url/archive/$_commit.tar.gz"
+  'wayland-configure.patch')
+sha256sums=('1038ad1a0d28755f63d7b3689210d10e8a0cf745e74ff1430c515cec1d9c6f63'
+  'c27ed2b7b759b58e0cd4ff685e48881891cd0cf8e4710cf170bedf08ac8ce8b5')
+
+prepare() {
+  patch -d "$srcdir/aquamarine-$_commit" -p1 < "$srcdir/wayland-configure.patch"
+}
+
+build() {
+  cmake -S "$srcdir/aquamarine-$_commit" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib
+  cmake --build build --target aquamarine --parallel 8
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 "$srcdir/aquamarine-$_commit/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

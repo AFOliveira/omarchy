@@ -1,0 +1,39 @@
+From b52743f393704ccb55fb270ab19f876e5b2ec5d1 Mon Sep 17 00:00:00 2001
+From: Ilias Apalodimas <apalos@gmail.com>
+Date: Wed, 3 Apr 2024 18:43:53 +0300
+Subject: [PATCH 22/40] efi_loader: Don't delete variable from memory if adding
+ a new one failed
+
+Our efi_var_mem_xxx() functions don't have a replace variant. Instead we
+add a new variable and delete the old instance when trying to replace a
+variable. Currently we delete the old version without checking the new
+one got added
+
+Signed-off-by: Ilias Apalodimas <apalos@gmail.com>
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 6b0f194648f0f11281c01fb570d30931e6c3a13e)
+---
+ lib/efi_loader/efi_variable.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 0688a34e..8c912788 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -361,11 +361,12 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		ret = efi_var_mem_ins(variable_name, vendor, attributes,
+ 				      data_size, data, 0, NULL, time);
+ 	}
+-	efi_var_mem_del(var);
+ 
+ 	if (ret != EFI_SUCCESS)
+ 		return ret;
+ 
++	efi_var_mem_del(var);
++
+ 	if (var_type == EFI_AUTH_VAR_PK)
+ 		ret = efi_init_secure_state();
+ 	else
+-- 
+2.55.0
+

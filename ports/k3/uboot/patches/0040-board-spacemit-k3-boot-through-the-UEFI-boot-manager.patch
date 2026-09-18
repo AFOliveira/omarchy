@@ -1,0 +1,53 @@
+From f63966d69e45abc9ce0144e52a0f28c4ead539d5 Mon Sep 17 00:00:00 2001
+From: Afonso Oliveira <afonso.oliveira707@gmail.com>
+Date: Fri, 18 Sep 2026 18:23:52 +0800
+Subject: [PATCH 40/40] board: spacemit: k3: boot through the UEFI boot manager
+
+Boot the way UEFI firmware does: try the boot options in BootOrder
+first (bootefi bootmgr), and only when none starts fall back to the
+removable-media path EFI/BOOT/BOOTRISCV64.EFI, then to the kernel on the
+boot partition.
+
+Keep UEFI variables in ubootefi.var on the EFI system partition, and let
+the OS change them at runtime (EFI_RT_VOLATILE_STORE), so that
+efibootmgr and boot loader installers can register their boot options
+from Linux. The OS persists runtime changes by writing the VarToFile
+variable back to that file, as the option documents.
+---
+ board/spacemit/k3/k3.env | 5 ++++-
+ configs/k3_defconfig     | 3 ++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/board/spacemit/k3/k3.env b/board/spacemit/k3/k3.env
+index 0e31e465..c59e37d4 100755
+--- a/board/spacemit/k3/k3.env
++++ b/board/spacemit/k3/k3.env
+@@ -164,9 +164,12 @@ boot_kernel=run set_root_arg; \
+ 
+ boot_grub=env set -e -bs product_name "${product_name}"; \
+         env set -e -bs bootargs "${bootargs}"; \
+-        run load_grub; \
+         run detect_dtb; \
+         run loaddtb; \
++        echo "UEFI boot manager"; \
++        bootefi bootmgr ${fdt_addr_r}; \
++        echo "no boot option started, trying the removable media path"; \
++        run load_grub; \
+         if bootefi ${kernel_addr_r} ${fdt_addr_r}; then echo "boot loader returned"; fi; \
+         echo "falling back to the kernel"; run boot_kernel;
+ 
+diff --git a/configs/k3_defconfig b/configs/k3_defconfig
+index 9c63a833..8bf381ea 100644
+--- a/configs/k3_defconfig
++++ b/configs/k3_defconfig
+@@ -276,5 +276,6 @@ CONFIG_PRINT_TIMESTAMP=y
+ CONFIG_SPL_LZO=y
+ # CONFIG_HEXDUMP is not set
+ # CONFIG_GENERATE_SMBIOS_TABLE is not set
+-CONFIG_EFI_VARIABLE_NO_STORE=y
+ CONFIG_LMB_MAX_REGIONS=32
++CONFIG_EFI_VARIABLE_FILE_STORE=y
++CONFIG_EFI_RT_VOLATILE_STORE=y
+-- 
+2.55.0
+

@@ -1,0 +1,41 @@
+pkgname=neatvnc
+pkgver=1.0.1
+pkgrel=2.1
+pkgdesc='VNC server library with image encodings for the K3 desktop'
+arch=('riscv64')
+url='https://github.com/any1/neatvnc'
+license=('ISC')
+depends=('aml' 'glibc' 'gmp' 'gnutls' 'libdrm' 'libjpeg-turbo' 'mesa' 'nettle' 'pixman' 'zlib')
+makedepends=('meson')
+provides=('libneatvnc.so')
+_commit=4d6d09b544d84b836cf1906735354b4e694a0c1c
+source=("$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
+  'nettle4.patch' 'nettle4-digest.patch')
+sha256sums=('e763ade7dd36b0d06e9d5da92cd32443f2c562f9fef7ed48969af28a0d127b4a'
+  'cf52e96a65082bf4c8498019534b99b01583581f0c93fb078dc3ab1e3b9c166b'
+  '7325480a9a1335b653ab2e6e3b107b467d9f54250ff78f59f81f9a33f0013d5a')
+
+prepare() {
+  cd "neatvnc-$_commit"
+  # The same upstream Nettle 4 backports used by Arch's 1.0.1-2 recipe.
+  patch -p1 -i "$srcdir/nettle4.patch"
+  patch -p1 -i "$srcdir/nettle4-digest.patch"
+}
+
+build() {
+  # H.264 viewers retained stale frames on this graphics stack. Tight/ZRLE
+  # update static terminals promptly and preserve the standard VNC protocol.
+  arch-meson "neatvnc-$_commit" build --wrap-mode=nofallback \
+    -Dh264=disabled -Dgbm=enabled -Dtls=enabled -Dnettle=enabled \
+    -Djpeg=enabled -Dtests=true
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  DESTDIR="$pkgdir" meson install -C build
+  install -Dm644 "neatvnc-$_commit/COPYING" "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+}

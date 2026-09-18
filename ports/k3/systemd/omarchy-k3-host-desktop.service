@@ -1,6 +1,6 @@
 [Unit]
 Description=Omarchy K3 desktop on the physical Arch host
-After=systemd-user-sessions.service user@1000.service
+After=systemd-user-sessions.service user@1000.service omarchy-k3-vkms.service
 Wants=user@1000.service
 Conflicts=getty@tty1.service
 

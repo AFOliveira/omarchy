@@ -1,0 +1,30 @@
+From 8ea8c6d305ac903bfd21204403eea183143f44bc Mon Sep 17 00:00:00 2001
+From: Nell <xianbin.zhu@spacemit.com>
+Date: Mon, 3 Aug 2026 16:51:28 +0800
+Subject: [PATCH 43/44] k3:power domain: using hw mode to power on GPU's power
+ swtich
+
+Change-Id: Ib6ab17e99ee85b84debd276c47b2d967f4164c8a
+Signed-off-by: Nell <xianbin.zhu@spacemit.com>
+(cherry picked from commit 9c7e7dd321dd2b1047e484c260f1e572ecace692)
+---
+ drivers/power/domain/k3-power-domain.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/power/domain/k3-power-domain.c b/drivers/power/domain/k3-power-domain.c
+index 8da564a2..f36e4c35 100644
+--- a/drivers/power/domain/k3-power-domain.c
++++ b/drivers/power/domain/k3-power-domain.c
+@@ -57,7 +57,8 @@ static struct pm_domain_desc k3_pm_domain_desc[] = {
+ 		.bit_sleep2 = 3,
+ 		.bit_sleep1 = 2,
+ 		.bit_isolation = 1,
+-		.bit_pwr_stat = 0,
++		.bit_pwr_stat = 8,
++		.use_hw = 1,
+ 		.pm_index = K3_PMU_GPU_PWR_DOMAIN,
+ 	},
+ 
+-- 
+2.55.0
+

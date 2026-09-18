@@ -1,0 +1,165 @@
+From c283f04fd1857601e245d9ce81ee525c4114954e Mon Sep 17 00:00:00 2001
+From: Weizhao Ouyang <o451686892@gmail.com>
+Date: Wed, 8 May 2024 19:13:12 +0800
+Subject: [PATCH 31/40] efi_loader: Fix EFI_VARIABLE_APPEND_WRITE hash check
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+According to UEFI v2.10 spec section 8.2.6, if a caller invokes the
+SetVariables() service, it will produce a digest from hash(VariableName,
+VendorGuid, Attributes, TimeStamp, DataNew_variable_content), then the
+firmware that implements the SetVariable() service will compare the
+digest with the result of applying the signer’s public key to the
+signature. For EFI variable append write, efitools sign-efi-sig-list has
+an option "-a" to add EFI_VARIABLE_APPEND_WRITE attr, and u-boot will
+drop this attribute in efi_set_variable_int(). So if a caller uses
+"sign-efi-sig-list -a" to create the authenticated variable, this append
+write will fail in the u-boot due to "hash check failed".
+
+This patch resumes writing the EFI_VARIABLE_APPEND_WRITE attr to ensure
+that the hash check is correct. And also update the "test_efi_secboot"
+test case to compliance with the change.
+
+Signed-off-by: Weizhao Ouyang <o451686892@gmail.com>
+(cherry picked from commit 3b7d26eb2b88bf2be5a4a32ece1fca61b57e7721)
+---
+ lib/efi_loader/efi_variable.c                  |  6 +++---
+ test/py/tests/test_efi_secboot/conftest.py     | 10 ++++++++++
+ test/py/tests/test_efi_secboot/test_authvar.py |  4 ++--
+ test/py/tests/test_efi_secboot/test_signed.py  | 10 +++++-----
+ 4 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 5a960738..7b25be72 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -289,7 +289,6 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	/* check if a variable exists */
+ 	var = efi_var_mem_find(vendor, variable_name, NULL);
+ 	append = !!(attributes & EFI_VARIABLE_APPEND_WRITE);
+-	attributes &= ~EFI_VARIABLE_APPEND_WRITE;
+ 	delete = !append && (!data_size || !attributes);
+ 
+ 	/* check attributes */
+@@ -305,7 +304,7 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 
+ 		/* attributes won't be changed */
+ 		if (!delete &&
+-		    ((ro_check && var->attr != attributes) ||
++		    ((ro_check && var->attr != (attributes & ~EFI_VARIABLE_APPEND_WRITE)) ||
+ 		     (!ro_check && ((var->attr & ~EFI_VARIABLE_READ_ONLY)
+ 				    != (attributes & ~EFI_VARIABLE_READ_ONLY))))) {
+ 			return EFI_INVALID_PARAMETER;
+@@ -379,7 +378,8 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		for (; *old_data; ++old_data)
+ 			;
+ 		++old_data;
+-		ret = efi_var_mem_ins(variable_name, vendor, attributes,
++		ret = efi_var_mem_ins(variable_name, vendor,
++				      attributes & ~EFI_VARIABLE_APPEND_WRITE,
+ 				      var->length, old_data, data_size, data,
+ 				      time);
+ 	} else {
+diff --git a/test/py/tests/test_efi_secboot/conftest.py b/test/py/tests/test_efi_secboot/conftest.py
+index db6b8d30..33c18e26 100644
+--- a/test/py/tests/test_efi_secboot/conftest.py
++++ b/test/py/tests/test_efi_secboot/conftest.py
+@@ -70,6 +70,12 @@ def efi_boot_env(request, u_boot_config):
+         check_call('cd %s; %scert-to-efi-sig-list -g %s db1.crt db1.esl; %ssign-efi-sig-list -t "2020-04-05" -c KEK.crt -k KEK.key db db1.esl db1.auth'
+                    % (mnt_point, EFITOOLS_PATH, GUID, EFITOOLS_PATH),
+                    shell=True)
++        # db2 (APPEND_WRITE)
++        check_call('cd %s; openssl req -x509 -sha256 -newkey rsa:2048 -subj /CN=TEST_db2/ -keyout db2.key -out db2.crt -nodes -days 365'
++                   % mnt_point, shell=True)
++        check_call('cd %s; %scert-to-efi-sig-list -g %s db2.crt db2.esl; %ssign-efi-sig-list -a -c KEK.crt -k KEK.key db db2.esl db2.auth'
++                   % (mnt_point, EFITOOLS_PATH, GUID, EFITOOLS_PATH),
++                   shell=True)
+         # dbx (TEST_dbx certificate)
+         check_call('cd %s; openssl req -x509 -sha256 -newkey rsa:2048 -subj /CN=TEST_dbx/ -keyout dbx.key -out dbx.crt -nodes -days 365'
+                    % mnt_point, shell=True)
+@@ -90,6 +96,10 @@ def efi_boot_env(request, u_boot_config):
+         check_call('cd %s; %scert-to-efi-hash-list -g %s -t 0 -s 256 db1.crt dbx_hash1.crl; %ssign-efi-sig-list -t "2020-04-06" -c KEK.crt -k KEK.key dbx dbx_hash1.crl dbx_hash1.auth'
+                    % (mnt_point, EFITOOLS_PATH, GUID, EFITOOLS_PATH),
+                    shell=True)
++        # dbx_hash2 (digest of TEST_db2 certificate, with APPEND_WRITE)
++        check_call('cd %s; %scert-to-efi-hash-list -g %s -s 256 db2.crt dbx_hash2.crl; %ssign-efi-sig-list -a -c KEK.crt -k KEK.key dbx dbx_hash2.crl dbx_hash2.auth'
++                   % (mnt_point, EFITOOLS_PATH, GUID, EFITOOLS_PATH),
++                   shell=True)
+         # dbx_db (with TEST_db certificate)
+         check_call('cd %s; %ssign-efi-sig-list -t "2020-04-05" -c KEK.crt -k KEK.key dbx db.esl dbx_db.auth'
+                    % (mnt_point, EFITOOLS_PATH),
+diff --git a/test/py/tests/test_efi_secboot/test_authvar.py b/test/py/tests/test_efi_secboot/test_authvar.py
+index f99b8270..d5aeb650 100644
+--- a/test/py/tests/test_efi_secboot/test_authvar.py
++++ b/test/py/tests/test_efi_secboot/test_authvar.py
+@@ -183,7 +183,7 @@ class TestEfiAuthVar(object):
+             assert 'db:' in ''.join(output)
+ 
+             output = u_boot_console.run_command_list([
+-                'fatload host 0:1 4000000 db1.auth',
++                'fatload host 0:1 4000000 db2.auth',
+                 'setenv -e -nv -bs -rt -a -i 4000000:$filesize db'])
+             assert 'Failed to set EFI variable' in ''.join(output)
+ 
+@@ -197,7 +197,7 @@ class TestEfiAuthVar(object):
+         with u_boot_console.log.section('Test Case 3c'):
+             # Test Case 3c, update with correct signature
+             output = u_boot_console.run_command_list([
+-                'fatload host 0:1 4000000 db1.auth',
++                'fatload host 0:1 4000000 db2.auth',
+                 'setenv -e -nv -bs -rt -at -a -i 4000000:$filesize db',
+                 'printenv -e -n -guid d719b2cb-3d3a-4596-a3bc-dad00e67656f db'])
+             assert 'Failed to set EFI variable' not in ''.join(output)
+diff --git a/test/py/tests/test_efi_secboot/test_signed.py b/test/py/tests/test_efi_secboot/test_signed.py
+index ca52e853..3e4000ac 100644
+--- a/test/py/tests/test_efi_secboot/test_signed.py
++++ b/test/py/tests/test_efi_secboot/test_signed.py
+@@ -177,7 +177,7 @@ class TestEfiSignedImage(object):
+         with u_boot_console.log.section('Test Case 5b'):
+             # Test Case 5b, authenticated if both signatures are verified
+             output = u_boot_console.run_command_list([
+-                'fatload host 0:1 4000000 db1.auth',
++                'fatload host 0:1 4000000 db2.auth',
+                 'setenv -e -nv -bs -rt -at -a -i 4000000:$filesize db'])
+             assert 'Failed to set EFI variable' not in ''.join(output)
+             output = u_boot_console.run_command_list([
+@@ -201,7 +201,7 @@ class TestEfiSignedImage(object):
+         with u_boot_console.log.section('Test Case 5d'):
+             # Test Case 5d, rejected if both of signatures are revoked
+             output = u_boot_console.run_command_list([
+-                'fatload host 0:1 4000000 dbx_hash1.auth',
++                'fatload host 0:1 4000000 dbx_hash2.auth',
+                 'setenv -e -nv -bs -rt -at -a -i 4000000:$filesize dbx'])
+             assert 'Failed to set EFI variable' not in ''.join(output)
+             output = u_boot_console.run_command_list([
+@@ -223,7 +223,7 @@ class TestEfiSignedImage(object):
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize KEK',
+                 'fatload host 0:1 4000000 PK.auth',
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize PK',
+-                'fatload host 0:1 4000000 db1.auth',
++                'fatload host 0:1 4000000 db2.auth',
+                 'setenv -e -nv -bs -rt -at -a -i 4000000:$filesize db',
+                 'fatload host 0:1 4000000 dbx_hash1.auth',
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize dbx'])
+@@ -300,7 +300,7 @@ class TestEfiSignedImage(object):
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize KEK',
+                 'fatload host 0:1 4000000 PK.auth',
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize PK',
+-                'fatload host 0:1 4000000 db1.auth',
++                'fatload host 0:1 4000000 db2.auth',
+                 'setenv -e -nv -bs -rt -at -a -i 4000000:$filesize db',
+                 'fatload host 0:1 4000000 dbx_hash384.auth',
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize dbx'])
+@@ -323,7 +323,7 @@ class TestEfiSignedImage(object):
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize KEK',
+                 'fatload host 0:1 4000000 PK.auth',
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize PK',
+-                'fatload host 0:1 4000000 db1.auth',
++                'fatload host 0:1 4000000 db2.auth',
+                 'setenv -e -nv -bs -rt -at -a -i 4000000:$filesize db',
+                 'fatload host 0:1 4000000 dbx_hash512.auth',
+                 'setenv -e -nv -bs -rt -at -i 4000000:$filesize dbx'])
+-- 
+2.55.0
+

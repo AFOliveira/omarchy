@@ -1,0 +1,19 @@
+#!/bin/sh
+# Replaces the vendor's resize_partition script of the same name.
+#
+# The vendor script reshapes the disk from the initramfs: its UFS branch shrinks
+# /dev/sda3 and creates or deletes /dev/sda4 depending on whether `overlayroot`
+# is on the kernel command line. /dev/sda4 is the Omarchy root, so that branch
+# must never run. It is inert as the board actually boots, because it compares
+# `root=UUID=` from the command line against the partition UUID and this board
+# is booted with `root=PARTUUID=`, but the port does not want to depend on that.
+#
+# initramfs-tools takes /etc over /usr/share for scripts of the same name, so
+# this file wins and the vendor one never reaches the image.
+set -e
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+exit 0

@@ -1,15 +1,47 @@
 #!/bin/bash
-# Start Hyprland directly on the K3 display device under Arch's logind seat.
+# Start Hyprland on the K3 under Arch's logind seat.
+#
+# The picture always goes to the headless K3-CLOUD output the cloud viewer
+# shows. The display device Hyprland opens, and what it renders with:
+#   SpacemiT's display device (their kernel), or vkms (a mainline kernel)
+#   the PowerVR GPU through SpacemiT's GL libraries (/opt/spacemit/env)
+#     whenever their GPU driver, pvrsrvkm, is present - on either kernel
+#   otherwise Mesa; with no GPU driver at all that is llvmpipe on vkms
 set -e
 source "$HOME/.config/uwsm/env"
-source /opt/spacemit/env
+card=""
+spacemit_gpu=false
+for dev in /sys/class/drm/card[0-9]*; do
+  [[ $dev == *-* ]] && continue
+  driver=$(basename "$(readlink -f "$dev/device/driver")")
+  device=$(basename "$(readlink -f "$dev/device")")
+  case $driver in
+    spacemit-drm-drv) card=/dev/dri/$(basename "$dev") ;;
+    pvrsrvkm) spacemit_gpu=true ;;
+  esac
+  if [[ -z $card && ( $driver == "vkms" || $device == "vkms" ) ]]; then
+    card=/dev/dri/$(basename "$dev")
+  fi
+done
+[[ -n $card ]] || { echo "No display device: neither SpacemiT's nor vkms" >&2; exit 1; }
+if $spacemit_gpu; then
+  source /opt/spacemit/env
+fi
 unset WAYLAND_DISPLAY DISPLAY
 export LIBSEAT_BACKEND=logind
-export AQ_DRM_DEVICES=/dev/dri/card1
+export AQ_DRM_DEVICES=$card
 
 (
   for (( attempt = 0; attempt < 60; attempt++ )); do
-    if signature=$(hyprctl instances -j 2>/dev/null | jq -r --argjson pid "$$" '.[] | select(.pid == $pid) | .instance' 2>/dev/null) && [[ -n $signature ]]; then
+    # Hyprland runs as start-hyprland's child, so accept either PID
+    signature=$(hyprctl instances -j 2>/dev/null | jq -r '.[] | "\(.pid) \(.instance)"' 2>/dev/null |
+      while read -r pid instance; do
+        if [[ $pid == "$$" || $(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') == "$$" ]]; then
+          echo "$instance"
+          break
+        fi
+      done)
+    if [[ -n $signature ]]; then
       export HYPRLAND_INSTANCE_SIGNATURE="$signature"
       if hyprctl monitors all -j >/dev/null 2>&1; then
         /usr/local/bin/omarchy-k3-output
@@ -21,4 +53,6 @@ export AQ_DRM_DEVICES=/dev/dri/card1
   echo "Timed out creating the K3 cloud output." >&2
   exit 1
 ) &
-exec /usr/bin/Hyprland --config "$HOME/.config/hypr/k3.conf"
+# Through start-hyprland, Hyprland's own watchdog launcher, as upstream's
+# hyprland.desktop starts it.
+exec /usr/bin/start-hyprland -- --config "$HOME/.config/hypr/k3.conf"

@@ -1,0 +1,31 @@
+From 267f0eb70391353f3e96ce2bb8cd2dbc19445e60 Mon Sep 17 00:00:00 2001
+From: Afonso Oliveira <afonso.oliveira707@gmail.com>
+Date: Fri, 18 Sep 2026 23:40:59 +0800
+Subject: [PATCH 47/47] board: spacemit: k3: do not query the serial console
+ size
+
+The only console on this board is a serial line reached through a web
+terminal, whose round trip is longer than the 100 ms efi_console waits
+for the answer to its cursor-position query. The answer then arrives
+after the query gave up and is read by the EFI application as key
+presses: Limine takes it for a key and stops its boot-menu countdown, so
+the board does not boot unattended while the console is open.
+
+The query never succeeds in time here, so the console is 80x25 either
+way. Turn it off with EFI_CONSOLE_DISABLE_ANSI.
+---
+ configs/k3_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/configs/k3_defconfig b/configs/k3_defconfig
+index 8bf381ea..44f1fe52 100644
+--- a/configs/k3_defconfig
++++ b/configs/k3_defconfig
+@@ -279,3 +279,4 @@ CONFIG_SPL_LZO=y
+ CONFIG_LMB_MAX_REGIONS=32
+ CONFIG_EFI_VARIABLE_FILE_STORE=y
+ CONFIG_EFI_RT_VOLATILE_STORE=y
++CONFIG_EFI_CONSOLE_DISABLE_ANSI=y
+-- 
+2.55.0
+

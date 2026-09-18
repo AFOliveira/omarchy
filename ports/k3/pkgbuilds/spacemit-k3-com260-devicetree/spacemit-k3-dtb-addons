@@ -1,0 +1,39 @@
+#!/bin/bash
+# Give every mainline kernel the mainline device tree of this board.
+#
+# U-Boot hands the OS SpacemiT's own device tree, which describes the hardware
+# with vendor bindings that only SpacemiT's kernel understands. A mainline
+# kernel needs the mainline description instead. systemd-stub can swap it in
+# from an addon: a small PE file with a .dtb section in the ESP's
+# loader/addons/, which the stub applies (and U-Boot fixes up through
+# EFI_DT_FIXUP_PROTOCOL) only to a UKI whose .uname matches the addon's. So one
+# addon per mainline kernel, and none for SpacemiT's kernel.
+set -euo pipefail
+
+dtb=/usr/share/spacemit-k3-com260/k3-com260-cloud.dtb
+stub=/usr/lib/systemd/boot/efi/addonriscv64.efi.stub
+vendor_pkgbase=linux-spacemit-k3
+
+esp=$(sed -n 's/^ESP_PATH="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/default/limine 2>/dev/null | tail -1)
+[[ -n $esp ]] || esp=$(bootctl --print-esp-path 2>/dev/null) || true
+[[ -n $esp ]] && mountpoint -q "$esp" || { echo "ESP not found or not mounted; no device tree addons written" >&2; exit 0; }
+dir=$esp/loader/addons
+install -d "$dir"
+
+wanted=()
+for kdir in /usr/lib/modules/*/; do
+  kver=$(basename "$kdir")
+  [[ -f $kdir/vmlinuz && -f $kdir/pkgbase ]] || continue
+  [[ $(<"$kdir/pkgbase") == "$vendor_pkgbase" ]] && continue
+  out=$dir/spacemit-k3-com260-$kver.addon.efi
+  wanted+=("$out")
+  if [[ ! -f $out || $out -ot $dtb ]]; then
+    ukify build --stub="$stub" --devicetree="$dtb" --uname="$kver" --output="$out" >/dev/null
+    echo "Device tree addon for $kver: $out"
+  fi
+done
+
+for f in "$dir"/spacemit-k3-com260-*.addon.efi; do
+  [[ -e $f ]] || continue
+  [[ " ${wanted[*]} " == *" $f "* ]] || { rm -f "$f"; echo "Removed stale addon $f"; }
+done

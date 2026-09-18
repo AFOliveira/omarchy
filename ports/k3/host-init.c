@@ -15,8 +15,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* Each allocation has its own partition IDs; trial-physical.sh passes the
+ * boot partition observed on the running Bianbu system. */
 #ifndef BOOT_DEVICE
-#define BOOT_DEVICE "/dev/disk/by-partuuid/dea91215-8a70-4045-82b5-33296f8be0ac"
+#error "Define BOOT_DEVICE as the K3 boot partition, e.g. /dev/disk/by-partuuid/..."
 #endif
 #ifndef GUARD_SECONDS
 #define GUARD_SECONDS "600"

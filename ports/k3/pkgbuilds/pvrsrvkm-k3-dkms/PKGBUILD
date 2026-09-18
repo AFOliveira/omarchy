@@ -1,0 +1,57 @@
+# SpacemiT's GPU kernel driver (Imagination's DDK 24.2, drivers/gpu/drm/img-rogue
+# in their kernel) built for mainline kernels with DKMS. It pairs with the GPU
+# user space SpacemiT ships in /opt/spacemit (OpenGL ES 3.2, EGL), which is what
+# the desktop renders with on SpacemiT's own kernel; the kernel and user-space
+# halves must be the same DDK release, and this is the release that kernel
+# carries (24.2@6603887).
+#
+# The DDK builds unchanged against Linux 7.2 (it carries its own compatibility
+# layer). Two adaptations: its in-tree Makefile paths point at the module's own
+# directory, and one patch releases the GPU from reset, which SpacemiT's kernel
+# does outside the driver.
+#
+# The sources are 586 files inside SpacemiT's kernel tree; prepare() fetches only
+# that directory at the pinned commit and checks its git tree hash.
+
+pkgname=pvrsrvkm-k3-dkms
+_commit=4158237f35b8fd62ba198c1627e5a66e5a34c50f
+_tree=a4e5010620bb536e7f8e292a4765806ec672ff56
+pkgver=24.2.6603887
+pkgrel=1
+pkgdesc="SpacemiT K3 PowerVR GPU driver (Imagination DDK) for mainline kernels (DKMS)"
+arch=(any)
+url="https://github.com/spacemit-com/linux-6.18"
+license=("GPL-2.0-only OR MIT")
+depends=(dkms)
+makedepends=(git)
+source=(0001-spacemit-release-the-GPU-from-reset.patch
+        dkms.conf
+        pvrsrvkm-k3.conf)
+sha256sums=('b459271db836e0609e86c407d2fa5ab5b27715331894aac4df44190398ac9e05'
+            '39bf189a0a6ea8e000ec3d3ece9b82008b9756df21c2efa5dfe9611e9fbe3f52'
+            '39c0e455ca1f8b5293e51ce7f8476e57dfec9a0378b651192941101d2f5299fa')
+
+prepare() {
+  rm -rf linux && git init -q linux
+  cd linux
+  git remote add origin "$url.git"
+  git config core.sparseCheckout true
+  echo "drivers/gpu/drm/img-rogue/" > .git/info/sparse-checkout
+  git fetch -q --depth 1 --filter=blob:none origin "$_commit"
+  [[ $(git rev-parse FETCH_HEAD:drivers/gpu/drm/img-rogue) == "$_tree" ]]
+  git checkout -q FETCH_HEAD
+  cd drivers/gpu/drm/img-rogue
+  sed -i -e 's|\$(srctree)/drivers/gpu/drm/img-rogue|$(src)|g' \
+    -e 's|^obj-\$(CONFIG_POWERVR_ROGUE) += pvrsrvkm.o|obj-m += pvrsrvkm.o|' \
+    -e '/CONFIG_POWERVR_DVFS/d' Makefile
+  patch -p1 < "$srcdir/0001-spacemit-release-the-GPU-from-reset.patch"
+}
+
+package() {
+  local dest="$pkgdir/usr/src/pvrsrvkm-k3-$pkgver"
+  install -d "$dest"
+  cp -a linux/drivers/gpu/drm/img-rogue/. "$dest/"
+  find "$dest" -name "*.o" -delete
+  sed "s/@PKGVER@/$pkgver/" dkms.conf > "$dest/dkms.conf"
+  install -Dm644 pvrsrvkm-k3.conf "$pkgdir/usr/lib/modprobe.d/pvrsrvkm-k3.conf"
+}

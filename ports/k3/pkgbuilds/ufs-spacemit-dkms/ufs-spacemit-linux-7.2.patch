@@ -1,0 +1,86 @@
+--- /tmp/ufs-orig.c	2026-09-16 18:44:36.935591749 +0100
++++ /tmp/ufs-spacemit-72.c	2026-09-16 18:44:36.956578251 +0100
+@@ -520,13 +520,44 @@
+ }
+ #endif
+ 
++/*
++ * Linux 7.x splits the vendor callback: negotiation happens in
++ * .negotiate_pwr_mode, and .pwr_change_notify only brackets the change.
++ */
++static int ufs_spacemit_negotiate_pwr_mode(struct ufs_hba *hba,
++					   const struct ufs_pa_layer_attr *dev_max_params,
++					   struct ufs_pa_layer_attr *dev_req_params)
++{
++	struct ufs_host_params ufs_spacemit_cap;
++	int ret;
++
++	if (!dev_req_params) {
++		dev_err(hba->dev, "dev_req_params is NULL\n");
++		return -EINVAL;
++	}
++
++	ufs_spacemit_set_dev_cap(&ufs_spacemit_cap);
++	ret = ufshcd_negotiate_pwr_params(&ufs_spacemit_cap, dev_max_params,
++					  dev_req_params);
++	if (ret) {
++		dev_err(hba->dev, "Failed to negotiate power params: %d\n", ret);
++		return ret;
++	}
++
++	dev_dbg(hba->dev,
++		"Power mode config - gear_rx:%d, gear_tx:%d, lane_rx:%d, lane_tx:%d, pwr_rx:%d, pwr_tx:%d, hs_rate:%d\n",
++		dev_req_params->gear_rx, dev_req_params->gear_tx, dev_req_params->lane_rx,
++		dev_req_params->lane_tx, dev_req_params->pwr_rx, dev_req_params->pwr_tx,
++		dev_req_params->hs_rate);
++
++	return 0;
++}
++
+ static int ufs_spacemit_pwr_change_notify(struct ufs_hba *hba,
+ 					     enum ufs_notify_change_status status,
+-					     const struct ufs_pa_layer_attr *dev_max_params,
+ 					     struct ufs_pa_layer_attr *dev_req_params)
+ {
+ 	struct ufs_spacemit_host *host = ufshcd_get_variant(hba);
+-	struct ufs_host_params ufs_spacemit_cap;
+ 	int ret = 0;
+ 
+ 	if (!dev_req_params) {
+@@ -536,19 +567,6 @@
+ 
+ 	switch (status) {
+ 	case PRE_CHANGE:
+-		ufs_spacemit_set_dev_cap(&ufs_spacemit_cap);
+-		ret = ufshcd_negotiate_pwr_params(&ufs_spacemit_cap, dev_max_params,
+-						  dev_req_params);
+-		if (ret) {
+-			dev_err(hba->dev, "Failed to negotiate power params: %d\n", ret);
+-			return ret;
+-		}
+-
+-		dev_dbg(hba->dev,
+-			"Power mode config - gear_rx:%d, gear_tx:%d, lane_rx:%d, lane_tx:%d, pwr_rx:%d, pwr_tx:%d, hs_rate:%d\n",
+-			dev_req_params->gear_rx, dev_req_params->gear_tx, dev_req_params->lane_rx,
+-			dev_req_params->lane_tx, dev_req_params->pwr_rx, dev_req_params->pwr_tx,
+-			dev_req_params->hs_rate);
+ 		break;
+ 	case POST_CHANGE:
+ 		/* cache the power mode parameters to use internally */
+@@ -642,7 +660,7 @@
+ {
+ 	/* break auto hibern8 */
+ 	hba->quirks |= UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8;
+-	hba->quirks |= UFSHCD_QUIRK_BROKEN_MIXED_DATA_DIR;
++	/* UFSHCD_QUIRK_BROKEN_MIXED_DATA_DIR is vendor-only; absent upstream. */
+ }
+ 
+ static void ufs_spacemit_set_caps(struct ufs_hba *hba)
+@@ -1204,6 +1222,7 @@
+ 	.name = "lark_ufs",
+ 	.init = ufs_spacemit_init,
+ 	.link_startup_notify = ufs_spacemit_link_startup_notify,
++	.negotiate_pwr_mode = ufs_spacemit_negotiate_pwr_mode,
+ 	.pwr_change_notify = ufs_spacemit_pwr_change_notify,
+ 	.setup_clocks = ufs_spacemit_setup_clocks,
+ 	.setup_xfer_req = ufs_spacemit_setup_xfer_req,

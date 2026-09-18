@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * SpacemiT K3 CoM260 as allocated by BianbuCloud, for an upstream kernel.
+ *
+ * The module description comes from the mainline CoM260 device tree. The UFS
+ * controller is not described upstream, so this board file adds the node the
+ * SpacemiT UFS host driver binds to. Its register range, interrupt and clock
+ * frequencies follow the vendor device tree; the clock and reset references
+ * use the mainline K3 clock controller. Upstream 7.2 has no UFS reference
+ * clock ID, so only the AXI clock is described and the reference clock keeps
+ * the setting the boot loader left (boot with clk_ignore_unused).
+ */
+
+/dts-v1/;
+
+#include "k3-com260.dtsi"
+
+/ {
+	model = "SpacemiT K3 CoM260 (BianbuCloud)";
+	compatible = "spacemit,k3-com260", "spacemit,k3";
+
+	/*
+	 * No ethernet alias: the boot loader rewrites the MAC address of the
+	 * node an ethernet alias points at, using its own first address. The
+	 * allocation's assigned address is set on the node directly instead.
+	 */
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+};
+
+&eth1 {
+	/* Address assigned to this instance; keeps the provider's routing. */
+	local-mac-address = [FE FE FE 1B 8B CB];
+};
+
+&soc {
+	ufshc: ufs@c0e00000 {
+		compatible = "spacemit,k3-ufshcd";
+		reg = <0x0 0xc0e00000 0x0 0x40000>;
+		interrupts = <135 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&syscon_apmu CLK_APMU_UFS_ACLK>;
+		clock-names = "ufs-aclk";
+		resets = <&syscon_apmu RESET_APMU_UFS_ACLK>;
+		reset-names = "ufs-aclk-rst";
+		clock-freq = <491520000>;
+		freq-table-hz = <491520000 491520000>;
+		lanes-per-direction = <2>;
+		status = "okay";
+	};
+};

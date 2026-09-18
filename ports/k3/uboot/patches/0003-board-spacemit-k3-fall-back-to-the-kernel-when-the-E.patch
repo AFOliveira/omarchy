@@ -1,0 +1,40 @@
+From 781f7cd54325935b2425ceddab6ca6b54a17f756 Mon Sep 17 00:00:00 2001
+From: Afonso Oliveira <afonso.oliveira707@gmail.com>
+Date: Fri, 18 Sep 2026 01:28:30 +0800
+Subject: [PATCH 3/3] board: spacemit: k3: fall back to the kernel when the EFI
+ loader fails
+
+boot_grub ends right after bootefi, so when the EFI application fails to
+load or returns, U-Boot stops at its prompt. On a board without anyone
+at the console that is the end of the boot.
+
+Keep the loads as they are and run boot_kernel afterwards, so a broken
+loader still ends in the kernel from the boot partition, and report when
+the loader returned.
+
+bootefi keeps being called without a size on purpose: with an explicit
+size do_bootefi_image() forgets the device the image was loaded from and
+hands the application a memory-mapped device path, so a boot loader can
+no longer find the volume it was read from (Limine reports "Could not
+meaningfully match the boot device handle with a volume").
+---
+ board/spacemit/k3/k3.env | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/board/spacemit/k3/k3.env b/board/spacemit/k3/k3.env
+index 949ee842..0e31e465 100755
+--- a/board/spacemit/k3/k3.env
++++ b/board/spacemit/k3/k3.env
+@@ -167,7 +167,8 @@ boot_grub=env set -e -bs product_name "${product_name}"; \
+         run load_grub; \
+         run detect_dtb; \
+         run loaddtb; \
+-        bootefi ${kernel_addr_r} ${fdt_addr_r};
++        if bootefi ${kernel_addr_r} ${fdt_addr_r}; then echo "boot loader returned"; fi; \
++        echo "falling back to the kernel"; run boot_kernel;
+ 
+ // Nor+ssd boot combo
+ set_nor_args=setenv bootargs "${bootargs}" mtdparts=${mtdparts} rootfstype=ext4
+-- 
+2.55.0
+

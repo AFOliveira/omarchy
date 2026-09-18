@@ -2,14 +2,9 @@
 # Build selected recipes inside the staged native Arch system.
 set -euo pipefail
 port_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-recipe_dir="$port_dir/packages/ports/k3/pkgbuilds"
 
 if (( EUID != 0 )) || [[ $(uname -m) != "riscv64" ]] || [[ ! -f /.omarchy-k3-rootfs ]]; then
   echo "Run as root inside the staged Arch RISC-V userspace." >&2
-  exit 1
-fi
-if [[ ! -d $recipe_dir ]]; then
-  echo "Initialize the pinned package sources: git submodule update --init --recursive" >&2
   exit 1
 fi
 
@@ -22,7 +17,7 @@ if (( $# > 0 )); then
   recipes=("$@")
 fi
 for recipe in "${recipes[@]}"; do
-  if [[ ! $recipe =~ ^[a-z][a-z0-9-]*$ ]] || [[ ! -f $recipe_dir/$recipe/PKGBUILD ]]; then
+  if [[ ! $recipe =~ ^[a-z][a-z0-9-]*$ ]] || [[ ! -f $port_dir/pkgbuilds/$recipe/PKGBUILD ]]; then
     printf 'Unknown source recipe: %s\n' "$recipe" >&2
     exit 1
   fi
@@ -47,11 +42,11 @@ CONFIG
 
 for recipe in "${recipes[@]}"; do
   install -d -o afonso -g afonso "$build_dir/$recipe"
-  cp -a "$recipe_dir/$recipe/." "$build_dir/$recipe/"
+  cp -a "$port_dir/pkgbuilds/$recipe/." "$build_dir/$recipe/"
   chown -R afonso:afonso "$build_dir/$recipe"
   (
     cd "$build_dir/$recipe"
-    fingerprint=$(find "$recipe_dir/$recipe" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+    fingerprint=$(find "$port_dir/pkgbuilds/$recipe" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
     # Process substitution would hide a failed makepkg invocation.
     package_list=$(setpriv --reuid=afonso --regid=afonso --init-groups --reset-env -- makepkg --config "$build_dir/makepkg.conf" --packagelist)
     [[ -n $package_list ]]

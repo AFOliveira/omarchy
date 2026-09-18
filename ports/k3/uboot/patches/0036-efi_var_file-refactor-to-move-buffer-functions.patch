@@ -1,0 +1,249 @@
+From d364bd0db3be89b6e4150b9f7f2b6e4faf175490 Mon Sep 17 00:00:00 2001
+From: Shantur Rathore <i@shantur.com>
+Date: Wed, 11 Feb 2026 16:56:20 +0100
+Subject: [PATCH 36/40] efi_var_file: refactor to move buffer functions
+
+Currently efi_var_file.c has functions to store/read
+EFI variables to/from memory buffer. These functions
+can be used with other EFI variable stores so move
+them out to efi_var_common.c
+
+Signed-off-by: Shantur Rathore <i@shantur.com>
+Signed-off-by: Michal Simek <michal.simek@amd.com>
+Tested-by: Neil Armstrong <neil.armstrong@linaro.org> # on AML-S905D3-CC
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 38ea3bfc6506174c3ae219b33171db2c2098afd1)
+---
+ include/efi_variable.h          |  5 +++
+ lib/efi_loader/Makefile         |  2 +-
+ lib/efi_loader/efi_var_common.c | 42 ++++++++++++++++++++++++
+ lib/efi_loader/efi_var_file.c   | 57 ---------------------------------
+ lib/efi_loader/efi_variable.c   | 17 +++++++---
+ 5 files changed, 60 insertions(+), 63 deletions(-)
+
+diff --git a/include/efi_variable.h b/include/efi_variable.h
+index 4065cf45..ee68fa4a 100644
+--- a/include/efi_variable.h
++++ b/include/efi_variable.h
+@@ -161,6 +161,11 @@ efi_status_t efi_var_to_file(void);
+ efi_status_t __maybe_unused efi_var_collect(struct efi_var_file **bufp, loff_t *lenp,
+ 					    u32 check_attr_mask);
+ 
++/* GUID used by Shim to store the MOK database */
++#define SHIM_LOCK_GUID \
++	EFI_GUID(0x605dab50, 0xe046, 0x4300, \
++		 0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23)
++
+ /**
+  * efi_var_restore() - restore EFI variables from buffer
+  *
+diff --git a/lib/efi_loader/Makefile b/lib/efi_loader/Makefile
+index 1ddd6925..3fc95eed 100644
+--- a/lib/efi_loader/Makefile
++++ b/lib/efi_loader/Makefile
+@@ -61,7 +61,7 @@ ifeq ($(CONFIG_EFI_MM_COMM_TEE),y)
+ obj-y += efi_variable_tee.o
+ else
+ obj-y += efi_variable.o
+-obj-y += efi_var_file.o
++obj-$(CONFIG_EFI_VARIABLE_FILE_STORE) += efi_var_file.o
+ obj-$(CONFIG_EFI_VARIABLES_PRESEED) += efi_var_seed.o
+ endif
+ obj-y += efi_watchdog.o
+diff --git a/lib/efi_loader/efi_var_common.c b/lib/efi_loader/efi_var_common.c
+index fa1f90e0..8ed4632a 100644
+--- a/lib/efi_loader/efi_var_common.c
++++ b/lib/efi_loader/efi_var_common.c
+@@ -40,6 +40,7 @@ static const struct efi_auth_var_name_type name_type[] = {
+ 
+ static bool efi_secure_boot;
+ static enum efi_secure_mode efi_secure_mode;
++static const efi_guid_t shim_lock_guid = SHIM_LOCK_GUID;
+ 
+ /**
+  * efi_efi_get_variable() - retrieve value of a UEFI variable
+@@ -487,3 +488,44 @@ efi_status_t __maybe_unused efi_var_collect(struct efi_var_file **bufp, loff_t *
+ 
+ 	return EFI_SUCCESS;
+ }
++
++efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
++{
++	struct efi_var_entry *var, *last_var;
++	u16 *data;
++	efi_status_t ret;
++
++	if (buf->reserved || buf->magic != EFI_VAR_FILE_MAGIC ||
++	    buf->crc32 != crc32(0, (u8 *)buf->var,
++				buf->length - sizeof(struct efi_var_file))) {
++		log_err("Invalid EFI variables file\n");
++		return EFI_INVALID_PARAMETER;
++	}
++
++	last_var = (struct efi_var_entry *)((u8 *)buf + buf->length);
++	for (var = buf->var; var < last_var;
++	     var = (struct efi_var_entry *)ALIGN((uintptr_t)data + var->length, 8)) {
++		data = var->name + u16_strlen(var->name) + 1;
++
++		/*
++		 * Secure boot related and volatile variables shall only be
++		 * restored from U-Boot's preseed.
++		 */
++		if (!safe &&
++		    (efi_auth_var_get_type(var->name, &var->guid) !=
++		     EFI_AUTH_VAR_NONE ||
++		     !guidcmp(&var->guid, &shim_lock_guid) ||
++		     !(var->attr & EFI_VARIABLE_NON_VOLATILE)))
++			continue;
++		if (!var->length)
++			continue;
++		if (efi_var_mem_find(&var->guid, var->name, NULL))
++			continue;
++		ret = efi_var_mem_ins(var->name, &var->guid, var->attr,
++				      var->length, data, 0, NULL,
++				      var->time);
++		if (ret != EFI_SUCCESS)
++			log_err("Failed to set EFI variable %ls\n", var->name);
++	}
++	return EFI_SUCCESS;
++}
+diff --git a/lib/efi_loader/efi_var_file.c b/lib/efi_loader/efi_var_file.c
+index 787bb5dd..749c0ddb 100644
+--- a/lib/efi_loader/efi_var_file.c
++++ b/lib/efi_loader/efi_var_file.c
+@@ -15,17 +15,9 @@
+ #include <mapmem.h>
+ #include <efi_loader.h>
+ #include <efi_variable.h>
+-#include <u-boot/crc.h>
+ 
+ #define PART_STR_LEN 10
+ 
+-/* GUID used by Shim to store the MOK database */
+-#define SHIM_LOCK_GUID \
+-	EFI_GUID(0x605dab50, 0xe046, 0x4300, \
+-		 0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23)
+-
+-static const efi_guid_t shim_lock_guid = SHIM_LOCK_GUID;
+-
+ /**
+  * efi_set_blk_dev_to_system_partition() - select EFI system partition
+  *
+@@ -62,7 +54,6 @@ static efi_status_t __maybe_unused efi_set_blk_dev_to_system_partition(void)
+  */
+ efi_status_t efi_var_to_file(void)
+ {
+-#ifdef CONFIG_EFI_VARIABLE_FILE_STORE
+ 	efi_status_t ret;
+ 	struct efi_var_file *buf;
+ 	loff_t len;
+@@ -86,52 +77,6 @@ error:
+ 		log_err("Failed to persist EFI variables\n");
+ 	free(buf);
+ 	return ret;
+-#else
+-	return EFI_SUCCESS;
+-#endif
+-}
+-
+-efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
+-{
+-	struct efi_var_entry *var, *last_var;
+-	u16 *data;
+-	efi_status_t ret;
+-
+-	if (buf->reserved || buf->magic != EFI_VAR_FILE_MAGIC ||
+-	    buf->crc32 != crc32(0, (u8 *)buf->var,
+-				buf->length - sizeof(struct efi_var_file))) {
+-		log_err("Invalid EFI variables file\n");
+-		return EFI_INVALID_PARAMETER;
+-	}
+-
+-	last_var = (struct efi_var_entry *)((u8 *)buf + buf->length);
+-	for (var = buf->var; var < last_var;
+-	     var = (struct efi_var_entry *)
+-		   ALIGN((uintptr_t)data + var->length, 8)) {
+-
+-		data = var->name + u16_strlen(var->name) + 1;
+-
+-		/*
+-		 * Secure boot related and volatile variables shall only be
+-		 * restored from U-Boot's preseed.
+-		 */
+-		if (!safe &&
+-		    (efi_auth_var_get_type(var->name, &var->guid) !=
+-		     EFI_AUTH_VAR_NONE ||
+-		     !guidcmp(&var->guid, &shim_lock_guid) ||
+-		     !(var->attr & EFI_VARIABLE_NON_VOLATILE)))
+-			continue;
+-		if (!var->length)
+-			continue;
+-		if (efi_var_mem_find(&var->guid, var->name, NULL))
+-			continue;
+-		ret = efi_var_mem_ins(var->name, &var->guid, var->attr,
+-				      var->length, data, 0, NULL,
+-				      var->time);
+-		if (ret != EFI_SUCCESS)
+-			log_err("Failed to set EFI variable %ls\n", var->name);
+-	}
+-	return EFI_SUCCESS;
+ }
+ 
+ /**
+@@ -150,7 +95,6 @@ efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
+  */
+ efi_status_t efi_var_from_file(void)
+ {
+-#ifdef CONFIG_EFI_VARIABLE_FILE_STORE
+ 	struct efi_var_file *buf;
+ 	loff_t len;
+ 	efi_status_t ret;
+@@ -175,6 +119,5 @@ efi_status_t efi_var_from_file(void)
+ 		log_err("Invalid EFI variables file\n");
+ error:
+ 	free(buf);
+-#endif
+ 	return EFI_SUCCESS;
+ }
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 7b25be72..b852775a 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -398,11 +398,15 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		ret = EFI_SUCCESS;
+ 
+ 	/*
+-	 * Write non-volatile EFI variables to file
++	 * Write non-volatile EFI variables
+ 	 * TODO: check if a value change has occured to avoid superfluous writes
+ 	 */
+-	if (attributes & EFI_VARIABLE_NON_VOLATILE)
++	if (attributes & EFI_VARIABLE_NON_VOLATILE) {
++		if (IS_ENABLED(CONFIG_EFI_VARIABLE_NO_STORE))
++			return EFI_SUCCESS;
++
+ 		efi_var_to_file();
++	}
+ 
+ 	return EFI_SUCCESS;
+ }
+@@ -595,9 +599,12 @@ efi_status_t efi_init_variables(void)
+ 	if (ret != EFI_SUCCESS)
+ 		return ret;
+ 
+-	ret = efi_var_from_file();
+-	if (ret != EFI_SUCCESS)
+-		return ret;
++	if (!IS_ENABLED(CONFIG_EFI_VARIABLE_NO_STORE)) {
++		ret = efi_var_from_file();
++		if (ret != EFI_SUCCESS)
++			return ret;
++	}
++
+ 	if (IS_ENABLED(CONFIG_EFI_VARIABLES_PRESEED)) {
+ 		ret = efi_var_restore((struct efi_var_file *)
+ 				      __efi_var_file_begin, true);
+-- 
+2.55.0
+

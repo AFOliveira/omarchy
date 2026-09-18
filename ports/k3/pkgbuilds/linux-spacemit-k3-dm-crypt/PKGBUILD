@@ -1,0 +1,58 @@
+# dm-crypt for the SpacemiT K3 vendor kernel, which is built without
+# CONFIG_DM_CRYPT. The sources are the kernel's own, from the stable tree at the
+# vendor kernel's version, built out of tree against linux-spacemit-k3-headers:
+# dm-crypt, and dm-integrity with what it needs (dm-bufio, async_tx, async_xor).
+# This is what lets mkinitcpio's encrypt hook, and so a LUKS root, work here.
+
+pkgname=linux-spacemit-k3-dm-crypt
+_release=6.18.3-generic
+_kver=6.18.3
+pkgver=${_kver}
+pkgrel=1
+pkgdesc="dm-crypt and dm-integrity modules for the SpacemiT K3 vendor kernel"
+arch=(riscv64)
+url="https://www.kernel.org/"
+license=(GPL-2.0-only)
+depends=(linux-spacemit-k3)
+makedepends=(linux-spacemit-k3-headers)
+options=(!debug !strip)
+source=("dm-crypt.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-crypt.c?h=v${_kver}"
+        "dm-integrity.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-integrity.c?h=v${_kver}"
+        "dm-bufio.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-bufio.c?h=v${_kver}"
+        "dm-audit.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-audit.c?h=v${_kver}"
+        "dm-audit.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-audit.h?h=v${_kver}"
+        "dm-bio-record.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-bio-record.h?h=v${_kver}"
+        "dm-core.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-core.h?h=v${_kver}"
+        "dm.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm.h?h=v${_kver}"
+        "dm-stats.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-stats.h?h=v${_kver}"
+        "dm-ima.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/md/dm-ima.h?h=v${_kver}"
+        "async_tx.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/crypto/async_tx/async_tx.c?h=v${_kver}"
+        "async_xor.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/crypto/async_tx/async_xor.c?h=v${_kver}"
+        Kbuild)
+sha256sums=('21288cb9b01bcbd537a6f562fb6e547fd071938add2bac2619e831e9fb9f482f'
+            'e1c840bfa4929e50be3c07430cc0adbcb0932ccb7107f48dd66df93269fe244a'
+            'd634e164ef1e7402c652ac3d67c5699318441ad61e3dd25933f156048f09fc29'
+            'ee521817324275251e333f42f578053c19ccd491e618a61ea773a0fe5d879f60'
+            'aac9a310856460396a3c6b98ef662b0c199f9878032f5b7b51f7f2a65e5bba69'
+            'ec02934582d1fa7c1bcff96f54d097249982839a4649a3b906f7dda1a1ea2781'
+            'ccfae4fe07e52f25673589340d08f5f91151629ad575a1a461ec42419582add3'
+            'a2601475e91444f2af802ec36426afaf8bb6c506a15076a8872356aaf68ee771'
+            '55cfa2550847e2cfaed03a9c8413abd2bce18a2186224658ce729bab4af8a918'
+            'b5283f23c1f2a6b74b171c566df3cdbd16bde09072d651e07a965e970ff9b8f9'
+            'c7183e3eb68cacb3dfdf820794385dcb2c5f23d49b17d92df04f4b7dcc1d033e'
+            '9d0457469b6cd22cec2c8e034936cb843a9fe8b997365aa0696747a7f6a31ce0'
+            '0733800045f195153c0a0d0ba089fbffefbd20f0ec06d64d21516a95397d2782')
+
+build() {
+  make -C "/usr/lib/modules/${_release}/build" M="$srcdir" CC=gcc HOSTCC=gcc modules
+}
+
+package() {
+  local dest="$pkgdir/usr/lib/modules/${_release}/extramodules"
+  install -d "$dest"
+  local ko
+  for ko in "$srcdir"/*.ko; do
+    install -m644 "$ko" "$dest/"
+  done
+  zstd -q --rm "$dest"/*.ko
+}

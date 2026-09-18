@@ -1,0 +1,91 @@
+From 7e592e12a9896ae591c06ce23365756b5a54dec3 Mon Sep 17 00:00:00 2001
+From: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Date: Thu, 18 Apr 2024 15:54:51 +0300
+Subject: [PATCH 27/40] efi_loader: Add OS notifications for SetVariable at
+ runtime
+
+Previous patches enable SetVariable at runtime using a volatile storage
+backend using EFI_RUNTIME_SERVICES_DATA allocared memory. Since there's
+no recommendation from the spec on how to notify the OS, add a volatile
+EFI variable that contains the filename relative to the ESP. OS'es
+can use that file and update it at runtime
+
+$~ efivar -p -n b2ac5fc9-92b7-4acd-aeac-11e818c3130c-RTStorageVolatile
+GUID: b2ac5fc9-92b7-4acd-aeac-11e818c3130c
+Name: "RTStorageVolatile"
+Attributes:
+	Boot Service Access
+	Runtime Service Access
+Value:
+00000000  75 62 6f 6f 74 65 66 69  2e 76 61 72 00           |ubootefi.var.   |
+
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Signed-off-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit bc3dd2493ef8c3c646aaeb3854a3f83558c50102)
+---
+ include/efi_loader.h         |  4 ++++
+ lib/efi_loader/efi_runtime.c | 19 ++++++++++++++++---
+ 2 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/include/efi_loader.h b/include/efi_loader.h
+index 1567de19..c1144d4d 100644
+--- a/include/efi_loader.h
++++ b/include/efi_loader.h
+@@ -142,6 +142,10 @@ static inline efi_status_t efi_launch_capsules(void)
+ 	EFI_GUID(0x63293792, 0xadf5, 0x9325, \
+ 		 0xb9, 0x9f, 0x4e, 0x0e, 0x45, 0x5c, 0x1b, 0x1e)
+ 
++#define U_BOOT_EFI_RT_VAR_FILE_GUID \
++	EFI_GUID(0xb2ac5fc9, 0x92b7, 0x4acd, \
++		 0xae, 0xac, 0x11, 0xe8, 0x18, 0xc3, 0x13, 0x0c)
++
+ /* Use internal device tree when starting UEFI application */
+ #define EFI_FDT_USE_INTERNAL NULL
+ 
+diff --git a/lib/efi_loader/efi_runtime.c b/lib/efi_loader/efi_runtime.c
+index 33e3b120..ebca219a 100644
+--- a/lib/efi_loader/efi_runtime.c
++++ b/lib/efi_loader/efi_runtime.c
+@@ -11,6 +11,7 @@
+ #include <dm.h>
+ #include <elf.h>
+ #include <efi_loader.h>
++#include <efi_variable.h>
+ #include <log.h>
+ #include <malloc.h>
+ #include <rtc.h>
+@@ -110,6 +111,7 @@ static __efi_runtime_data efi_uintn_t efi_descriptor_size;
+  */
+ efi_status_t efi_init_runtime_supported(void)
+ {
++	const efi_guid_t efi_guid_efi_rt_var_file = U_BOOT_EFI_RT_VAR_FILE_GUID;
+ 	efi_status_t ret;
+ 	struct efi_rt_properties_table *rt_table;
+ 
+@@ -127,9 +129,20 @@ efi_status_t efi_init_runtime_supported(void)
+ 				EFI_RT_SUPPORTED_SET_VIRTUAL_ADDRESS_MAP |
+ 				EFI_RT_SUPPORTED_CONVERT_POINTER;
+ 
+-	if (IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE))
+-		rt_table->runtime_services_supported |=
+-			EFI_RT_SUPPORTED_SET_VARIABLE;
++	if (IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE)) {
++		ret = efi_set_variable_int(u"RTStorageVolatile",
++					   &efi_guid_efi_rt_var_file,
++					   EFI_VARIABLE_BOOTSERVICE_ACCESS |
++					   EFI_VARIABLE_RUNTIME_ACCESS |
++					   EFI_VARIABLE_READ_ONLY,
++					   sizeof(EFI_VAR_FILE_NAME),
++					   EFI_VAR_FILE_NAME, false);
++		if (ret != EFI_SUCCESS) {
++			log_err("Failed to set RTStorageVolatile\n");
++			return ret;
++		}
++		rt_table->runtime_services_supported |= EFI_RT_SUPPORTED_SET_VARIABLE;
++	}
+ 
+ 	/*
+ 	 * This value must be synced with efi_runtime_detach_list
+-- 
+2.55.0
+

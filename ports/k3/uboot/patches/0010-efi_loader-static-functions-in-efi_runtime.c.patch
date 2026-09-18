@@ -1,0 +1,38 @@
+From fc15c50fd94359db7e0bd566f824a11bdcefe450 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Fri, 10 Feb 2023 08:56:06 +0100
+Subject: [PATCH 10/40] efi_loader: static functions in efi_runtime.c
+
+Functions that are not used externally should be static.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 6c2377f9a00d246cb77096564e5980e7c1d7b0e4)
+---
+ lib/efi_loader/efi_runtime.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/lib/efi_loader/efi_runtime.c b/lib/efi_loader/efi_runtime.c
+index 93a695fc..f7855a19 100644
+--- a/lib/efi_loader/efi_runtime.c
++++ b/lib/efi_loader/efi_runtime.c
+@@ -462,7 +462,7 @@ efi_status_t __weak __efi_runtime EFIAPI efi_set_time(struct efi_time *time)
+  * @scatter_gather_list:	pointer to array of physical pointers
+  * Returns:			status code
+  */
+-efi_status_t __efi_runtime EFIAPI efi_update_capsule_unsupported(
++static efi_status_t __efi_runtime EFIAPI efi_update_capsule_unsupported(
+ 			struct efi_capsule_header **capsule_header_array,
+ 			efi_uintn_t capsule_count,
+ 			u64 scatter_gather_list)
+@@ -484,7 +484,7 @@ efi_status_t __efi_runtime EFIAPI efi_update_capsule_unsupported(
+  * @reset_type:			type of reset needed for capsule update
+  * Returns:			status code
+  */
+-efi_status_t __efi_runtime EFIAPI efi_query_capsule_caps_unsupported(
++static efi_status_t __efi_runtime EFIAPI efi_query_capsule_caps_unsupported(
+ 			struct efi_capsule_header **capsule_header_array,
+ 			efi_uintn_t capsule_count,
+ 			u64 *maximum_capsule_size,
+-- 
+2.55.0
+

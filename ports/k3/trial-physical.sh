@@ -15,7 +15,13 @@ source /etc/os-release
 [[ $ID == "bianbu" ]]
 [[ -f $rootfs/.omarchy-k3-host-ready && ! -e $trial_dir/armed && ! -e /run/nextroot ]]
 [[ $(cat /sys/kernel/kexec_loaded) == "0" ]]
-[[ $(findmnt -no PARTUUID /boot) == "dea91215-8a70-4045-82b5-33296f8be0ac" ]]
+uuid_pattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+boot_partuuid=$(findmnt -no PARTUUID /boot)
+bianbu_partuuid=$(findmnt -no PARTUUID /)
+[[ $boot_partuuid =~ $uuid_pattern && $bianbu_partuuid =~ $uuid_pattern && $boot_partuuid != "$bianbu_partuuid" ]]
+# stage-host.sh records this allocation's layout; Arch's boot confirmation reads it.
+[[ $(sed -n 's/^BOOT_PARTUUID=//p' "$rootfs/etc/omarchy-k3-boot-layout") == "$boot_partuuid" ]]
+[[ $(sed -n 's/^BIANBU_PARTUUID=//p' "$rootfs/etc/omarchy-k3-boot-layout") == "$bianbu_partuuid" ]]
 boot_hash=$(sha256sum /boot/env_k3.txt)
 [[ ${boot_hash%% *} == "$stock_hash" ]]
 grep -q 'expired pid=.* mode=reboot' "$records/guard.log"
@@ -26,7 +32,11 @@ chroot "$rootfs" /usr/bin/systemctl --version
 
 install -d /usr/local/lib/omarchy-k3
 for program in host-init boot-guard; do
-  gcc -O2 -Wall -Wextra -Werror -static -march=rv64gc -mabi=lp64d \
+  defines=()
+  if [[ $program == "host-init" ]]; then
+    defines=(-DBOOT_DEVICE="\"/dev/disk/by-partuuid/$boot_partuuid\"")
+  fi
+  gcc -O2 -Wall -Wextra -Werror -static -march=rv64gc -mabi=lp64d "${defines[@]}" \
     "$port_dir/$program.c" -o "/usr/local/lib/omarchy-k3/$program.new"
   chmod 755 "/usr/local/lib/omarchy-k3/$program.new"
   mv -f "/usr/local/lib/omarchy-k3/$program.new" "/usr/local/lib/omarchy-k3/$program"

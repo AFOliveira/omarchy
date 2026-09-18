@@ -1,0 +1,44 @@
+# The AUR recipe (limine-mkinitcpio-hook 1.39.0-1), with the GraalVM native
+# image replaced by the same program on the system JRE: GraalVM has no RISC-V
+# build. Everything else - files, hooks, paths - is the upstream package.
+
+_pkgname=limine-entry-tool
+pkgname=limine-mkinitcpio-hook
+pkgver=1.39.0
+pkgrel=1
+pkgdesc="Install kernels for the Limine bootloader (JVM build)"
+arch=(riscv64)
+url="https://gitlab.com/Zesko/limine-entry-tool"
+license=(GPL-3.0-or-later)
+provides=(limine-entry-tool)
+conflicts=(limine-entry-tool)
+depends=(bash grep tar limine mkinitcpio efibootmgr java-runtime-headless java-runtime-common)
+optdepends=('kernel-modules-hook: Safely keeps kernel on upgrade failure'
+            'sbctl: Signs UEFI boot files for Secure Boot when enabled')
+makedepends=(git gradle jdk-openjdk)
+backup=(etc/limine-entry-tool.conf)
+options=(!debug !strip)
+source=("${_pkgname}::git+${url}.git#tag=${pkgver}"
+        limine-entry-tool.launcher)
+sha256sums=('SKIP'
+            '3da7e445a33fe2259e874a7c4ba7385eabb62b8efc8a2bfda12a25e119100a8d')
+
+build() {
+  cd "${_pkgname}"
+  export GRADLE_USER_HOME="$srcdir/gradle-home"
+  gradle --no-daemon --console=plain installDist
+}
+
+package() {
+  cd "${_pkgname}"
+  local src="install/arch-linux"
+  install -dm755 "$pkgdir/usr/share/doc/limine-entry-tool" "$pkgdir/etc/boot/hooks/pre.d" \
+    "$pkgdir/etc/boot/hooks/post.d" "$pkgdir/usr/lib/limine" "$pkgdir/usr/share/java/limine-entry-tool"
+  install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/limine-entry-tool/"
+  cp -a "$src/limine-entry-tool/etc" "$src/limine-entry-tool/usr" "$pkgdir/"
+  cp -a "$src/limine-mkinitcpio-hook/etc" "$src/limine-mkinitcpio-hook/usr" "$pkgdir/"
+  install -m644 build/install/"${_pkgname}"/lib/*.jar "$pkgdir/usr/share/java/limine-entry-tool/"
+  install -Dm755 "$srcdir/limine-entry-tool.launcher" "$pkgdir/usr/lib/limine/limine-entry-tool"
+  ln -sf /usr/bin/limine-reset-enroll "$pkgdir/etc/boot/hooks/pre.d/10-limine-reset-enroll"
+  ln -sf /usr/bin/limine-enroll-config "$pkgdir/etc/boot/hooks/post.d/90-limine-enroll-config"
+}

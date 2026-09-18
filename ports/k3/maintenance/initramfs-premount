@@ -1,0 +1,152 @@
+#!/bin/sh
+# Shrink the vendor root, create the Omarchy Btrfs partition and copy the
+# Omarchy root into it, with nothing mounted yet.
+#
+# Selected with omarchy.migrate=<step> on the kernel command line; the geometry
+# comes from the command line too, so the image does not go stale when the
+# partition table is rebuilt by a reflash.
+set -e
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+step=""
+p3end=""; p4start=""; p4end=""; p3uuid=""; fsblocks=""
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    omarchy.migrate=*)  step="${arg#omarchy.migrate=}" ;;
+    omarchy.p3end=*)    p3end="${arg#omarchy.p3end=}" ;;
+    omarchy.p4start=*)  p4start="${arg#omarchy.p4start=}" ;;
+    omarchy.p4end=*)    p4end="${arg#omarchy.p4end=}" ;;
+    omarchy.p3uuid=*)   p3uuid="${arg#omarchy.p3uuid=}" ;;
+    omarchy.fsblocks=*) fsblocks="${arg#omarchy.fsblocks=}" ;;
+  esac
+done
+[ -n "$step" ] || exit 0
+[ -n "$p3end" ] && [ -n "$p4start" ] && [ -n "$p4end" ] && [ -n "$p3uuid" ] && [ -n "$fsblocks" ] || exit 0
+
+disk=/dev/sda
+part2=/dev/sda2
+part3=/dev/sda3
+part4=/dev/sda4
+log=/run/omarchy-migrate.log
+
+say() {
+  echo "omarchy: $*" >> "$log"
+  echo "omarchy: $*" > /dev/ttyS0 2>/dev/null || true
+  echo "omarchy: $*" > /dev/console 2>/dev/null || true
+}
+run() {
+  say "\$ $*"
+  "$@" >> "$log" 2>&1
+  say "  -> exit $?"
+  tail -5 "$log" > /dev/ttyS0 2>/dev/null || true
+}
+
+# Put the ordinary boot file back first. Everything after this point can fail
+# without costing the board: the next restart is a normal one.
+disarm() {
+  mkdir -p /run/bootfs
+  if mount -t ext4 "$part2" /run/bootfs 2>/dev/null; then
+    cp /etc/omarchy-k3/env_k3.stock /run/bootfs/env_k3.txt
+    sync
+    umount /run/bootfs
+    say "restored the stock env_k3.txt; the next restart is an ordinary boot"
+    return 0
+  fi
+  say "COULD NOT RESTORE env_k3.txt"
+  return 1
+}
+
+# The log goes to the ext4 boot partition, which is the one filesystem this
+# image is certain to be able to mount; the FAT one needs a module that is not
+# always there this early.
+finish() {
+  sync
+  mkdir -p /run/bootfs
+  if mount -t ext4 "$part2" /run/bootfs 2>/dev/null; then
+    cp "$log" "/run/bootfs/omarchy-migrate-${step}.log" 2>/dev/null || true
+    sync
+    umount /run/bootfs
+  fi
+  say "rebooting"
+  sleep 3
+  echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+  echo b > /proc/sysrq-trigger 2>/dev/null || true
+  while true; do sleep 10; done
+}
+
+: > "$log"
+say "migration step ${step} starting"
+disarm || finish
+
+modprobe btrfs 2>/dev/null || true
+
+case "$step" in
+  recon)
+    run dumpe2fs -h "$part3"
+    run sgdisk -p "$disk"
+    ;;
+  all)
+    run e2fsck -fy "$part3"
+    say "shrinking $part3 to ${fsblocks} blocks"
+    if ! resize2fs "$part3" "$fsblocks" >> "$log" 2>&1; then
+      say "RESIZE FAILED; leaving the partition table alone"
+      finish
+    fi
+    blocks=$(dumpe2fs -h "$part3" 2>/dev/null | awk -F: '/Block count/ {print $2}' | tr -d ' ')
+    say "ext4 now holds ${blocks} blocks"
+    if [ "$blocks" -gt "$((p3end - 134143))" ]; then
+      say "REFUSING: the filesystem is larger than the planned partition"
+      finish
+    fi
+    run sgdisk "--backup=/run/gpt-backup.bin" "$disk"
+    run sgdisk -d 3 "$disk"
+    run sgdisk "-n" "3:134144:${p3end}" -t 3:0700 -u "3:${p3uuid}" -c 3:rootfs "$disk"
+    run sgdisk "-n" "4:${p4start}:${p4end}" -t 4:0700 -c 4:omarchy "$disk"
+    run sgdisk -p "$disk"
+    run partprobe "$disk"
+    sleep 3
+    if [ ! -b "$part4" ]; then
+      say "PARTITION MISSING after partprobe"
+      finish
+    fi
+    run mkfs.btrfs -f -L omarchy "$part4"
+    mkdir -p /run/newroot
+    mount "$part4" /run/newroot || finish
+    for sub in @ @home @log @pkg @snapshots; do
+      run btrfs subvolume create "/run/newroot/${sub}"
+    done
+    umount /run/newroot
+    mkdir -p /run/src
+    mount -o ro "$part3" /run/src || finish
+    src=/run/src/var/lib/omarchy-k3-baremetal/rootfs
+    if [ ! -f "$src/.omarchy-k3-rootfs" ]; then
+      say "the staged Omarchy root is missing"
+      umount /run/src
+      finish
+    fi
+    mount -o subvol=@,compress=zstd "$part4" /run/newroot || finish
+    mkdir -p /run/newroot/home /run/newroot/var/log /run/newroot/var/cache/pacman/pkg /run/newroot/.snapshots
+    mount -o subvol=@home,compress=zstd "$part4" /run/newroot/home
+    mount -o subvol=@log,compress=zstd "$part4" /run/newroot/var/log
+    mount -o subvol=@pkg,compress=zstd "$part4" /run/newroot/var/cache/pacman/pkg
+    mount -o subvol=@snapshots,compress=zstd "$part4" /run/newroot/.snapshots
+    say "copying the Omarchy root into the subvolumes"
+    rsync -aHAX --numeric-ids --exclude='/var/cache/pacman/pkg/*' "$src/" /run/newroot/ >> "$log" 2>&1 || true
+    say "rsync finished"
+    sync
+    df -h /run/newroot >> "$log" 2>&1
+    for mount in /run/newroot/.snapshots /run/newroot/var/cache/pacman/pkg \
+                 /run/newroot/var/log /run/newroot/home /run/newroot /run/src; do
+      umount "$mount" 2>/dev/null || umount -l "$mount" 2>/dev/null || true
+    done
+    say "COPY DONE"
+    ;;
+  *)
+    say "unknown step"
+    ;;
+esac
+finish

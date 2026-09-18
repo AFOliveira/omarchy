@@ -1,0 +1,31 @@
+From 4f4d3331c69dbd7306d62a9b686fb4d40f415ea4 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Thu, 29 Dec 2022 10:50:54 +0100
+Subject: [PATCH 07/40] efi_loader: use u16_strlen() in efi_var_mem_ins()
+
+Don't duplicate library functionality.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit f557cf08b974c359ad3c53a87297d19fe13ff4f0)
+---
+ lib/efi_loader/efi_var_mem.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/lib/efi_loader/efi_var_mem.c b/lib/efi_loader/efi_var_mem.c
+index 0bac594e..e1058e3c 100644
+--- a/lib/efi_loader/efi_var_mem.c
++++ b/lib/efi_loader/efi_var_mem.c
+@@ -146,9 +146,7 @@ efi_status_t __efi_runtime efi_var_mem_ins(
+ 
+ 	var = (struct efi_var_entry *)
+ 	      ((uintptr_t)efi_var_buf + efi_var_buf->length);
+-	for (var_name_len = 0; variable_name[var_name_len]; ++var_name_len)
+-		;
+-	++var_name_len;
++	var_name_len = u16_strlen(variable_name) + 1;
+ 	data = var->name + var_name_len;
+ 
+ 	if ((uintptr_t)data - (uintptr_t)efi_var_buf + size1 + size2 >
+-- 
+2.55.0
+

@@ -1,0 +1,14 @@
+# Runs after limine's own deploy hook (80-limine-efi-deploy), which registers the
+# boot option with efibootmgr, so the new option is on the ESP before any reboot.
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = limine
+Target = limine-mkinitcpio-hook
+Target = efibootmgr
+
+[Action]
+Description = Saving UEFI variables to U-Boot's store on the ESP...
+When = PostTransaction
+Exec = /usr/local/bin/omarchy-k3-efivars-sync

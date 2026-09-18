@@ -1,0 +1,142 @@
+From 6c621cec21d5b515f345f5d61428e0226d029cab Mon Sep 17 00:00:00 2001
+From: Masahisa Kojima <kojima.masahisa@socionext.com>
+Date: Tue, 2 Apr 2024 18:09:50 +0900
+Subject: [PATCH 18/40] efi_loader: fix append write behavior to non-existent
+ variable
+
+Current "variables" efi_selftest result is inconsistent
+between the U-Boot file storage and the tee-based StandaloneMM
+RPMB secure storage.
+
+U-Boot file storage implementation does not accept SetVariale
+call to non-existent variable with EFI_VARIABLE_APPEND_WRITE,
+it return EFI_NOT_FOUND.
+However it is accepted and new variable is created in EDK II
+StandaloneMM implementation if valid data and size are specified.
+If data size is 0, EFI_SUCCESS is returned.
+
+Since UEFI specification does not clearly describe the behavior
+of the append write to non-existent variable, let's update
+the U-Boot file storage implementation to get aligned with
+the EDK II reference implementation.
+
+Signed-off-by: Masahisa Kojima <kojima.masahisa@socionext.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Tested-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 584a2ada6e5e7752ad1af2fd54fa8d424a4da8d6)
+---
+ lib/efi_loader/efi_variable.c             | 26 +++++++++---
+ lib/efi_selftest/efi_selftest_variables.c | 48 ++++++++++++++++++++++-
+ 2 files changed, 66 insertions(+), 8 deletions(-)
+
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index be95ed44..bc2ddcab 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -283,11 +283,21 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		}
+ 		time = var->time;
+ 	} else {
+-		if (delete || append)
+-			/*
+-			 * Trying to delete or to update a non-existent
+-			 * variable.
+-			 */
++		/*
++		 * UEFI specification does not clearly describe the expected
++		 * behavior of append write with data size 0, we follow
++		 * the EDK II reference implementation.
++		 */
++		if (append && !data_size)
++			return EFI_SUCCESS;
++
++		/*
++		 * EFI_VARIABLE_APPEND_WRITE to non-existent variable is accepted
++		 * and new variable is created in EDK II reference implementation.
++		 * We follow it and only check the deletion here.
++		 */
++		if (delete)
++			/* Trying to delete a non-existent variable. */
+ 			return EFI_NOT_FOUND;
+ 	}
+ 
+@@ -330,7 +340,11 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		/* EFI_NOT_FOUND has been handled before */
+ 		attributes = var->attr;
+ 		ret = EFI_SUCCESS;
+-	} else if (append) {
++	} else if (append && var) {
++		/*
++		 * data is appended if EFI_VARIABLE_APPEND_WRITE is set and
++		 * variable exists.
++		 */
+ 		u16 *old_data = var->name;
+ 
+ 		for (; *old_data; ++old_data)
+diff --git a/lib/efi_selftest/efi_selftest_variables.c b/lib/efi_selftest/efi_selftest_variables.c
+index dc1d5c8f..98c6a910 100644
+--- a/lib/efi_selftest/efi_selftest_variables.c
++++ b/lib/efi_selftest/efi_selftest_variables.c
+@@ -131,13 +131,57 @@ static int execute(void)
+ 			    (unsigned int)len);
+ 	if (memcmp(data, v, len))
+ 		efi_st_todo("GetVariable returned wrong value\n");
+-	/* Append variable 2 */
++
++	/* Append variable 2, write to non-existent variable with datasize=0 */
++	ret = runtime->set_variable(u"efi_none", &guid_vendor1,
++				    EFI_VARIABLE_BOOTSERVICE_ACCESS |
++				    EFI_VARIABLE_APPEND_WRITE,
++				    0, v);
++	if (ret != EFI_SUCCESS) {
++		efi_st_error(
++			"SetVariable(APPEND_WRITE) with size 0 to non-existent variable returns wrong code\n");
++		return EFI_ST_FAILURE;
++	}
++	len = EFI_ST_MAX_DATA_SIZE;
++	ret = runtime->get_variable(u"efi_none", &guid_vendor1,
++				    &attr, &len, data);
++	if (ret != EFI_NOT_FOUND) {
++		efi_st_error("Variable must not be created\n");
++		return EFI_ST_FAILURE;
++	}
++	/* Append variable 2, write to non-existent variable with valid data size*/
+ 	ret = runtime->set_variable(u"efi_none", &guid_vendor1,
+ 				    EFI_VARIABLE_BOOTSERVICE_ACCESS |
+ 				    EFI_VARIABLE_APPEND_WRITE,
+ 				    15, v);
++	if (ret != EFI_SUCCESS) {
++		efi_st_error("SetVariable(APPEND_WRITE) with valid size and data to non-existent variable must be succcessful\n");
++		return EFI_ST_FAILURE;
++	}
++	len = EFI_ST_MAX_DATA_SIZE;
++	ret = runtime->get_variable(u"efi_none", &guid_vendor1,
++				    &attr, &len, data);
++	if (ret != EFI_SUCCESS) {
++		efi_st_error("GetVariable failed\n");
++		return EFI_ST_FAILURE;
++	}
++	if (len != 15)
++		efi_st_todo("GetVariable returned wrong length %u\n",
++			    (unsigned int)len);
++	if (memcmp(data, v, len))
++		efi_st_todo("GetVariable returned wrong value\n");
++	/* Delete variable efi_none */
++	ret = runtime->set_variable(u"efi_none", &guid_vendor1,
++				    0, 0, NULL);
++	if (ret != EFI_SUCCESS) {
++		efi_st_error("SetVariable failed\n");
++		return EFI_ST_FAILURE;
++	}
++	len = EFI_ST_MAX_DATA_SIZE;
++	ret = runtime->get_variable(u"efi_none", &guid_vendor1,
++				    &attr, &len, data);
+ 	if (ret != EFI_NOT_FOUND) {
+-		efi_st_error("SetVariable(APPEND_WRITE) with size 0 to non-existent variable returns wrong code\n");
++		efi_st_error("Variable was not deleted\n");
+ 		return EFI_ST_FAILURE;
+ 	}
+ 	/* Enumerate variables */
+-- 
+2.55.0
+

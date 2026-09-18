@@ -1,0 +1,275 @@
+From d6945067f89918570c4206d29f76d6df3b9ab44c Mon Sep 17 00:00:00 2001
+From: Michal Simek <michal.simek@amd.com>
+Date: Fri, 13 Mar 2026 12:20:37 +0100
+Subject: [PATCH 39/40] efi_loader: avoid superfluous variable store writes on
+ unchanged data
+
+Every SetVariable() call triggers efi_var_mem_ins() followed by
+efi_var_to_storage(), even when the variable value is not actually
+changing. This is unfriendly to flash-backed stores that suffer
+wear from unnecessary erase/write cycles.
+
+Add a change-detection path to efi_var_mem_ins(): when size2 == 0
+(i.e. not an append) and the caller passes a non-NULL changep flag,
+look up the existing variable and compare attributes, length, time
+and data byte-by-byte. If everything matches, set *changep = false
+and return EFI_SUCCESS without touching the variable buffer.
+
+Both efi_set_variable_int() and efi_set_variable_runtime() now
+check the flag and skip efi_var_mem_del() / efi_var_to_storage()
+when nothing changed.
+
+Introduce efi_memcmp_runtime() - a runtime-safe byte-by-byte memory
+comparison helper, following the same pattern as the existing
+efi_memcpy_runtime(). The standard memcmp() is not available after
+ExitBootServices() and calling it from Linux will crash.
+
+Tested-by: Heinrich Schuchardt <xypron.glpk@gmx.de>
+Reviewed-by: Heinrich Schuchardt <xypron.glpk@gmx.de>
+Signed-off-by: Michal Simek <michal.simek@amd.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 94c5c0835bccdb0763c25af7fdf72cdd2b9f7e5a)
+---
+ include/efi_loader.h            |  3 +++
+ include/efi_variable.h          |  8 +++++++-
+ lib/efi_loader/efi_runtime.c    | 24 ++++++++++++++++++++++++
+ lib/efi_loader/efi_var_common.c |  2 +-
+ lib/efi_loader/efi_var_mem.c    | 29 ++++++++++++++++++++++++++++-
+ lib/efi_loader/efi_variable.c   | 27 ++++++++++++++++++---------
+ 6 files changed, 81 insertions(+), 12 deletions(-)
+
+diff --git a/include/efi_loader.h b/include/efi_loader.h
+index c1144d4d..a34b5831 100644
+--- a/include/efi_loader.h
++++ b/include/efi_loader.h
+@@ -992,6 +992,9 @@ struct pkcs7_message *efi_parse_pkcs7_header(const void *buf,
+ /* runtime implementation of memcpy() */
+ void efi_memcpy_runtime(void *dest, const void *src, size_t n);
+ 
++/* runtime implementation of memcmp() */
++int efi_memcmp_runtime(const void *s1, const void *s2, size_t n);
++
+ /* commonly used helper function */
+ u16 *efi_create_indexed_name(u16 *buffer, size_t buffer_size, const char *name,
+ 			     unsigned int index);
+diff --git a/include/efi_variable.h b/include/efi_variable.h
+index fc1184e5..c3229c71 100644
+--- a/include/efi_variable.h
++++ b/include/efi_variable.h
+@@ -216,6 +216,11 @@ void efi_var_mem_del(struct efi_var_entry *var);
+  * The variable is appended without checking if a variable of the same name
+  * already exists. The two data buffers are concatenated.
+  *
++ * When @changep is non-NULL and @size2 is 0, the function compares the new
++ * value against an existing variable with the same name and vendor. If
++ * attributes and data are identical the insertion is skipped and *@changep
++ * is set to false, avoiding superfluous writes.
++ *
+  * @variable_name:	variable name
+  * @vendor:		GUID
+  * @attributes:		variable attributes
+@@ -224,13 +229,14 @@ void efi_var_mem_del(struct efi_var_entry *var);
+  * @size2:		size of the second data field
+  * @data2:		second data buffer
+  * @time:		time of authentication (as seconds since start of epoch)
++ * @changep:		pointer to change flag (may be NULL)
+  * Result:		status code
+  */
+ efi_status_t efi_var_mem_ins(const u16 *variable_name,
+ 			     const efi_guid_t *vendor, u32 attributes,
+ 			     const efi_uintn_t size1, const void *data1,
+ 			     const efi_uintn_t size2, const void *data2,
+-			     const u64 time);
++			     const u64 time, bool *changep);
+ 
+ /**
+  * efi_var_mem_free() - determine free memory for variables
+diff --git a/lib/efi_loader/efi_runtime.c b/lib/efi_loader/efi_runtime.c
+index 488f0d9e..58f9568a 100644
+--- a/lib/efi_loader/efi_runtime.c
++++ b/lib/efi_loader/efi_runtime.c
+@@ -207,6 +207,30 @@ void __efi_runtime efi_memcpy_runtime(void *dest, const void *src, size_t n)
+ 		*d++ = *s++;
+ }
+ 
++/**
++ * efi_memcmp_runtime() - compare memory areas
++ *
++ * At runtime memcmp() is not available.
++ *
++ * @s1:		first memory area
++ * @s2:		second memory area
++ * @n:		number of bytes to compare
++ * Return:	0 if equal, negative if s1 < s2, positive if s1 > s2
++ */
++int __efi_runtime efi_memcmp_runtime(const void *s1, const void *s2, size_t n)
++{
++	const u8 *pos1 = s1;
++	const u8 *pos2 = s2;
++
++	for (; n; --n) {
++		if (*pos1 != *pos2)
++			return *pos1 - *pos2;
++		++pos1;
++		++pos2;
++	}
++	return 0;
++}
++
+ /**
+  * efi_update_table_header_crc32() - Update crc32 in table header
+  *
+diff --git a/lib/efi_loader/efi_var_common.c b/lib/efi_loader/efi_var_common.c
+index 72d6a417..7017a583 100644
+--- a/lib/efi_loader/efi_var_common.c
++++ b/lib/efi_loader/efi_var_common.c
+@@ -525,7 +525,7 @@ efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
+ 			continue;
+ 		ret = efi_var_mem_ins(var->name, &var->guid, var->attr,
+ 				      var->length, data, 0, NULL,
+-				      var->time);
++				      var->time, NULL);
+ 		if (ret != EFI_SUCCESS)
+ 			log_err("Failed to set EFI variable %ls\n", var->name);
+ 	}
+diff --git a/lib/efi_loader/efi_var_mem.c b/lib/efi_loader/efi_var_mem.c
+index b30643a6..12b76073 100644
+--- a/lib/efi_loader/efi_var_mem.c
++++ b/lib/efi_loader/efi_var_mem.c
+@@ -158,12 +158,39 @@ efi_status_t __efi_runtime efi_var_mem_ins(
+ 				const efi_guid_t *vendor, u32 attributes,
+ 				const efi_uintn_t size1, const void *data1,
+ 				const efi_uintn_t size2, const void *data2,
+-				const u64 time)
++				const u64 time, bool *changep)
+ {
+ 	u16 *data;
+ 	struct efi_var_entry *var;
+ 	u32 var_name_len;
+ 
++	if (changep)
++		*changep = true;
++
++	/*
++	 * If this is not an append (size2 == 0), check whether the variable
++	 * already exists with identical attributes and data. When nothing
++	 * changed we can skip the write and avoid superfluous erases.
++	 */
++	if (!size2 && changep) {
++		struct efi_var_entry *old;
++
++		old = efi_var_mem_find(vendor, variable_name, NULL);
++		if (old && old->attr == attributes &&
++		    old->length == size1 && old->time == time) {
++			u16 *old_data;
++
++			for (old_data = old->name; *old_data; ++old_data)
++				;
++			++old_data;
++
++			if (!efi_memcmp_runtime(old_data, data1, size1)) {
++				*changep = false;
++				return EFI_SUCCESS;
++			}
++		}
++	}
++
+ 	var = (struct efi_var_entry *)
+ 	      ((uintptr_t)efi_var_buf + efi_var_buf->length);
+ 	var_name_len = u16_strlen(variable_name) + 1;
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 9e5c4c71..ca873f72 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -278,6 +278,7 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	struct efi_var_entry *var;
+ 	efi_uintn_t ret;
+ 	bool append, delete;
++	bool changed = false;
+ 	u64 time = 0;
+ 	enum efi_auth_var_type var_type;
+ 
+@@ -367,6 +368,7 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	if (delete) {
+ 		/* EFI_NOT_FOUND has been handled before */
+ 		attributes = var->attr;
++		changed = true;
+ 		ret = EFI_SUCCESS;
+ 	} else if (append && var) {
+ 		/*
+@@ -381,15 +383,19 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		ret = efi_var_mem_ins(variable_name, vendor,
+ 				      attributes & ~EFI_VARIABLE_APPEND_WRITE,
+ 				      var->length, old_data, data_size, data,
+-				      time);
++				      time, &changed);
+ 	} else {
+ 		ret = efi_var_mem_ins(variable_name, vendor, attributes,
+-				      data_size, data, 0, NULL, time);
++				      data_size, data, 0, NULL, time,
++				      &changed);
+ 	}
+ 
+ 	if (ret != EFI_SUCCESS)
+ 		return ret;
+ 
++	if (!changed)
++		return EFI_SUCCESS;
++
+ 	efi_var_mem_del(var);
+ 
+ 	if (var_type == EFI_AUTH_VAR_PK)
+@@ -397,10 +403,7 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	else
+ 		ret = EFI_SUCCESS;
+ 
+-	/*
+-	 * Write non-volatile EFI variables
+-	 * TODO: check if a value change has occured to avoid superfluous writes
+-	 */
++	/* Write non-volatile EFI variables to storage */
+ 	if (attributes & EFI_VARIABLE_NON_VOLATILE) {
+ 		if (IS_ENABLED(CONFIG_EFI_VARIABLE_NO_STORE))
+ 			return EFI_SUCCESS;
+@@ -499,6 +502,7 @@ efi_set_variable_runtime(u16 *variable_name, const efi_guid_t *vendor,
+ 	struct efi_var_entry *var;
+ 	efi_uintn_t ret;
+ 	bool append, delete;
++	bool changed = false;
+ 	u64 time = 0;
+ 
+ 	if (!IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE))
+@@ -550,6 +554,7 @@ efi_set_variable_runtime(u16 *variable_name, const efi_guid_t *vendor,
+ 	if (delete) {
+ 		/* EFI_NOT_FOUND has been handled before */
+ 		attributes = var->attr;
++		changed = true;
+ 		ret = EFI_SUCCESS;
+ 	} else if (append && var) {
+ 		u16 *old_data = (void *)((uintptr_t)var->name +
+@@ -557,15 +562,19 @@ efi_set_variable_runtime(u16 *variable_name, const efi_guid_t *vendor,
+ 
+ 		ret = efi_var_mem_ins(variable_name, vendor, attributes,
+ 				      var->length, old_data, data_size, data,
+-				      time);
++				      time, &changed);
+ 	} else {
+ 		ret = efi_var_mem_ins(variable_name, vendor, attributes,
+-				      data_size, data, 0, NULL, time);
++				      data_size, data, 0, NULL, time,
++				      &changed);
+ 	}
+ 
+ 	if (ret != EFI_SUCCESS)
+ 		return ret;
+-	/* We are always inserting new variables, get rid of the old copy */
++
++	if (!changed)
++		return EFI_SUCCESS;
++
+ 	efi_var_mem_del(var);
+ 
+ 	return EFI_SUCCESS;
+-- 
+2.55.0
+

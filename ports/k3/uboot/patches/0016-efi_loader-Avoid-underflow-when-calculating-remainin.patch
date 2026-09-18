@@ -1,0 +1,42 @@
+From b65cc4dd4893c0d9e6576f3c073c4a4061117207 Mon Sep 17 00:00:00 2001
+From: Alper Nebi Yasak <alpernebiyasak@gmail.com>
+Date: Sat, 8 Jul 2023 18:23:05 +0300
+Subject: [PATCH 16/40] efi_loader: Avoid underflow when calculating remaining
+ var store size
+
+The efi_var_mem_free() function calculates the available size for a new
+EFI variable by subtracting the occupied buffer size and the overhead
+for a new variable from the maximum buffer size set in Kconfig. This
+is then returned as QueryVariableInfo()'s RemainingVariableStorageSize
+output.
+
+This can underflow as the calculation is done in and processed as
+unsigned integer types. Check for underflow before doing the subtraction
+and return zero if there's no space.
+
+Fixes: f1f990a8c958 ("efi_loader: memory buffer for variables")
+Signed-off-by: Alper Nebi Yasak <alpernebiyasak@gmail.com>
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit d7fe913f23b1907ac6ccb1552151fbcaa89bcdb0)
+---
+ lib/efi_loader/efi_var_mem.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/lib/efi_loader/efi_var_mem.c b/lib/efi_loader/efi_var_mem.c
+index d6b65aed..5fa7dcb8 100644
+--- a/lib/efi_loader/efi_var_mem.c
++++ b/lib/efi_loader/efi_var_mem.c
+@@ -177,6 +177,10 @@ efi_status_t __efi_runtime efi_var_mem_ins(
+ 
+ u64 __efi_runtime efi_var_mem_free(void)
+ {
++	if (efi_var_buf->length + sizeof(struct efi_var_entry) >=
++	    EFI_VAR_BUF_SIZE)
++		return 0;
++
+ 	return EFI_VAR_BUF_SIZE - efi_var_buf->length -
+ 	       sizeof(struct efi_var_entry);
+ }
+-- 
+2.55.0
+

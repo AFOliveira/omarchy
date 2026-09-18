@@ -1,0 +1,38 @@
+Subject: [PATCH] spacemit: release the GPU from reset
+
+On a mainline kernel nothing deasserts the GPU's reset line unless the
+driver asks for it, as the mainline PowerVR driver does. SpacemiT's kernel
+does it outside the DDK. Take the optional reset of the GPU node and
+deassert it at init.
+---
+--- a/spacemit/spacemit_init.c
++++ b/spacemit/spacemit_init.c
+@@ -24,6 +24,7 @@
+ #include "syscommon.h"
+ #include <linux/clk-provider.h>
+ #include <linux/pm_runtime.h>
++#include <linux/reset.h>
+ #include <linux/pm_opp.h>
+ #include "rgxdevice.h"
+ 
+@@ -349,6 +350,20 @@
+ 		goto fail;
+ 	}
+ 
++	/*
++	 * Release the GPU from reset. SpacemiT's own kernel does this outside the
++	 * driver; a mainline kernel leaves the reset line to its consumer, as the
++	 * mainline PowerVR driver does.
++	 */
++	{
++		struct reset_control *rst = devm_reset_control_get_optional_exclusive(dev, NULL);
++
++		if (IS_ERR(rst))
++			dev_warn(dev, "GPU reset line unavailable: %ld\n", PTR_ERR(rst));
++		else
++			reset_control_deassert(rst);
++	}
++
+ 	clk_set_rate(platform->gpu_clk, RGX_ST_CORE_CLOCK_SPEED);
+ 
+ 	if (psRGXData && psRGXData->psRGXTimingInfo)

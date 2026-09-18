@@ -1,0 +1,10 @@
+#!/usr/bin/ash
+run_latehook() {
+  local subroot=/new_root/var/lib/omarchy-k3-baremetal/rootfs
+  if [ -f "${subroot}/.omarchy-k3-rootfs" ]; then
+    msg ":: Switching to the Omarchy root at /var/lib/omarchy-k3-baremetal/rootfs"
+    mount -o bind "${subroot}" /new_root
+  else
+    err "Omarchy root not found; continuing with the partition root"
+  fi
+}

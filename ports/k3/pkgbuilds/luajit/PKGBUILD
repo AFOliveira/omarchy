@@ -1,0 +1,32 @@
+pkgname=luajit
+pkgver=2.1.1786451769
+pkgrel=1.1
+pkgdesc='LuaJIT with the maintained PLCT RISC-V runtime'
+arch=('riscv64')
+url='https://github.com/plctlab/LuaJIT'
+license=('MIT')
+depends=('gcc-libs')
+options=('!debug' '!lto')
+_commit=2c509ee67e20772bce3a11ce8f53b6b14b4980bb
+source=("LuaJIT-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
+  'equality.lua')
+sha256sums=('70648decdfc3b36a79aa70193b13a022cd39e154157c2c033944149ac3fda8d4'
+  '4fab354b2ab6d9c75bee02762804823da02dc065a141aacfd681be216d51d9e0')
+
+build() {
+  cd "$srcdir/LuaJIT-$_commit"
+  make PREFIX=/usr MULTILIB=lib \
+    CCOPT='-O2 -fomit-frame-pointer -march=rv64gc -mabi=lp64d' \
+    XCFLAGS='-DLUAJIT_ENABLE_LUA52COMPAT'
+}
+
+check() {
+  cd "$srcdir/LuaJIT-$_commit"
+  src/luajit "$srcdir/equality.lua"
+}
+
+package() {
+  cd "$srcdir/LuaJIT-$_commit"
+  make install PREFIX=/usr MULTILIB=lib DESTDIR="$pkgdir"
+  install -Dm644 COPYRIGHT "$pkgdir/usr/share/licenses/$pkgname/COPYRIGHT"
+}

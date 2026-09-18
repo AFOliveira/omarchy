@@ -1,0 +1,40 @@
+From 492b00db66e478460a762e82e2ffc2a639259275 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Thu, 19 Jan 2023 14:49:33 +0100
+Subject: [PATCH 08/40] efi_loader: ensure that file ubootefi.var is created
+
+Currently file ubootefi.var is only created if the user sets a non-volatile
+EFI variable. If the file is missing, a warning is written.
+
+With the change PlatformLang is always persisted. So the file will exist on
+second boot.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 90c420509ed66ef4cb8453b7e388beb168c34a97)
+---
+ lib/efi_loader/efi_variable.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 503a33ed..7c32adf6 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -334,9 +334,11 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	else
+ 		ret = EFI_SUCCESS;
+ 
+-	/* Write non-volatile EFI variables to file */
+-	if (attributes & EFI_VARIABLE_NON_VOLATILE &&
+-	    ret == EFI_SUCCESS && efi_obj_list_initialized == EFI_SUCCESS)
++	/*
++	 * Write non-volatile EFI variables to file
++	 * TODO: check if a value change has occured to avoid superfluous writes
++	 */
++	if (attributes & EFI_VARIABLE_NON_VOLATILE)
+ 		efi_var_to_file();
+ 
+ 	return EFI_SUCCESS;
+-- 
+2.55.0
+

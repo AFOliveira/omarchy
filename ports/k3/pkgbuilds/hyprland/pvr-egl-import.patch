@@ -1,0 +1,22 @@
+diff --git a/src/protocols/LinuxDMABUF.cpp b/src/protocols/LinuxDMABUF.cpp
+index b4c4ae2..20443a1 100644
+--- a/src/protocols/LinuxDMABUF.cpp
++++ b/src/protocols/LinuxDMABUF.cpp
+@@ -497,6 +497,17 @@ CLinuxDMABufV1Protocol::CLinuxDMABufV1Protocol(const wl_interface* iface, const
+ 
+         m_formatTable = makeUnique<CDMABUFFormatTable>(eglTranche, tches);
+ 
++        // The proprietary PVR DRM driver intentionally has no PRIME fd-to-GEM
++        // import ioctl. Its EGL implementation imports DMA-BUFs directly.
++        // Keep verify() and the EGL texture import as the validation path.
++        const auto VERSION = drmGetVersion(rendererFD);
++        const bool PVR     = VERSION && VERSION->name && std::string_view{VERSION->name} == "pvr";
++        drmFreeVersion(VERSION);
++        if (PVR) {
++            LOGM(Log::DEBUG, "PVR: validating DMA-BUF imports through EGL");
++            return;
++        }
++
+         drmDevice* device = nullptr;
+         if (drmGetDeviceFromDevId(m_mainDevice, 0, &device) != 0) {
+             LOGM(Log::ERR, "failed to get drm dev, disabling linux dmabuf");

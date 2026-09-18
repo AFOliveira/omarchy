@@ -1,0 +1,198 @@
+# The mainline PowerVR driver (drivers/gpu/drm/imagination) of Linux 7.2.6,
+# rebuilt with the one change the SpacemiT K3 needs and that is in review
+# upstream: probing without a power domain, which the K3's boot loader leaves on
+# ("drm/imagination: support GPU on SpacemiT K3", July 2026). Everything else is
+# the kernel's own source; DKMS installs it over the in-tree module.
+#
+# The K3's GPU is a BXM-4-64 at revision 36.56.104.183, which has no mainline
+# firmware yet. Mesa's device tables list it with exactly the features, quirks
+# and enhancements of 36.52.104.182 (the TH1520's), so the port runs it with
+# that revision's firmware through the driver's gpuid parameter.
+
+pkgname=powervr-k3-dkms
+_kver=7.2.6
+pkgver=${_kver}
+pkgrel=3
+pkgdesc="Mainline PowerVR driver with SpacemiT K3 support (DKMS)"
+arch=(any)
+url="https://www.kernel.org/"
+license=("GPL-2.0-only OR MIT")
+depends=(dkms linux-firmware-other)
+source=("pvr_ccb.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_ccb.c?h=v${_kver}"
+        "pvr_ccb.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_ccb.h?h=v${_kver}"
+        "pvr_cccb.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_cccb.c?h=v${_kver}"
+        "pvr_cccb.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_cccb.h?h=v${_kver}"
+        "pvr_context.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_context.c?h=v${_kver}"
+        "pvr_context.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_context.h?h=v${_kver}"
+        "pvr_debugfs.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_debugfs.c?h=v${_kver}"
+        "pvr_debugfs.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_debugfs.h?h=v${_kver}"
+        "pvr_device.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_device.c?h=v${_kver}"
+        "pvr_device.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_device.h?h=v${_kver}"
+        "pvr_device_info.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_device_info.c?h=v${_kver}"
+        "pvr_device_info.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_device_info.h?h=v${_kver}"
+        "pvr_drv.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_drv.c?h=v${_kver}"
+        "pvr_drv.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_drv.h?h=v${_kver}"
+        "pvr_dump.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_dump.c?h=v${_kver}"
+        "pvr_dump.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_dump.h?h=v${_kver}"
+        "pvr_free_list.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_free_list.c?h=v${_kver}"
+        "pvr_free_list.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_free_list.h?h=v${_kver}"
+        "pvr_fw.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw.c?h=v${_kver}"
+        "pvr_fw.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw.h?h=v${_kver}"
+        "pvr_fw_info.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_info.h?h=v${_kver}"
+        "pvr_fw_meta.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_meta.c?h=v${_kver}"
+        "pvr_fw_meta.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_meta.h?h=v${_kver}"
+        "pvr_fw_mips.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_mips.c?h=v${_kver}"
+        "pvr_fw_mips.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_mips.h?h=v${_kver}"
+        "pvr_fw_riscv.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_riscv.c?h=v${_kver}"
+        "pvr_fw_startstop.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_startstop.c?h=v${_kver}"
+        "pvr_fw_startstop.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_startstop.h?h=v${_kver}"
+        "pvr_fw_trace.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_trace.c?h=v${_kver}"
+        "pvr_fw_trace.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_trace.h?h=v${_kver}"
+        "pvr_fw_util.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_fw_util.c?h=v${_kver}"
+        "pvr_gem.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_gem.c?h=v${_kver}"
+        "pvr_gem.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_gem.h?h=v${_kver}"
+        "pvr_hwrt.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_hwrt.c?h=v${_kver}"
+        "pvr_hwrt.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_hwrt.h?h=v${_kver}"
+        "pvr_job.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_job.c?h=v${_kver}"
+        "pvr_job.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_job.h?h=v${_kver}"
+        "pvr_mmu.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_mmu.c?h=v${_kver}"
+        "pvr_mmu.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_mmu.h?h=v${_kver}"
+        "pvr_power.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_power.c?h=v${_kver}"
+        "pvr_power.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_power.h?h=v${_kver}"
+        "pvr_queue.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_queue.c?h=v${_kver}"
+        "pvr_queue.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_queue.h?h=v${_kver}"
+        "pvr_rogue_cr_defs.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_cr_defs.h?h=v${_kver}"
+        "pvr_rogue_cr_defs_client.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_cr_defs_client.h?h=v${_kver}"
+        "pvr_rogue_defs.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_defs.h?h=v${_kver}"
+        "pvr_rogue_fwif.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif.h?h=v${_kver}"
+        "pvr_rogue_fwif_check.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_check.h?h=v${_kver}"
+        "pvr_rogue_fwif_client.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_client.h?h=v${_kver}"
+        "pvr_rogue_fwif_client_check.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_client_check.h?h=v${_kver}"
+        "pvr_rogue_fwif_common.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_common.h?h=v${_kver}"
+        "pvr_rogue_fwif_dev_info.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_dev_info.h?h=v${_kver}"
+        "pvr_rogue_fwif_resetframework.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_resetframework.h?h=v${_kver}"
+        "pvr_rogue_fwif_sf.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_sf.h?h=v${_kver}"
+        "pvr_rogue_fwif_shared.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_shared.h?h=v${_kver}"
+        "pvr_rogue_fwif_shared_check.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_shared_check.h?h=v${_kver}"
+        "pvr_rogue_fwif_stream.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_fwif_stream.h?h=v${_kver}"
+        "pvr_rogue_heap_config.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_heap_config.h?h=v${_kver}"
+        "pvr_rogue_meta.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_meta.h?h=v${_kver}"
+        "pvr_rogue_mips.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_mips.h?h=v${_kver}"
+        "pvr_rogue_mips_check.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_mips_check.h?h=v${_kver}"
+        "pvr_rogue_mmu_defs.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_mmu_defs.h?h=v${_kver}"
+        "pvr_rogue_riscv.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_rogue_riscv.h?h=v${_kver}"
+        "pvr_stream.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_stream.c?h=v${_kver}"
+        "pvr_stream.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_stream.h?h=v${_kver}"
+        "pvr_stream_defs.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_stream_defs.c?h=v${_kver}"
+        "pvr_stream_defs.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_stream_defs.h?h=v${_kver}"
+        "pvr_sync.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_sync.c?h=v${_kver}"
+        "pvr_sync.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_sync.h?h=v${_kver}"
+        "pvr_trace.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_trace.h?h=v${_kver}"
+        "pvr_trace_points.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_trace_points.c?h=v${_kver}"
+        "pvr_vm.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_vm.c?h=v${_kver}"
+        "pvr_vm.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_vm.h?h=v${_kver}"
+        "pvr_vm_mips.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_vm_mips.c?h=v${_kver}"
+        "pvr_vm_mips.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/gpu/drm/imagination/pvr_vm_mips.h?h=v${_kver}"
+        0001-drm-imagination-allow-probe-when-no-power-domains-are-described.patch
+        Makefile
+        dkms.conf)
+sha256sums=('da8fcc63cf8adfd2eaecc2f0fe72be749d7f1e7711ff99d3563cdd1c90d80e9b'
+            '6c28806c76b92c40a52bac5f2dc257e202afa965756171b7075efb76c2fa6d2f'
+            '34fec5973a97f04992ad69148f371ab774b805780450edd249ef051c1b754f5f'
+            '5de47a0e4d4502dee6d41647bde4d3c9a330b468b4d7cc40977097ea9c6b893f'
+            'ffadf504899263d8c20973ee5206250ffc275070fe43a23ebc500f565397fc53'
+            'd1185a8a859154c5511669b59c89e19467517e1ebf14ce78ddaee6eb3ddd3918'
+            '6c12fc933a7dfe6d1a7a22bc3218ac03abd80085fb8fccaf232ad1939d24deab'
+            '4598e070ea4c511afab23c1132e0390583795f9fdcfcfb2c90d4b1b4336872d4'
+            'dc5b3e0499eea76ec243204dca1de838e22f39d8b1daea14b50c85366ef361f8'
+            'f1b64893aa153280e5826ee45ef2e64f2ca38fadeb87c4a2e161974ad889eb83'
+            '8fa613f77f42c651135fa208a74c0d68ec01f827976bf895ef277139a0fc6ac2'
+            'aa4dc593df38efe9527938f692434d9d24b5cd9f3e8d65e8ffdc265023c626e0'
+            '17fc9315a18d84500833cdaa0d8b2f7859d0ee6cdf16aae35789a018f8b699ee'
+            'fd581fde855f8c0eac4b8f3078ea38836a47b2a8cf270d10c30819e3a479063b'
+            '811e08edd499328dd45e5d0de23d8ed49fe99887761f84a4652a06558e40ec5e'
+            'ff155c50530c507cc5fc0df5e78ffd6687f113168eabfdd3e346e90cc5796141'
+            '9679fad800f34bf2d3ac816c1add921d4f1ec7a162c3e89f4cbed47e8e092997'
+            'ec32777b45f7673a3cdc8de476125a24088a52cbc57275b24c3ae3b6764a5159'
+            'c55b994aa005f727f6708879162c83f86d8c35201f2cda036795cbd39470daea'
+            'bb38d16e0397b8b48606e6b5380a8ac327fd64a9bc5d038fd6671b0f689cdb06'
+            'd79454e2cb1e2dfc8e8a12ce6d455e6d18e7d9c0b33b31359ed913ee6fe187a6'
+            '631fde81e228fdd4e360ac9526bc29ee8d6e3679989896870d7e75f7c76d7031'
+            'f3641d42946259b6a61d699bfa15fde19192a61e573d80cf2bec73d3d4777c15'
+            '2e4a9a791a41d9f9e2d2bc713904e7fc3a081ea7e5e556002641c03f8e0ad6d0'
+            '89001df1ec8b9f0da7ea4e89e617356e2c1d43663d1a4573d3597292ef97c9ce'
+            '896516d6d8245f2ef310e781a46ff270ff2c2131883edabed30a62270b21725e'
+            '5c33d75b4101b012cc21ff47e6eb71dbc7187c881d1542e7f533c6ddb62d8130'
+            'fffc23073c44da01307bfae731e3f001e1f49ba6fdc9a01bbbb511529ce1aa7f'
+            'fcafbf8e86a3f0a54a613560e39a5b46ff10b2e7ee5fb8e50abb8f25c8344359'
+            'cef0ec4d095756db97ba2ec92275b0c1bc5b16cf52d7437b9fa4eb3e939b03c7'
+            'd871d443a5f8720609d4aa69d724cccb1cd1032eca7d9686282ebaa405e1ea2d'
+            '0846df19f5c23e9538dae8fd9af67592cca989c50623a0e4a10419f18a32273d'
+            'b58db32230d93c30b853b8127b923368a738e1cf37d2f9d09daa0e318d9d0a70'
+            '5f99a591785909bb0caae12914d0553d4861024ef2d733596b6a5424ed77a1e4'
+            'c56b322c6d737f4086ccb862670a0debaa0571e658f7131700a13a86621db31a'
+            'e6f0f54d39e1ae03dde1fd8926b129885ea635ea1fbdcbd82dadcbccaf1f8a0e'
+            'd315bc41ccfba8f1bab84288e8bf082c6a050a823fc040109dfff2afcb3fd859'
+            '0d8c2779ae70d621b8b7e0db6ea033e1f30c2876457baab26df48ef89e3986b6'
+            'bcad95ec0426c58a9b4fdd1c7b123ab929d8db22e14f3b286ab6eb3f55e0fb5b'
+            '96b7aae204436104c8540b22aaf3131f7cd77d24a016c061685cbae21dd794c3'
+            'c08cae6c590d93c4dab72c2be5036a07416d037284c8178b4589f9272e661cf2'
+            '2525659553a95e8987a7d9948c12ffa73ee3049a879c308a6a92fbdf5a12e58d'
+            '25032bc28ed3c75ced1183593ccbe36ffc9e8b93cf897f842d8b54bd062a0969'
+            '7421bd9524a485e729421fa1452e09d6687d7a34b092c2502a3c1271b0295b7c'
+            'db239d46ed0d3adf22ea8cb52fddf8583a1a3c6004c23f2a1c38ddcedacc5e13'
+            '7c4c6902f7e456694bd3d64608eae48cdfccc223750773f07648de712e2d4ced'
+            'ac934aafc4a129e9af197ebb1a9b9d49d3214ad12951a5aaa0140f9f68608457'
+            'f33aea3a53414d4e4e95abbe1754ac126ae44a44723a4ff46a22e33021ab88cd'
+            '3abfc8228e208f9d3dfa79b40f783e94ef5d68887e61270f5e6a2d698b8f4a71'
+            'a262f8781a34d8d60422cb1fd3eb05086a9ca664e89f5292c79936f792d5c8cc'
+            '979ae32fdc3c96e4b0ae38e3b288b4230a66d87b7aa07fb7d5f4d5f6fb8cdcce'
+            'd3d9c39a514a0b90dcd8756e9058e89e059fc51c19670766ed30d9d0cc4c84a5'
+            'b2eb0ef0f8aa7da5bb463034b7df74b185f757aa13eb62a254f9c0b0d11eded7'
+            '79f7428080af03b5c4dad8b9b8014dff948e4f0be15e8697ee9d24b930990edc'
+            'c84297ec46c7cbf3f15abf0407cfa78a654af32d902dd79495ae820244c0ad2e'
+            'bbaba75dcb161c554b17b3d696ea78717dd4e7af047522786ada1bd03176a076'
+            '76cec5527dd3515acd3e46e2628d9f0142ca3a2d2f4632b622cb6c51ff78756a'
+            '36f17282ef7f8ac9947d51ea33184e8fd9f8ec97e604e243df1e622422b6ad3d'
+            '85574b1ec29fa91a192a831b5506e029e029873f96727a274e4729991aa6286a'
+            'c2a89bd580c94506179c6dccc29dbd04f3bea1994b7788395058a040c69416db'
+            '120d7d8de9ae3ed530f6f44c74caef7c80aca34432b5493ab4af790af8d6255d'
+            '123701eb6a9bb2ce408e2f2da2ad8a52c654dac9c78c46ec64426bca9c5ea6d7'
+            '5795b711f9e196e3b98110b666d88754f21f7937505ea68d595ab5fd17b33e03'
+            '18ecbf64c1cc043f641ad6419f77ffbefbdf9e78dd7c826f8469201bb8cfcd10'
+            'df6f22a0ee91b0e2b04f7788a3c1586e932735d29ed388408d0470cf11aa797e'
+            '036cd6d4c7e01fc5c0ec2021d4ceaf7862b3fb2d7b204ecbaad04c0631817d81'
+            'd783237305701f552610969395de644c7db7e5de673e4d727a612774436165d9'
+            '89484cb9903c6a173008530a2de42ac39a78c959070afaaac9cb3b60c84449a7'
+            '26b8a06febae9535670b80b722a16031b8e2d79ae7b3c999d279d98172fdf42b'
+            'bbee9e32961b738d50574369c82307ec43373e066a449842aef7f5408d6575d5'
+            'ecda5f83740febc325589c5957c583b48841ba3374bba5881148c42cfb2c73bc'
+            '2845e2c68d9993395abec71d3fade537a4dc18d9541992915f91f711a1ab9359'
+            '005eff5adc1031a12772001b898e8f9c828ac6adc3df43fae081a566c45e61f6'
+            '8778f1195def444131d325a4d41ff3ad3c99e5bfd240d54072b65c5b3aff15b9'
+            'f9f41bb397a0ea3392dce2d9a34f4661a700c307bc143976f6b4d6d710ccf0b9'
+            '86cb8ee02f778fd0d2a8e9ab83f2ab6a86b906cd3e19096d7320a78d7983e53a'
+            'cab0717e50629853b307455c6cb14c8000ded2ec341e1d703115a063bc613f4a'
+            'cb767b93ec530f7c128441360042248bf1aef0b4b36a0e5213e72dd6bb2a5095')
+
+prepare() {
+  rm -rf build && mkdir build
+  local f
+  for f in *.c *.h; do cp -L "$f" build/; done
+  patch -d build -p1 < 0001-drm-imagination-allow-probe-when-no-power-domains-are-described.patch
+  # Out of tree, the trace header is found next to the sources (-I$(src) in the
+  # Makefile), not at its in-tree path relative to include/trace/.
+  sed -i 's|^#define TRACE_INCLUDE_PATH .*|#define TRACE_INCLUDE_PATH .|' build/pvr_trace.h
+}
+
+package() {
+  local dest="$pkgdir/usr/src/powervr-k3-$pkgver"
+  install -d "$dest"
+  install -m644 build/*.c build/*.h Makefile "$dest/"
+  sed "s/@PKGVER@/$pkgver/" dkms.conf > "$dest/dkms.conf"
+  # Run the K3's GPU (36.56.104.183) with the firmware of 36.52.104.182, which
+  # Mesa describes identically; only mainline kernels load this module.
+  install -Dm644 /dev/stdin "$pkgdir/usr/lib/modprobe.d/powervr-k3.conf" <<'EOF'
+options powervr gpuid=36.52.104.182 exp_hw_support=1
+EOF
+}

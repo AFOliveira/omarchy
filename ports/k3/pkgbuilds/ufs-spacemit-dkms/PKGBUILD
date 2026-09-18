@@ -1,0 +1,42 @@
+# SpacemiT's UFS host controller driver, for mainline kernels. Mainline Linux
+# supports the K3's clocks, resets, pinctrl, interrupts and Ethernet, but has no
+# driver for its UFS host, which is where this board's disk is. The source is
+# SpacemiT's own, from their kernel tree at the commit the port pins
+# (kernel.env), adapted to the 7.x UFS callbacks; DKMS rebuilds it for every
+# mainline kernel installed, as Arch does for out-of-tree modules.
+
+pkgname=ufs-spacemit-dkms
+_vendorcommit=4158237f35b8fd62ba198c1627e5a66e5a34c50f
+_kver=7.2.6
+pkgver=6.18.r${_vendorcommit::7}
+pkgrel=2
+pkgdesc="SpacemiT K3 UFS host controller driver for mainline kernels (DKMS)"
+arch=(any)
+url="https://github.com/spacemit-com/linux-6.18"
+license=(GPL-2.0-only)
+depends=(dkms)
+source=("ufs-spacemit.c::https://raw.githubusercontent.com/spacemit-com/linux-6.18/${_vendorcommit}/drivers/ufs/host/ufs-spacemit.c"
+        "ufs-spacemit.h::https://raw.githubusercontent.com/spacemit-com/linux-6.18/${_vendorcommit}/drivers/ufs/host/ufs-spacemit.h"
+        "ufshcd-pltfrm.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/ufs/host/ufshcd-pltfrm.h?h=v${_kver}"
+        ufs-spacemit-linux-7.2.patch
+        Makefile
+        dkms.conf)
+sha256sums=('0234d9a1accb2bb898d520d9aa53ddc3bcaec14007a1bab0bd462e06b288a190'
+            '8e96bb2ffd4581de577d6c315541725e8baf2c9960da32131b6e9a2b18c6106a'
+            'a74af48418a97a136eeb23d9ad300648671ce85f8a0732dbd9afea1bb33d4a7c'
+            'facdf4b3d8892f89dda4e66d1176763196e175e7ae0404389d829015e87dea5d'
+            'e3c1c449140f259c027e668f048ef4f161e768a6420e35766cc462ae666065fe'
+            'edb91ee84c478ce7222eccb0671c79e6e5c044f8acd7bfa7dcfe343cfc671758')
+
+prepare() {
+  # makepkg links the sources in, and patch will not work through a link
+  cp -L ufs-spacemit.c ufs-spacemit-7.2.c
+  patch ufs-spacemit-7.2.c < ufs-spacemit-linux-7.2.patch
+}
+
+package() {
+  local dest="$pkgdir/usr/src/ufs-spacemit-$pkgver"
+  install -Dm644 ufs-spacemit-7.2.c "$dest/ufs-spacemit.c"
+  install -Dm644 -t "$dest" ufs-spacemit.h ufshcd-pltfrm.h Makefile
+  sed "s/@PKGVER@/$pkgver/" dkms.conf > "$dest/dkms.conf"
+}

@@ -1,0 +1,31 @@
+From b1481022da67859605b05c02e972b6cbbde20567 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Thu, 18 Apr 2024 04:32:02 +0200
+Subject: [PATCH 25/40] efi_loader: typo mstching
+
+%s/mstching/matching/
+
+Reported-by: E Shattow <lucent@gmail.com>
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 2608015921f61425f09e3a413f22be6c155a13a7)
+---
+ lib/efi_loader/efi_var_common.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/efi_var_common.c b/lib/efi_loader/efi_var_common.c
+index ac93c0e1..ba0b64e8 100644
+--- a/lib/efi_loader/efi_var_common.c
++++ b/lib/efi_loader/efi_var_common.c
+@@ -420,7 +420,7 @@ void *efi_get_var(const u16 *name, const efi_guid_t *vendor, efi_uintn_t *size)
+ }
+ 
+ /**
+- * efi_var_collect() - Copy EFI variables mstching attributes mask
++ * efi_var_collect() - Copy EFI variables matching attributes mask
+  *
+  * @bufp:	buffer containing variable collection
+  * @lenp:	buffer length
+-- 
+2.55.0
+

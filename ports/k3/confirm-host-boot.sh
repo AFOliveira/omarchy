@@ -49,6 +49,11 @@ for (( attempt = 0; attempt < 90; attempt++ )); do
 done
 (( attempt < 90 ))
 
+uuid_pattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+boot_partuuid=$(sed -n 's/^BOOT_PARTUUID=//p' /etc/omarchy-k3-boot-layout)
+bianbu_partuuid=$(sed -n 's/^BIANBU_PARTUUID=//p' /etc/omarchy-k3-boot-layout)
+[[ $boot_partuuid =~ $uuid_pattern && $bianbu_partuuid =~ $uuid_pattern ]]
+
 recovery_mount=/run/omarchy-k3-confirm-root
 mounted_boot=0
 mounted_recovery=0
@@ -59,13 +64,13 @@ cleanup() {
 trap cleanup EXIT
 install -d -m700 "$recovery_mount"
 ! mountpoint -q "$recovery_mount"
-mount /dev/disk/by-partuuid/7d6ad53b-30a7-4a45-a65b-b9340c0567e5 "$recovery_mount"
+mount "/dev/disk/by-partuuid/$bianbu_partuuid" "$recovery_mount"
 mounted_recovery=1
 if ! mountpoint -q /boot; then
-  mount /dev/disk/by-partuuid/dea91215-8a70-4045-82b5-33296f8be0ac /boot
+  mount "/dev/disk/by-partuuid/$boot_partuuid" /boot
   mounted_boot=1
 fi
-[[ $(findmnt -no PARTUUID /boot) == "dea91215-8a70-4045-82b5-33296f8be0ac" ]]
+[[ $(findmnt -no PARTUUID /boot) == "$boot_partuuid" ]]
 sha256sum -c "$recovery_mount/var/lib/omarchy-k3-boot-trials/physical-trial-kernel-sha256"
 
 python3 - "$recovery_mount" <<'PY'

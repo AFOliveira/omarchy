@@ -1,0 +1,15 @@
+[Unit]
+Description=Save UEFI variables changed from Linux to U-Boot's store on the ESP
+RequiresMountsFor=/boot
+ConditionPathExists=/sys/firmware/efi/efivars/VarToFile-b2ac5fc9-92b7-4acd-aeac-11e818c3130c
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/omarchy-k3-efivars-sync
+# The stop side runs at shutdown, before /boot is unmounted, and catches changes
+# made by hand with efibootmgr since the last package transaction.
+ExecStop=/usr/local/bin/omarchy-k3-efivars-sync
+
+[Install]
+WantedBy=multi-user.target

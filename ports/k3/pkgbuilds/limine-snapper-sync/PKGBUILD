@@ -1,0 +1,37 @@
+# The AUR recipe (limine-snapper-sync 1.31.0-1), with the GraalVM native image
+# replaced by the same program on the system JRE: GraalVM has no RISC-V build.
+
+pkgname=limine-snapper-sync
+pkgver=1.31.0
+pkgrel=1
+pkgdesc="Automatically synchronize Limine boot entries with Snapper snapshots (JVM build)"
+arch=(riscv64)
+url="https://gitlab.com/Zesko/limine-snapper-sync"
+license=(GPL-3.0-or-later)
+depends=(bash limine snapper btrfs-progs libnotify java-runtime-headless java-runtime-common)
+optdepends=('limine-mkinitcpio-hook: Automates kernel installation/removal and Limine boot entry management.')
+conflicts=(limine-snapper-cli limine-snapper-sync-git)
+makedepends=(git gradle jdk-openjdk)
+backup=(etc/limine-snapper-sync.conf)
+options=(!debug !strip)
+source=("${pkgname}::git+${url}.git#tag=${pkgver}"
+        limine-snapper-sync.launcher)
+sha256sums=('SKIP'
+            'f90a522cc65018b1109f967d1b0371478e015b5cc5fb84ce2e02dbe1718599b4')
+
+build() {
+  cd "${pkgname}"
+  export GRADLE_USER_HOME="$srcdir/gradle-home"
+  gradle --no-daemon --console=plain installDist
+}
+
+package() {
+  cd "${pkgname}"
+  local src="install/arch-linux"
+  install -dm755 "$pkgdir/usr/share/doc/limine-snapper-sync" "$pkgdir/etc/boot/hooks/pre.d" \
+    "$pkgdir/etc/boot/hooks/post.d" "$pkgdir/usr/lib/limine" "$pkgdir/usr/share/java/limine-snapper-sync"
+  install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/limine-snapper-sync/"
+  cp -a "$src/etc" "$src/usr" "$pkgdir/"
+  install -m644 build/install/"${pkgname}"/lib/*.jar "$pkgdir/usr/share/java/limine-snapper-sync/"
+  install -Dm755 "$srcdir/limine-snapper-sync.launcher" "$pkgdir/usr/lib/limine/limine-snapper-sync"
+}

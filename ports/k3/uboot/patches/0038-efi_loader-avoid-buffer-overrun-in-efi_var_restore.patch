@@ -1,0 +1,35 @@
+From cf51cf21bbe0e7e7cad731295ad6336e297ea219 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Wed, 11 Mar 2026 18:30:33 +0100
+Subject: [PATCH 38/40] efi_loader: avoid buffer overrun in efi_var_restore()
+
+The value of buf->length comes from outside U-Boot and may be incorrect.
+We must avoid to overrun our internal buffer for excessive values.
+
+If buf->length is shorter than the variable file header, the variable
+file is invalid.
+
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Tested-by: Michal Simek <michal.simek@amd.com>
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit a9080e600c214bbff331f95136aa26e7cfbe3375)
+---
+ lib/efi_loader/efi_var_common.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/lib/efi_loader/efi_var_common.c b/lib/efi_loader/efi_var_common.c
+index 8ed4632a..72d6a417 100644
+--- a/lib/efi_loader/efi_var_common.c
++++ b/lib/efi_loader/efi_var_common.c
+@@ -496,6 +496,8 @@ efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
+ 	efi_status_t ret;
+ 
+ 	if (buf->reserved || buf->magic != EFI_VAR_FILE_MAGIC ||
++	    buf->length > EFI_VAR_BUF_SIZE ||
++	    buf->length < sizeof(struct efi_var_file) ||
+ 	    buf->crc32 != crc32(0, (u8 *)buf->var,
+ 				buf->length - sizeof(struct efi_var_file))) {
+ 		log_err("Invalid EFI variables file\n");
+-- 
+2.55.0
+

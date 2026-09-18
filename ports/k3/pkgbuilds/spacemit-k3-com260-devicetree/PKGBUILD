@@ -1,0 +1,60 @@
+# The mainline device tree of the SpacemiT K3 CoM260 as this cloud board has it
+# (mainline k3-com260.dtsi plus the UFS host and the assigned MAC address), and
+# the pacman hook that hands it to every mainline kernel as a systemd-stub
+# addon. SpacemiT's own kernel keeps the vendor tree U-Boot passes.
+
+pkgname=spacemit-k3-com260-devicetree
+pkgver=7.2.6
+pkgrel=5
+pkgdesc="Mainline device tree for the SpacemiT K3 CoM260, as systemd-stub addons for mainline kernels"
+arch=(riscv64)
+url="https://www.kernel.org/"
+license=(GPL-2.0-only)
+depends=(systemd-ukify)
+makedepends=(dtc)
+source=("k3-com260.dtsi::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/arch/riscv/boot/dts/spacemit/k3-com260.dtsi?h=v${pkgver}"
+        "k3-pinctrl.dtsi::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/arch/riscv/boot/dts/spacemit/k3-pinctrl.dtsi?h=v${pkgver}"
+        "k3.dtsi::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/arch/riscv/boot/dts/spacemit/k3.dtsi?h=v${pkgver}"
+        "spacemit,k3-clocks.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/include/dt-bindings/clock/spacemit,k3-clocks.h?h=v${pkgver}"
+        "gpio.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/include/dt-bindings/gpio/gpio.h?h=v${pkgver}"
+        "irq.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/include/dt-bindings/interrupt-controller/irq.h?h=v${pkgver}"
+        "spacemit,k3-resets.h::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/include/dt-bindings/reset/spacemit,k3-resets.h?h=v${pkgver}"
+        k3-com260-cloud.dts
+        spacemit-k3-dtb-addons
+        90-spacemit-k3-dtb-addons.hook)
+sha256sums=('ce2a4283323591d91ef9ffd49b0d6f3f680be6fb648e836f7f5e758dcb06db32'
+            '00cfe23ec78e04602eed84cb54c9b7a48b90376ad441f938ac32a8542af35866'
+            'ec50da23043df6b6aceac3dfe121cd56227bd98142a15513db0af38ccf564bdf'
+            '195f5a53612b9aa48fa7800502259294e8e77327ab66b0982a08727efd0440e2'
+            '5423b3866877ead0920ec978b5b072f06087443033a72445b39faed8f288ddc1'
+            '392400a309a54ea5b1a2ac2e52773d3ab68e07323109b9aed88a69fedc74e082'
+            'aebbb963897e11120cad2f1e7f354b4b0f3e98c702b7dfc8089845bdfa6053a2'
+            '77f19987c84c573a5582a052720e6c6013f4a6646cd871a185b1e5997ef91023'
+            '4eee325df9fa1e13662f57dfb200320826b2824472ceeed6270d0cda372a6763'
+            'eb4bafd04e9ed61661f6bb483356bb5b0fbab9d6a1c0501ffbc049e074cd5ffd')
+
+prepare() {
+  rm -rf build
+  install -Dm644 k3-com260.dtsi build/arch/riscv/boot/dts/spacemit/k3-com260.dtsi
+  install -Dm644 k3-pinctrl.dtsi build/arch/riscv/boot/dts/spacemit/k3-pinctrl.dtsi
+  install -Dm644 k3.dtsi build/arch/riscv/boot/dts/spacemit/k3.dtsi
+  install -Dm644 spacemit,k3-clocks.h build/include/dt-bindings/clock/spacemit,k3-clocks.h
+  install -Dm644 gpio.h build/include/dt-bindings/gpio/gpio.h
+  install -Dm644 irq.h build/include/dt-bindings/interrupt-controller/irq.h
+  install -Dm644 spacemit,k3-resets.h build/include/dt-bindings/reset/spacemit,k3-resets.h
+  install -Dm644 k3-com260-cloud.dts build/arch/riscv/boot/dts/spacemit/k3-com260-cloud.dts
+}
+
+build() {
+  cd build
+  cpp -nostdinc -Iinclude -Iarch/riscv/boot/dts/spacemit -undef -x assembler-with-cpp -D__DTS__ \
+    arch/riscv/boot/dts/spacemit/k3-com260-cloud.dts > k3-com260-cloud.dts.pre
+  dtc -I dts -O dtb -o k3-com260-cloud.dtb k3-com260-cloud.dts.pre
+}
+
+package() {
+  install -Dm644 build/k3-com260-cloud.dtb "$pkgdir/usr/share/spacemit-k3-com260/k3-com260-cloud.dtb"
+  install -Dm644 k3-com260-cloud.dts "$pkgdir/usr/share/spacemit-k3-com260/k3-com260-cloud.dts"
+  install -Dm755 spacemit-k3-dtb-addons "$pkgdir/usr/share/libalpm/scripts/spacemit-k3-dtb-addons"
+  install -Dm644 90-spacemit-k3-dtb-addons.hook "$pkgdir/usr/share/libalpm/hooks/90-spacemit-k3-dtb-addons.hook"
+}

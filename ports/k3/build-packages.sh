@@ -4,7 +4,7 @@ set -euo pipefail
 
 port_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if (( EUID == 0 )) && [[ $(uname -m) == "riscv64" && -f /.omarchy-k3-rootfs ]] &&
-  [[ $(findmnt -no FSROOT /) == "/var/lib/omarchy-k3-baremetal/rootfs" ]]; then
+  [[ $(findmnt -no FSROOT /) == "/var/lib/omarchy-k3-baremetal/rootfs" || $(findmnt -no FSROOT /) == "/@" ]]; then
   exec /bin/bash "$port_dir/build-native-packages.sh" "$@"
 fi
 rootfs=${K3_ROOTFS_DIR:-/var/lib/machines/omarchy-k3}

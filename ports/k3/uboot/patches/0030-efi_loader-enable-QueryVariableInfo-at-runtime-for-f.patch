@@ -1,0 +1,150 @@
+From b6ddcbda55cb6cde4f86a89ed0700e4152dd058c Mon Sep 17 00:00:00 2001
+From: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Date: Thu, 25 Apr 2024 08:18:19 +0300
+Subject: [PATCH 30/40] efi_loader: enable QueryVariableInfo at runtime for
+ file backed variables
+
+Since commit c28d32f946f0 ("efi_loader: conditionally enable SetvariableRT")
+we are enabling the last bits of missing runtime services.
+Add support for QueryVariableInfo which we already support at boottime
+and we just need to mark some fucntions available at runtime and move
+some checks around.
+
+It's worth noting that pointer checks for maxmimum and remaining
+variable storage aren't when we store variables on the RPMB, since the
+Secure World backend is already performing them.
+
+Signed-off-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 9677192c145f2144592892f13de0e2069bcdf4ba)
+---
+ lib/efi_loader/efi_runtime.c                  |  4 +++
+ lib/efi_loader/efi_var_common.c               |  6 -----
+ lib/efi_loader/efi_variable.c                 | 25 ++++++++++++++-----
+ lib/efi_loader/efi_variable_tee.c             |  5 ++++
+ .../efi_selftest_variables_runtime.c          | 14 ++++++++---
+ 5 files changed, 39 insertions(+), 15 deletions(-)
+
+diff --git a/lib/efi_loader/efi_runtime.c b/lib/efi_loader/efi_runtime.c
+index b8b94972..488f0d9e 100644
+--- a/lib/efi_loader/efi_runtime.c
++++ b/lib/efi_loader/efi_runtime.c
+@@ -129,6 +129,10 @@ efi_status_t efi_init_runtime_supported(void)
+ 				EFI_RT_SUPPORTED_SET_VIRTUAL_ADDRESS_MAP |
+ 				EFI_RT_SUPPORTED_CONVERT_POINTER;
+ 
++	if (IS_ENABLED(CONFIG_EFI_VARIABLE_FILE_STORE))
++		rt_table->runtime_services_supported |=
++			EFI_RT_SUPPORTED_QUERY_VARIABLE_INFO;
++
+ 	if (IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE)) {
+ 		u8 s = 0;
+ 
+diff --git a/lib/efi_loader/efi_var_common.c b/lib/efi_loader/efi_var_common.c
+index 24d48d65..fa1f90e0 100644
+--- a/lib/efi_loader/efi_var_common.c
++++ b/lib/efi_loader/efi_var_common.c
+@@ -1,4 +1,3 @@
+-// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * UEFI runtime variable services
+  *
+@@ -164,11 +163,6 @@ efi_status_t EFIAPI efi_query_variable_info(
+ 	EFI_ENTRY("%x %p %p %p", attributes, maximum_variable_storage_size,
+ 		  remaining_variable_storage_size, maximum_variable_size);
+ 
+-	if (!maximum_variable_storage_size ||
+-	    !remaining_variable_storage_size ||
+-	    !maximum_variable_size)
+-		return EFI_EXIT(EFI_INVALID_PARAMETER);
+-
+ 	ret = efi_query_variable_info_int(attributes,
+ 					  maximum_variable_storage_size,
+ 					  remaining_variable_storage_size,
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index a5a78b0a..5a960738 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -407,12 +407,15 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	return EFI_SUCCESS;
+ }
+ 
+-efi_status_t efi_query_variable_info_int(u32 attributes,
+-					 u64 *maximum_variable_storage_size,
+-					 u64 *remaining_variable_storage_size,
+-					 u64 *maximum_variable_size)
++efi_status_t __efi_runtime
++efi_query_variable_info_int(u32 attributes,
++			    u64 *maximum_variable_storage_size,
++			    u64 *remaining_variable_storage_size,
++			    u64 *maximum_variable_size)
+ {
+-	if (attributes == 0)
++	if (!maximum_variable_storage_size ||
++	    !remaining_variable_storage_size ||
++	    !maximum_variable_size || !attributes)
+ 		return EFI_INVALID_PARAMETER;
+ 
+ 	/* EFI_VARIABLE_AUTHENTICATED_WRITE_ACCESS is deprecated */
+@@ -461,7 +464,17 @@ static efi_status_t __efi_runtime EFIAPI efi_query_variable_info_runtime(
+ 			u64 *remaining_variable_storage_size,
+ 			u64 *maximum_variable_size)
+ {
+-	return EFI_UNSUPPORTED;
++	if (!(attributes & EFI_VARIABLE_RUNTIME_ACCESS))
++		return EFI_INVALID_PARAMETER;
++	if ((attributes & (EFI_VARIABLE_AUTHENTICATED_WRITE_ACCESS |
++			   EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS |
++			   EFI_VARIABLE_ENHANCED_AUTHENTICATED_ACCESS)))
++		return EFI_UNSUPPORTED;
++
++	return efi_query_variable_info_int(attributes,
++					   maximum_variable_storage_size,
++					   remaining_variable_storage_size,
++					   maximum_variable_size);
+ }
+ 
+ /**
+diff --git a/lib/efi_loader/efi_variable_tee.c b/lib/efi_loader/efi_variable_tee.c
+index b9975b9f..23d6bf53 100644
+--- a/lib/efi_loader/efi_variable_tee.c
++++ b/lib/efi_loader/efi_variable_tee.c
+@@ -614,6 +614,11 @@ efi_status_t efi_query_variable_info_int(u32 attributes,
+ 	efi_status_t ret;
+ 	u8 *comm_buf;
+ 
++	if (!max_variable_storage_size ||
++	    !remain_variable_storage_size ||
++	    !max_variable_size || !attributes)
++		return EFI_INVALID_PARAMETER;
++
+ 	payload_size = sizeof(*mm_query_info);
+ 	comm_buf = setup_mm_hdr((void **)&mm_query_info, payload_size,
+ 				SMM_VARIABLE_FUNCTION_QUERY_VARIABLE_INFO,
+diff --git a/lib/efi_selftest/efi_selftest_variables_runtime.c b/lib/efi_selftest/efi_selftest_variables_runtime.c
+index 986924b8..a9560c64 100644
+--- a/lib/efi_selftest/efi_selftest_variables_runtime.c
++++ b/lib/efi_selftest/efi_selftest_variables_runtime.c
+@@ -53,9 +53,17 @@ static int execute(void)
+ 	ret = runtime->query_variable_info(EFI_VARIABLE_BOOTSERVICE_ACCESS,
+ 					   &max_storage, &rem_storage,
+ 					   &max_size);
+-	if (ret != EFI_UNSUPPORTED) {
+-		efi_st_error("QueryVariableInfo failed\n");
+-		return EFI_ST_FAILURE;
++
++	if (IS_ENABLED(CONFIG_EFI_VARIABLE_FILE_STORE)) {
++		if (ret != EFI_SUCCESS) {
++			efi_st_error("QueryVariableInfo failed\n");
++			return EFI_ST_FAILURE;
++		}
++	} else {
++		if (ret != EFI_UNSUPPORTED) {
++			efi_st_error("QueryVariableInfo failed\n");
++			return EFI_ST_FAILURE;
++		}
+ 	}
+ 
+ 	ret = runtime->set_variable(u"efi_st_var0", &guid_vendor0,
+-- 
+2.55.0
+

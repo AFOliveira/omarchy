@@ -1,0 +1,30 @@
+From 789282665c71d75c4e0bf149fadc8bc2a5e79fe7 Mon Sep 17 00:00:00 2001
+From: Nell <xianbin.zhu@spacemit.com>
+Date: Thu, 9 Jul 2026 19:14:18 +0800
+Subject: [PATCH 42/44] k3:dtsi: power on the power-switch of GPU/LCD0/LCD1 by
+ default
+
+Change-Id: I56d27ffdd07d6962c6573a458904b64a91416cda
+Signed-off-by: Nell <xianbin.zhu@spacemit.com>
+(cherry picked from commit 775d425c89d43fc4391f367c5f4d016e38f69895)
+---
+ arch/riscv/dts/k3.dtsi | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/riscv/dts/k3.dtsi b/arch/riscv/dts/k3.dtsi
+index 25136871..7102d1ec 100644
+--- a/arch/riscv/dts/k3.dtsi
++++ b/arch/riscv/dts/k3.dtsi
+@@ -270,6 +270,9 @@
+ 			compatible = "spacemit,k3-pm-domain";
+ 			reg = <0x0 0xd4282800 0x0 0x400>;
+ 			#power-domain-cells = <1>;
++			spacemit,default-on = <K3_PMU_GPU_PWR_DOMAIN
++					       K3_PMU_LCD0_PWR_DOMAIN
++					       K3_PMU_LCD1_PWR_DOMAIN>;
+                 };
+ 
+ 		uart0: uart@d4017000 {
+-- 
+2.55.0
+

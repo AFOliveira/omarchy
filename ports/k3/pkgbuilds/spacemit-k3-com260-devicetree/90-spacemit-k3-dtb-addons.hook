@@ -1,0 +1,17 @@
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/vmlinuz
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = spacemit-k3-com260-devicetree
+
+[Action]
+Description = Updating the K3 device tree addons for mainline kernels...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/spacemit-k3-dtb-addons

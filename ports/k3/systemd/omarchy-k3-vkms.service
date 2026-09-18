@@ -1,0 +1,19 @@
+[Unit]
+Description=Virtual KMS device for the desktop on mainline kernels
+# SpacemiT's kernel has its own display driver and no vkms. Arch's kernel has no
+# driver for the K3 display, and Hyprland's DRM backend needs a KMS device to
+# start: vkms is that device, the GPU (pvrsrvkm) renders, and the cloud viewer
+# shows Hyprland's headless K3-CLOUD output (omarchy-k3-output).
+ConditionPathExistsGlob=/usr/lib/modules/%v/kernel/drivers/gpu/drm/vkms/vkms.ko*
+# Nothing needs it before the desktop, which starts after plymouth has quit, so
+# plymouth's boot splash stays on the firmware framebuffer alone.
+After=plymouth-quit-wait.service systemd-modules-load.service
+Before=omarchy-k3-host-desktop.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/modprobe vkms
+
+[Install]
+WantedBy=multi-user.target

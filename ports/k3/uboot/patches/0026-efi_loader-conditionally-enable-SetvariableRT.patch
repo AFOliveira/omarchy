@@ -1,0 +1,292 @@
+From 7ccd81947a01acf9a66f927975888bd3c5e6d993 Mon Sep 17 00:00:00 2001
+From: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Date: Thu, 18 Apr 2024 15:54:50 +0300
+Subject: [PATCH 26/40] efi_loader: conditionally enable SetvariableRT
+
+When we store EFI variables on file we don't allow SetVariable at runtime,
+since the OS doesn't know how to access or write that file.  At the same
+time keeping the U-Boot drivers alive in runtime sections and performing
+writes from the firmware is dangerous -- if at all possible.
+
+For GetVariable at runtime we copy runtime variables in RAM and expose them
+to the OS. Add a Kconfig option and provide SetVariable at runtime using
+the same memory backend. The OS will be responsible for syncing the RAM
+contents to the file, otherwise any changes made during runtime won't
+persist reboots.
+
+It's worth noting that the variable store format is defined in EBBR [0]
+and authenticated variables are explicitly prohibited, since they have
+to be stored on a medium that's tamper and rollback protected.
+
+- pre-patch
+$~ mount | grep efiva
+efivarfs on /sys/firmware/efi/efivars type efivarfs (ro,nosuid,nodev,noexec,relatime)
+
+$~ efibootmgr -n 0001
+Could not set BootNext: Read-only file system
+
+- post-patch
+$~ mount | grep efiva
+efivarfs on /sys/firmware/efi/efivars type efivarfs (rw,nosuid,nodev,noexec,relatime)
+
+$~ efibootmgr -n 0001
+BootNext: 0001
+BootCurrent: 0000
+BootOrder: 0000,0001
+Boot0000* debian        HD(1,GPT,bdae5610-3331-4e4d-9466-acb5caf0b4a6,0x800,0x100000)/File(EFI\debian\grubaa64.efi)
+Boot0001* virtio 0      VenHw(e61d73b9-a384-4acc-aeab-82e828f3628b,0000000000000000)/VenHw(e61d73b9-a384-4acc-aeab-82e828f3628b,850000001f000000)/VenHw(e61d73b9-a384-4acc-aeab-82e828f3628b,1600850000000000){auto_created_boot_option}
+
+$~ efivar -p -n 8be4df61-93ca-11d2-aa0d-00e098032b8c-BootNext
+GUID: 8be4df61-93ca-11d2-aa0d-00e098032b8c
+Name: "BootNext"
+Attributes:
+        Non-Volatile
+        Boot Service Access
+        Runtime Service Access
+Value:
+00000000  01 00
+
+FWTS runtime results
+Skipped tests are for SetVariable which is now supported
+'Passed' test is for QueryVariableInfo which is not yet supported
+
+Test: UEFI miscellaneous runtime service interface tests.
+  Test for UEFI miscellaneous runtime service interfaces  6 skipped
+  Stress test for UEFI miscellaneous runtime service i..  1 skipped
+  Test GetNextHighMonotonicCount with invalid NULL par..  1 skipped
+  Test UEFI miscellaneous runtime services unsupported..  1 passed
+Test: UEFI Runtime service variable interface tests.
+  Test UEFI RT service get variable interface.            1 passed
+  Test UEFI RT service get next variable name interface.  4 passed
+  Test UEFI RT service set variable interface.            8 passed
+  Test UEFI RT service query variable info interface.     1 skipped
+  Test UEFI RT service variable interface stress test.    2 passed
+  Test UEFI RT service set variable interface stress t..  4 passed
+  Test UEFI RT service query variable info interface s..  1 skipped
+  Test UEFI RT service get variable interface, invalid..  5 passed
+  Test UEFI RT variable services unsupported status.      1 passed, 3 skipped
+
+[0] https://arm-software.github.io/ebbr/index.html#document-chapter5-variable-storage
+
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Signed-off-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit c28d32f946f0d1c0780a02ab49dc2c1835370501)
+---
+ lib/efi_loader/Kconfig                        |  16 +++
+ lib/efi_loader/efi_runtime.c                  |   4 +
+ lib/efi_loader/efi_variable.c                 | 116 ++++++++++++++++--
+ .../efi_selftest_variables_runtime.c          |  14 ++-
+ 4 files changed, 136 insertions(+), 14 deletions(-)
+
+diff --git a/lib/efi_loader/Kconfig b/lib/efi_loader/Kconfig
+index b8fb2701..d346b0e2 100644
+--- a/lib/efi_loader/Kconfig
++++ b/lib/efi_loader/Kconfig
+@@ -60,6 +60,22 @@ config EFI_VARIABLE_FILE_STORE
+ 	  Select this option if you want non-volatile UEFI variables to be
+ 	  stored as file /ubootefi.var on the EFI system partition.
+ 
++config EFI_RT_VOLATILE_STORE
++	bool "Allow variable runtime services in volatile storage (e.g RAM)"
++	depends on EFI_VARIABLE_FILE_STORE
++	help
++	  When EFI variables are stored on file we don't allow SetVariableRT,
++	  since the OS doesn't know how to write that file. At he same time
++	  we copy runtime variables in DRAM and support GetVariableRT
++
++	  Enable this option to allow SetVariableRT on the RAM backend of
++	  the EFI variable storage. The OS will be responsible for syncing
++	  the RAM contents to the file, otherwise any changes made during
++	  runtime won't persist reboots.
++	  Authenticated variables are not supported. Note that this will
++	  violate the EFI spec since writing auth variables will return
++	  EFI_INVALID_PARAMETER
++
+ config EFI_MM_COMM_TEE
+ 	bool "UEFI variables storage service via OP-TEE"
+ 	depends on OPTEE
+diff --git a/lib/efi_loader/efi_runtime.c b/lib/efi_loader/efi_runtime.c
+index 5277f9b0..33e3b120 100644
+--- a/lib/efi_loader/efi_runtime.c
++++ b/lib/efi_loader/efi_runtime.c
+@@ -127,6 +127,10 @@ efi_status_t efi_init_runtime_supported(void)
+ 				EFI_RT_SUPPORTED_SET_VIRTUAL_ADDRESS_MAP |
+ 				EFI_RT_SUPPORTED_CONVERT_POINTER;
+ 
++	if (IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE))
++		rt_table->runtime_services_supported |=
++			EFI_RT_SUPPORTED_SET_VARIABLE;
++
+ 	/*
+ 	 * This value must be synced with efi_runtime_detach_list
+ 	 * as well as efi_runtime_services.
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index c8837380..8dcfe1ca 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -220,17 +220,20 @@ efi_get_next_variable_name_int(efi_uintn_t *variable_name_size,
+ 	return efi_get_next_variable_name_mem(variable_name_size, variable_name, vendor);
+ }
+ 
+-efi_status_t efi_set_variable_int(const u16 *variable_name,
+-				  const efi_guid_t *vendor,
+-				  u32 attributes, efi_uintn_t data_size,
+-				  const void *data, bool ro_check)
++/**
++ * setvariable_allowed() - checks defined by the UEFI spec for setvariable
++ *
++ * @variable_name:	name of the variable
++ * @vendor:		vendor GUID
++ * @attributes:		attributes of the variable
++ * @data_size:		size of the buffer with the variable value
++ * @data:		buffer with the variable value
++ * Return:		status code
++ */
++static efi_status_t __efi_runtime
++setvariable_allowed(const u16 *variable_name, const efi_guid_t *vendor,
++		    u32 attributes, efi_uintn_t data_size, const void *data)
+ {
+-	struct efi_var_entry *var;
+-	efi_uintn_t ret;
+-	bool append, delete;
+-	u64 time = 0;
+-	enum efi_auth_var_type var_type;
+-
+ 	if (!variable_name || !*variable_name || !vendor)
+ 		return EFI_INVALID_PARAMETER;
+ 
+@@ -262,6 +265,25 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	     !(attributes & EFI_VARIABLE_BOOTSERVICE_ACCESS)))
+ 		return EFI_INVALID_PARAMETER;
+ 
++	return EFI_SUCCESS;
++}
++
++efi_status_t efi_set_variable_int(const u16 *variable_name,
++				  const efi_guid_t *vendor,
++				  u32 attributes, efi_uintn_t data_size,
++				  const void *data, bool ro_check)
++{
++	struct efi_var_entry *var;
++	efi_uintn_t ret;
++	bool append, delete;
++	u64 time = 0;
++	enum efi_auth_var_type var_type;
++
++	ret = setvariable_allowed(variable_name, vendor, attributes, data_size,
++				  data);
++	if (ret != EFI_SUCCESS)
++		return ret;
++
+ 	/* check if a variable exists */
+ 	var = efi_var_mem_find(vendor, variable_name, NULL);
+ 	append = !!(attributes & EFI_VARIABLE_APPEND_WRITE);
+@@ -455,7 +477,79 @@ efi_set_variable_runtime(u16 *variable_name, const efi_guid_t *vendor,
+ 			 u32 attributes, efi_uintn_t data_size,
+ 			 const void *data)
+ {
+-	return EFI_UNSUPPORTED;
++	struct efi_var_entry *var;
++	efi_uintn_t ret;
++	bool append, delete;
++	u64 time = 0;
++
++	if (!IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE))
++		return EFI_UNSUPPORTED;
++
++	/*
++	 * Authenticated variables are not supported. The EFI spec
++	 * in §32.3.6 requires keys to be stored in non-volatile storage which
++	 * is tamper and delete resistant.
++	 * The rest of the checks are in setvariable_allowed()
++	 */
++	if (attributes & EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS)
++		return EFI_INVALID_PARAMETER;
++
++	ret = setvariable_allowed(variable_name, vendor, attributes, data_size,
++				  data);
++	if (ret != EFI_SUCCESS)
++		return ret;
++
++	/* check if a variable exists */
++	var = efi_var_mem_find(vendor, variable_name, NULL);
++	append = !!(attributes & EFI_VARIABLE_APPEND_WRITE);
++	attributes &= ~EFI_VARIABLE_APPEND_WRITE;
++	delete = !append && (!data_size || !attributes);
++
++	/* BS only variables are hidden deny writing them */
++	if (!delete && !(attributes & EFI_VARIABLE_RUNTIME_ACCESS))
++		return EFI_INVALID_PARAMETER;
++
++	if (var) {
++		if (var->attr & EFI_VARIABLE_READ_ONLY ||
++		    !(var->attr & EFI_VARIABLE_NON_VOLATILE))
++			return EFI_WRITE_PROTECTED;
++
++		/* attributes won't be changed */
++		if (!delete && (((var->attr & ~EFI_VARIABLE_READ_ONLY) !=
++		    (attributes & ~EFI_VARIABLE_READ_ONLY))))
++			return EFI_INVALID_PARAMETER;
++		time = var->time;
++	} else {
++		if (!(attributes & EFI_VARIABLE_NON_VOLATILE))
++			return EFI_INVALID_PARAMETER;
++		if (append && !data_size)
++			return EFI_SUCCESS;
++		if (delete)
++			return EFI_NOT_FOUND;
++	}
++
++	if (delete) {
++		/* EFI_NOT_FOUND has been handled before */
++		attributes = var->attr;
++		ret = EFI_SUCCESS;
++	} else if (append && var) {
++		u16 *old_data = (void *)((uintptr_t)var->name +
++			sizeof(u16) * (u16_strlen(var->name) + 1));
++
++		ret = efi_var_mem_ins(variable_name, vendor, attributes,
++				      var->length, old_data, data_size, data,
++				      time);
++	} else {
++		ret = efi_var_mem_ins(variable_name, vendor, attributes,
++				      data_size, data, 0, NULL, time);
++	}
++
++	if (ret != EFI_SUCCESS)
++		return ret;
++	/* We are always inserting new variables, get rid of the old copy */
++	efi_var_mem_del(var);
++
++	return EFI_SUCCESS;
+ }
+ 
+ /**
+diff --git a/lib/efi_selftest/efi_selftest_variables_runtime.c b/lib/efi_selftest/efi_selftest_variables_runtime.c
+index 4700d942..986924b8 100644
+--- a/lib/efi_selftest/efi_selftest_variables_runtime.c
++++ b/lib/efi_selftest/efi_selftest_variables_runtime.c
+@@ -62,9 +62,17 @@ static int execute(void)
+ 				    EFI_VARIABLE_BOOTSERVICE_ACCESS |
+ 				    EFI_VARIABLE_RUNTIME_ACCESS,
+ 				    3, v + 4);
+-	if (ret != EFI_UNSUPPORTED) {
+-		efi_st_error("SetVariable failed\n");
+-		return EFI_ST_FAILURE;
++	if (IS_ENABLED(CONFIG_EFI_RT_VOLATILE_STORE)) {
++		/* At runtime only non-volatile variables may be set. */
++		if (ret != EFI_INVALID_PARAMETER) {
++			efi_st_error("SetVariable failed\n");
++			return EFI_ST_FAILURE;
++		}
++	} else {
++		if (ret != EFI_UNSUPPORTED) {
++			efi_st_error("SetVariable failed\n");
++			return EFI_ST_FAILURE;
++		}
+ 	}
+ 	len = EFI_ST_MAX_DATA_SIZE;
+ 	ret = runtime->get_variable(u"PlatformLangCodes", &guid_vendor0,
+-- 
+2.55.0
+

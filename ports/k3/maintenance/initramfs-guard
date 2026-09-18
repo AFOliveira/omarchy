@@ -1,0 +1,97 @@
+#!/bin/sh
+# Put the ordinary boot back if the selected root will not mount.
+#
+# The board has no boot menu and no way to interrupt U-Boot, so a root that does
+# not mount would otherwise cost a reflash. This runs before initramfs-tools
+# mounts anything: it test-mounts the root read-only, and if that fails it
+# restores the stock env_k3.txt and restarts, which brings the board back on the
+# vendor system. Only active when omarchy.guard=1 is on the command line, so the
+# vendor's own boots are untouched.
+set -e
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+guard=0
+root=""
+rootflags=""
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    omarchy.guard=1) guard=1 ;;
+    root=*)          root="${arg#root=}" ;;
+    rootflags=*)     rootflags="${arg#rootflags=}" ;;
+  esac
+done
+[ "$guard" = "1" ] || exit 0
+
+say() {
+  echo "omarchy-guard: $*" > /dev/ttyS0 2>/dev/null || true
+  echo "omarchy-guard: $*" > /dev/console 2>/dev/null || true
+}
+
+case "$root" in
+  PARTUUID=*) device="/dev/disk/by-partuuid/${root#PARTUUID=}" ;;
+  UUID=*)     device="/dev/disk/by-uuid/${root#UUID=}" ;;
+  *)          device="$root" ;;
+esac
+
+# udev may still be settling; the UFS disk appears within a second or two.
+waited=0
+while [ ! -b "$device" ] && [ "$waited" -lt 30 ]; do
+  sleep 1
+  waited=$((waited + 1))
+done
+
+modprobe btrfs 2>/dev/null || true
+mkdir -p /run/omarchy-guard
+options="ro"
+[ -n "$rootflags" ] && options="ro,$rootflags"
+
+# Booting a snapshot is always one-shot: the live root is put back for the next
+# start before this one continues. A snapshot that turns out not to boot then
+# costs a power reset rather than the board.
+revert_snapshot() {
+  mkdir -p /run/omarchy-bootfs
+  if mount -t ext4 /dev/sda2 /run/omarchy-bootfs 2>/dev/null; then
+    sed -e "s|rootflags=subvol=[^ ]*|rootflags=subvol=@|" \
+        -e "s| ro rootfstype=btrfs| rw rootfstype=btrfs|" \
+        /run/omarchy-bootfs/env_k3.txt > /run/omarchy-bootfs/.env_k3.new
+    mv /run/omarchy-bootfs/.env_k3.new /run/omarchy-bootfs/env_k3.txt
+    sync
+    umount /run/omarchy-bootfs
+    say "snapshot boots are one-shot; the next start is the live root again"
+  fi
+}
+
+if [ -b "$device" ] && mount -o "$options" "$device" /run/omarchy-guard 2>/dev/null; then
+  if [ -f /run/omarchy-guard/.omarchy-k3-rootfs ]; then
+    umount /run/omarchy-guard
+    case "$rootflags" in
+      *subvol=@snapshots/*) revert_snapshot ;;
+    esac
+    say "root $root mounts and is the Omarchy root; continuing"
+    exit 0
+  fi
+  umount /run/omarchy-guard
+  say "root $root mounts but is not the Omarchy root"
+else
+  say "root $root did not mount"
+fi
+
+say "restoring the stock boot file and restarting"
+mkdir -p /run/omarchy-bootfs
+if mount -t ext4 /dev/sda2 /run/omarchy-bootfs 2>/dev/null; then
+  cp /etc/omarchy-k3/env_k3.stock /run/omarchy-bootfs/env_k3.txt
+  sync
+  umount /run/omarchy-bootfs
+  say "restored; the next start is the vendor system"
+else
+  say "COULD NOT restore env_k3.txt"
+fi
+sync
+sleep 3
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+echo b > /proc/sysrq-trigger 2>/dev/null || true
+while true; do sleep 10; done

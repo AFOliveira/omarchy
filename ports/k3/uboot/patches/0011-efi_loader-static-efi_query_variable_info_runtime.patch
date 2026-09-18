@@ -1,0 +1,29 @@
+From 135f0066446cbf6b953e3a53b168b97bc6a00f4d Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Fri, 10 Feb 2023 09:06:17 +0100
+Subject: [PATCH 11/40] efi_loader: static efi_query_variable_info_runtime()
+
+This function is not used externally and hence should be static.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 124725732fdfd63ebb2f6514c690181ccbe13444)
+---
+ lib/efi_loader/efi_variable.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 4d4dfa6b..4c85cfa6 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -395,7 +395,7 @@ efi_status_t efi_query_variable_info_int(u32 attributes,
+  *					selected type
+  * Returns:				status code
+  */
+-efi_status_t __efi_runtime EFIAPI efi_query_variable_info_runtime(
++static efi_status_t __efi_runtime EFIAPI efi_query_variable_info_runtime(
+ 			u32 attributes,
+ 			u64 *maximum_variable_storage_size,
+ 			u64 *remaining_variable_storage_size,
+-- 
+2.55.0
+

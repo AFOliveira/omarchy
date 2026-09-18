@@ -1,0 +1,31 @@
+From 064bb6ea022ad5eb1ce024dd9824102588c498cf Mon Sep 17 00:00:00 2001
+From: Michal Simek <michal.simek@amd.com>
+Date: Tue, 16 Jul 2024 15:56:51 +0200
+Subject: [PATCH 32/40] efi_loader: Fix typo in EFI_RT_VOLATILE_STORE
+ description
+
+Fix typo in EFI_RT_VOLATILE_STORE description.
+
+Fixes: c28d32f946f0 ("efi_loader: conditionally enable SetvariableRT")
+Signed-off-by: Michal Simek <michal.simek@amd.com>
+(cherry picked from commit ff47fddf72189e1adfc94a143455f8717369e3c0)
+---
+ lib/efi_loader/Kconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/Kconfig b/lib/efi_loader/Kconfig
+index d346b0e2..b7198108 100644
+--- a/lib/efi_loader/Kconfig
++++ b/lib/efi_loader/Kconfig
+@@ -65,7 +65,7 @@ config EFI_RT_VOLATILE_STORE
+ 	depends on EFI_VARIABLE_FILE_STORE
+ 	help
+ 	  When EFI variables are stored on file we don't allow SetVariableRT,
+-	  since the OS doesn't know how to write that file. At he same time
++	  since the OS doesn't know how to write that file. At the same time
+ 	  we copy runtime variables in DRAM and support GetVariableRT
+ 
+ 	  Enable this option to allow SetVariableRT on the RAM backend of
+-- 
+2.55.0
+

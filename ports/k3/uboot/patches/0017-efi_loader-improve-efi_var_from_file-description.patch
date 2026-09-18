@@ -1,0 +1,37 @@
+From f1ab23bbe7f57ada6bf6f45a220171a19c9d0f42 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Mon, 13 Nov 2023 15:50:16 +0100
+Subject: [PATCH 17/40] efi_loader: improve efi_var_from_file() description
+
+It is unclear to developers why efi_var_from_file() returns EFI_SUCCESS if
+file ubootefi.var is missing or corrupted. Improve the description.
+
+Reported-by: Weizhao Ouyang <o451686892@gmail.com>
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Reviewed-by: Weizhao Ouyang <o451686892@gmail.com>
+(cherry picked from commit ce68a254483817f86f92ffef7c7bc44fee318fb5)
+---
+ lib/efi_loader/efi_var_file.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/lib/efi_loader/efi_var_file.c b/lib/efi_loader/efi_var_file.c
+index 591f9efd..ba160fc8 100644
+--- a/lib/efi_loader/efi_var_file.c
++++ b/lib/efi_loader/efi_var_file.c
+@@ -204,8 +204,11 @@ efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
+  * File ubootefi.var is read from the EFI system partitions and the variables
+  * stored in the file are created.
+  *
+- * In case the file does not exist yet or a variable cannot be set EFI_SUCCESS
+- * is returned.
++ * On first boot the file ubootefi.var does not exist yet. This is why we must
++ * return EFI_SUCCESS in this case.
++ *
++ * If the variable file is corrupted, e.g. incorrect CRC32, we do not want to
++ * stop the boot process. We deliberately return EFI_SUCCESS in this case, too.
+  *
+  * Return:	status code
+  */
+-- 
+2.55.0
+

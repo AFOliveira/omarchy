@@ -1,0 +1,28 @@
+From: Baihui Liang (as posted to dri-devel, July 2026; v3 of "drm/imagination: support GPU on SpacemiT K3")
+Subject: [PATCH] drm/imagination: allow probe when no power-domains are described
+
+On SpacemiT K3 the GPU power domain is enabled by the boot loader before
+Linux runs and is not managed by Linux, so the device tree describes no
+power-domains. of_count_phandle_with_args() then returns -ENOENT, which made
+the probe fail. Treat a missing property as "no domain to attach".
+
+Backported to v7.2.6 for the Omarchy K3 port; the upstream series is in review.
+---
+--- a/pvr_power.c
++++ b/pvr_power.c
+@@ -635,6 +635,15 @@
+ 
+ 	domain_count = of_count_phandle_with_args(dev->of_node, "power-domains",
+ 						  "#power-domain-cells");
++	if (domain_count == -ENOENT) {
++		/*
++		 * No "power-domains" property in the device tree: the platform
++		 * handles power domains transparently or at the firmware/bootloader
++		 * level, so there is no domain to attach. Treat this as non-fatal.
++		 */
++		err = 0;
++		goto out;
++	}
+ 	if (domain_count < 0) {
+ 		err = domain_count;
+ 		goto out;

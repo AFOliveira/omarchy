@@ -1,0 +1,47 @@
+From 52150b398bc32f04405f73f3fa4b698c30e19c53 Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Wed, 3 Apr 2024 17:33:34 +0200
+Subject: [PATCH 20/40] efi_loader: EFI_VARIABLE_READ_ONLY should be 32bit
+
+GetVariable() and SetVariable() only accept a 32bit value for attributes.
+It makes not sense to define EFI_VARIABLE_READ_ONLY as unsigned long.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 3b51c3a0b03411b07f0acd8bf2361ba54043fdcf)
+---
+ include/efi_variable.h        | 2 +-
+ lib/efi_loader/efi_variable.c | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/include/efi_variable.h b/include/efi_variable.h
+index 805e6c5f..42a2b7c5 100644
+--- a/include/efi_variable.h
++++ b/include/efi_variable.h
+@@ -8,7 +8,7 @@
+ 
+ #include <linux/bitops.h>
+ 
+-#define EFI_VARIABLE_READ_ONLY BIT(31)
++#define EFI_VARIABLE_READ_ONLY 0x80000000
+ 
+ enum efi_auth_var_type {
+ 	EFI_AUTH_VAR_NONE = 0,
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index b6f3b4b2..0fe03191 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -277,8 +277,8 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		/* attributes won't be changed */
+ 		if (!delete &&
+ 		    ((ro_check && var->attr != attributes) ||
+-		     (!ro_check && ((var->attr & ~(u32)EFI_VARIABLE_READ_ONLY)
+-				    != (attributes & ~(u32)EFI_VARIABLE_READ_ONLY))))) {
++		     (!ro_check && ((var->attr & ~EFI_VARIABLE_READ_ONLY)
++				    != (attributes & ~EFI_VARIABLE_READ_ONLY))))) {
+ 			return EFI_INVALID_PARAMETER;
+ 		}
+ 		time = var->time;
+-- 
+2.55.0
+

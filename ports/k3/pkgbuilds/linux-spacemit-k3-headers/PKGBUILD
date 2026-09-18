@@ -1,0 +1,35 @@
+# Headers of SpacemiT's K3 kernel, repackaged from Bianbu's linux-headers deb
+# into Arch's layout (/usr/lib/modules/<release>/build), so out-of-tree modules
+# such as linux-spacemit-k3-dm-crypt build the way they do against Arch's kernels.
+
+pkgname=linux-spacemit-k3-headers
+_release=6.18.3-generic
+_debver=6.18.3-1.0.0.4
+pkgver=${_debver//-/.}
+pkgrel=1
+pkgdesc="Headers and scripts for building modules for the SpacemiT K3 vendor kernel"
+arch=(riscv64)
+url="https://archive.spacemit.com/bianbu4/"
+license=(GPL-2.0-only)
+depends=(pahole)
+options=(!debug !strip)
+_deb="linux-headers-${_release}_${_debver}_riscv64.deb"
+source=("${_deb}::${url}pool/main/l/linux-riscv-spacemit-generic/${_deb}")
+sha512sums=('45c42e48f4dedb20393f6f8189674529e84dd7d8bc4f2b5cba5573aa3b330f820a0b2b89e95e0a58b90f509ee8a23762ebd19fa62d343fc627d8ce2b92c4d428')
+noextract=("${_deb}")
+
+prepare() {
+  rm -rf deb && mkdir deb && cd deb
+  bsdtar -xf "$srcdir/${_deb}" data.tar.zst
+  bsdtar -xf data.tar.zst
+}
+
+package() {
+  local builddir="$pkgdir/usr/lib/modules/${_release}/build"
+  install -d "$pkgdir/usr/lib/modules/${_release}"
+  cp -a "$srcdir/deb/usr/src/linux-headers-${_release}" "$builddir"
+  # Bianbu's config wraps the compiler in ccache; module builds here pass CC=gcc
+  rm -f "$builddir/.ccache"
+  install -d "$pkgdir/usr/src"
+  ln -s "../lib/modules/${_release}/build" "$pkgdir/usr/src/linux-${_release}"
+}

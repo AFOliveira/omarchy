@@ -1,0 +1,68 @@
+From 8074ef31a0f5dff459001afab966647def7f7449 Mon Sep 17 00:00:00 2001
+From: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Date: Fri, 14 Feb 2025 15:46:45 +0200
+Subject: [PATCH 34/40] efi_loader: remove comparisons to string literals from
+ runtime
+
+For EFI runtime services, we manage to preserve string literals
+by placing the .efi_runtime section just before .data and preserving
+it when marking the runtime memory by marking surrounding boottime
+code as runtime. This is ok for now but will break if we update any
+linker scripts and decouple .text and .runtime sections.
+
+So let's define the strings we used to compare in the appropriate
+section for runtime services
+
+Signed-off-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Reviewed-by: Mark Kettenis <kettenis@openbsd.org>
+(cherry picked from commit 530e869ff89d9575103637af201fe97864d4f577)
+---
+ lib/efi_loader/efi_var_mem.c      | 3 ++-
+ lib/efi_loader/efi_variable_tee.c | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/lib/efi_loader/efi_var_mem.c b/lib/efi_loader/efi_var_mem.c
+index f0b8a202..b30643a6 100644
+--- a/lib/efi_loader/efi_var_mem.c
++++ b/lib/efi_loader/efi_var_mem.c
+@@ -18,6 +18,7 @@
+  */
+ static struct efi_var_file __efi_runtime_data *efi_var_buf;
+ static struct efi_var_entry __efi_runtime_data *efi_current_var;
++static const u16 __efi_runtime_rodata vtf[] = u"VarToFile";
+ 
+ /**
+  * efi_var_mem_compare() - compare GUID and name with a variable
+@@ -330,7 +331,7 @@ efi_get_variable_mem(const u16 *variable_name, const efi_guid_t *vendor,
+ 	if (timep)
+ 		*timep = var->time;
+ 
+-	if (!u16_strcmp(variable_name, u"VarToFile"))
++	if (!u16_strcmp(variable_name, vtf))
+ 		return efi_var_collect_mem(data, data_size, EFI_VARIABLE_NON_VOLATILE);
+ 
+ 	old_size = *data_size;
+diff --git a/lib/efi_loader/efi_variable_tee.c b/lib/efi_loader/efi_variable_tee.c
+index 23d6bf53..0ed68d9e 100644
+--- a/lib/efi_loader/efi_variable_tee.c
++++ b/lib/efi_loader/efi_variable_tee.c
+@@ -18,6 +18,7 @@
+ extern struct efi_var_file __efi_runtime_data *efi_var_buf;
+ static efi_uintn_t max_buffer_size;	/* comm + var + func + data */
+ static efi_uintn_t max_payload_size;	/* func + data */
++static const u16 __efi_runtime_rodata pk[] = u"PK";
+ 
+ struct mm_connection {
+ 	struct udevice *tee;
+@@ -597,7 +598,7 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 	if (alt_ret != EFI_SUCCESS)
+ 		goto out;
+ 
+-	if (!u16_strcmp(variable_name, u"PK"))
++	if (!u16_strcmp(variable_name, pk))
+ 		alt_ret = efi_init_secure_state();
+ out:
+ 	free(comm_buf);
+-- 
+2.55.0
+

@@ -1,0 +1,37 @@
+From e64ff8c0452a969906bdca99f8649574b567d3ae Mon Sep 17 00:00:00 2001
+From: Nell <xianbin.zhu@spacemit.com>
+Date: Mon, 10 Aug 2026 11:14:02 +0800
+Subject: [PATCH 44/44] k3:power-switch: fix bug of GPU power-switch when using
+ hW mode
+
+Signed-off-by: Nell <xianbin.zhu@spacemit.com>
+Change-Id: Ie20d9e07768e020883a59ef83728ade0e1cd71a9
+(cherry picked from commit 9c8de7d5603b3a3cb4605bcdedfd206f7e59a5fd)
+---
+ drivers/power/domain/k3-power-domain.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/domain/k3-power-domain.c b/drivers/power/domain/k3-power-domain.c
+index f36e4c35..11177059 100644
+--- a/drivers/power/domain/k3-power-domain.c
++++ b/drivers/power/domain/k3-power-domain.c
+@@ -54,10 +54,13 @@ static struct pm_domain_desc k3_pm_domain_desc[] = {
+ 
+ 	[K3_PMU_GPU_PWR_DOMAIN] = {
+ 		.reg_pwr_ctrl = 0xd0,
+-		.bit_sleep2 = 3,
+-		.bit_sleep1 = 2,
++		.bit_auto_pwr_on = 0,
+ 		.bit_isolation = 1,
+-		.bit_pwr_stat = 8,
++		.bit_sleep1 = 2,
++		.bit_sleep2 = 3,
++		.bit_hw_mode = 4,
++		.bit_pwr_stat = 0,
++		.bit_hw_pwr_stat = 8,
+ 		.use_hw = 1,
+ 		.pm_index = K3_PMU_GPU_PWR_DOMAIN,
+ 	},
+-- 
+2.55.0
+

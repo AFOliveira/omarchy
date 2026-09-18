@@ -1,0 +1,6 @@
+#!/bin/bash
+# Stands in for the GraalVM native image, which has no RISC-V build: the same
+# program, run on the system JRE. The flags favour start-up time over
+# throughput, which is what a tool run from pacman hooks needs.
+exec /usr/lib/jvm/default-runtime/bin/java -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xshare:auto \
+  -cp '/usr/share/java/limine-entry-tool/*' org.limine.entry.tool.Main "$@"

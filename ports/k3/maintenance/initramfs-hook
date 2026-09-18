@@ -1,0 +1,24 @@
+#!/bin/sh
+# Put the storage tools and the stock boot file into the vendor initramfs.
+#
+# The migration runs from the vendor's own initramfs rather than a replacement
+# one. That is deliberate: the board has no way back from an initramfs that
+# fails to start, so the port adds to the image the board already boots instead
+# of asking it to boot a new one.
+set -e
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+. /usr/share/initramfs-tools/hook-functions
+
+for tool in sgdisk partprobe e2fsck resize2fs dumpe2fs mkfs.btrfs btrfs rsync findmnt; do
+  copy_exec "$(command -v "$tool")" || true
+done
+manual_add_modules btrfs
+
+# The migration restores this before it touches anything, so a failure part way
+# through still leaves an ordinary boot behind.
+mkdir -p "${DESTDIR}/etc/omarchy-k3"
+cp /etc/omarchy-k3/env_k3.stock "${DESTDIR}/etc/omarchy-k3/env_k3.stock"

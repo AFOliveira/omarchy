@@ -1,0 +1,31 @@
+From 47481504f74489248fc0e27c39b849d4491c31a9 Mon Sep 17 00:00:00 2001
+From: Weizhao Ouyang <o451686892@gmail.com>
+Date: Wed, 10 Apr 2024 12:19:33 +0000
+Subject: [PATCH 24/40] efi_loader: using EFI_UNSUPPORTED for private
+ authenticated variables
+
+Improve error message for UEFI SCT tests.
+
+Signed-off-by: Weizhao Ouyang <o451686892@gmail.com>
+Reviewed-by: Heinrich Schuchardt <xypron.glpk@gmx.de>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 0ec4279ba32fc923374c80a3e817de263d0cc185)
+---
+ lib/efi_loader/efi_variable.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index 8c912788..c8837380 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -164,6 +164,7 @@ static efi_status_t efi_variable_authenticate(const u16 *variable,
+ 		break;
+ 	default:
+ 		/* TODO: support private authenticated variables */
++		ret = EFI_UNSUPPORTED;
+ 		goto err;
+ 	}
+ 
+-- 
+2.55.0
+

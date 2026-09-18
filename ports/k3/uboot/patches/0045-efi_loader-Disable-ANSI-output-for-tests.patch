@@ -1,0 +1,107 @@
+From 95cffe156f52c532c3d236e377fabc289dd2f285 Mon Sep 17 00:00:00 2001
+From: Simon Glass <sjg@chromium.org>
+Date: Sat, 10 May 2025 14:54:38 +0200
+Subject: [PATCH 45/47] efi_loader: Disable ANSI output for tests
+
+We don't want ANSI escape-sequences written in tests since it is a pain
+to check the output with ut_assert_nextline() et al.
+
+Provide a way to tests to request that these characters not be sent.
+
+Add a proper function comment while we are here, to encourage others.
+
+Signed-off-by: Simon Glass <sjg@chromium.org>
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 4cb72436403069baf58c0d5187149db7ab76fb85)
+---
+ include/efi_loader.h         | 21 ++++++++++++++++++++-
+ lib/efi_loader/efi_console.c | 26 +++++++++++++++++---------
+ 2 files changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/include/efi_loader.h b/include/efi_loader.h
+index a34b5831..77131c6a 100644
+--- a/include/efi_loader.h
++++ b/include/efi_loader.h
+@@ -505,8 +505,27 @@ extern struct list_head efi_register_notify_events;
+ int efi_init_early(void);
+ /* Initialize efi execution environment */
+ efi_status_t efi_init_obj_list(void);
+-/* Set up console modes */
++
++/**
++ * efi_setup_console_size() - update the mode table.
++ *
++ * By default the only mode available is 80x25. If the console has at least 50
++ * lines, enable mode 80x50. If we can query the console size and it is neither
++ * 80x25 nor 80x50, set it as an additional mode.
++ */
+ void efi_setup_console_size(void);
++
++/**
++ * efi_console_set_ansi() - Set whether ANSI escape-characters should be emitted
++ *
++ * These characters mess up tests which use ut_assert_nextline(). Call this
++ * function to tell efi_loader not to emit these characters when starting up the
++ * terminal
++ *
++ * @allow_ansi: Allow emitting ANSI escape-characters
++ */
++void efi_console_set_ansi(bool allow_ansi);
++
+ /* Install device tree */
+ efi_status_t efi_install_fdt(void *fdt);
+ /* Run loaded UEFI image */
+diff --git a/lib/efi_loader/efi_console.c b/lib/efi_loader/efi_console.c
+index ee9dc6bb..ecae86d0 100644
+--- a/lib/efi_loader/efi_console.c
++++ b/lib/efi_loader/efi_console.c
+@@ -30,6 +30,17 @@ struct cout_mode {
+ 
+ __maybe_unused static struct efi_object uart_obj;
+ 
++/*
++ * suppress emission of ANSI escape-characters for use by unit tests. Leave it
++ * as 0 for the default behaviour
++ */
++static bool no_ansi;
++
++void efi_console_set_ansi(bool allow_ansi)
++{
++	no_ansi = !allow_ansi;
++}
++
+ static struct cout_mode efi_cout_modes[] = {
+ 	/* EFI Mode 0 is 80x25 and always present */
+ 	{
+@@ -340,13 +351,6 @@ static int __maybe_unused query_vidconsole(int *rows, int *cols)
+ 	return 0;
+ }
+ 
+-/**
+- * efi_setup_console_size() - update the mode table.
+- *
+- * By default the only mode available is 80x25. If the console has at least 50
+- * lines, enable mode 80x50. If we can query the console size and it is neither
+- * 80x25 nor 80x50, set it as an additional mode.
+- */
+ void efi_setup_console_size(void)
+ {
+ 	int rows = 25, cols = 80;
+@@ -354,8 +358,12 @@ void efi_setup_console_size(void)
+ 
+ 	if (IS_ENABLED(CONFIG_DM_VIDEO))
+ 		ret = query_vidconsole(&rows, &cols);
+-	if (ret)
+-		ret = query_console_serial(&rows, &cols);
++	if (ret) {
++		if (no_ansi)
++			ret = 0;
++		else
++			ret = query_console_serial(&rows, &cols);
++	}
+ 	if (ret)
+ 		return;
+ 
+-- 
+2.55.0
+

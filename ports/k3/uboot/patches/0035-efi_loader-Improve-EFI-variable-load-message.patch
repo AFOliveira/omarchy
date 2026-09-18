@@ -1,0 +1,40 @@
+From 20bcdaffb03cf8a0b8804b60e74a3ea1b64b6b7c Mon Sep 17 00:00:00 2001
+From: Pranav Tilak <pranav.vinaytilak@amd.com>
+Date: Mon, 2 Feb 2026 17:07:17 +0530
+Subject: [PATCH 35/40] efi_loader: Improve EFI variable load message
+
+Change the EFI variable load message from log_err() to log_info() with
+neutral wording. The previous "Failed to load" message caused customer
+confusion as it appeared to indicate an error condition.
+
+The efi_var_from_file() function deliberately returns EFI_SUCCESS in
+this case to allow the boot process to continue normally. This is
+documented in the function's comment block but was not reflected in
+the log message level or content.
+
+The message now uses informational wording to reflect that this is
+normal behavior when the ubootefi.var file does not yet exist.
+
+Signed-off-by: Pranav Tilak <pranav.vinaytilak@amd.com>
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 32b835ccf3db8ae393c1ff27a9a367f7b6edd78f)
+---
+ lib/efi_loader/efi_var_file.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/efi_var_file.c b/lib/efi_loader/efi_var_file.c
+index aadd48ea..787bb5dd 100644
+--- a/lib/efi_loader/efi_var_file.c
++++ b/lib/efi_loader/efi_var_file.c
+@@ -168,7 +168,7 @@ efi_status_t efi_var_from_file(void)
+ 	r = fs_read(EFI_VAR_FILE_NAME, map_to_sysmem(buf), 0, EFI_VAR_BUF_SIZE,
+ 		    &len);
+ 	if (r || len < sizeof(struct efi_var_file)) {
+-		log_err("Failed to load EFI variables\n");
++		log_info("No EFI variables loaded\n");
+ 		goto error;
+ 	}
+ 	if (buf->length != len || efi_var_restore(buf, false) != EFI_SUCCESS)
+-- 
+2.55.0
+

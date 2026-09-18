@@ -1,0 +1,28 @@
+pkgname=xdg-desktop-portal-hyprland
+pkgver=1.4.1
+pkgrel=1.1
+pkgdesc='Hyprland desktop portal rebuilt for Arch RISC-V'
+arch=('riscv64')
+url='https://github.com/hyprwm/xdg-desktop-portal-hyprland'
+license=('BSD-3-Clause')
+depends=('hyprlang' 'hyprutils' 'hyprwayland-scanner' 'libdrm' 'libglvnd'
+  'libinih' 'pipewire' 'qt6-base' 'qt6-wayland' 'sdbus-cpp' 'util-linux-libs'
+  'wayland' 'xdg-desktop-portal' 'libhyprutils.so' 'libhyprlang.so' 'libsdbus-c++.so')
+makedepends=('cmake' 'ninja' 'hyprland-protocols' 'wayland-protocols')
+provides=('xdg-desktop-portal-impl')
+options=('!debug' '!lto')
+_commit=cc8e5ef8fb2acef3db488b9a33b0c48c2a4ee204
+source=("xdph-1.4.1.tar.gz::$url/archive/$_commit.tar.gz")
+sha256sums=('040f7ccbba3a701ca116b18e5da1069408b4e8f3fb0839f4afd93ef7080d877a')
+
+build() {
+  cmake -S "$srcdir/$pkgname-$_commit" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_LIBEXECDIR=lib
+  cmake --build build --parallel 8
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 "$srcdir/$pkgname-$_commit/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

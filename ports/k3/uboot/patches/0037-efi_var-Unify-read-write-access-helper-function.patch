@@ -1,0 +1,123 @@
+From 188019b49ce2a373c55e7e91a14d11f8cf05c868 Mon Sep 17 00:00:00 2001
+From: Michal Simek <michal.simek@amd.com>
+Date: Wed, 11 Feb 2026 16:56:21 +0100
+Subject: [PATCH 37/40] efi_var: Unify read/write access helper function
+
+efi_var_to/from_file() suggest method where variables are placed. But there
+is no reason for it and generic name can be used to wire also different
+locations for variables.
+
+Signed-off-by: Michal Simek <michal.simek@amd.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+Tested-by: Neil Armstrong <neil.armstrong@linaro.org> # on AML-S905D3-CC
+Reviewed-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+(cherry picked from commit 4fcc248c943b10889789f23b372ce37e06614a84)
+---
+ include/efi_variable.h        | 13 ++++---------
+ lib/efi_loader/efi_var_file.c |  8 ++++----
+ lib/efi_loader/efi_variable.c |  4 ++--
+ 3 files changed, 10 insertions(+), 15 deletions(-)
+
+diff --git a/include/efi_variable.h b/include/efi_variable.h
+index ee68fa4a..fc1184e5 100644
+--- a/include/efi_variable.h
++++ b/include/efi_variable.h
+@@ -137,13 +137,11 @@ struct efi_var_file {
+ };
+ 
+ /**
+- * efi_var_to_file() - save non-volatile variables as file
+- *
+- * File ubootefi.var is created on the EFI system partion.
++ * efi_var_to_storage() - save non-volatile variables
+  *
+  * Return:	status code
+  */
+-efi_status_t efi_var_to_file(void);
++efi_status_t efi_var_to_storage(void);
+ 
+ /**
+  * efi_var_collect() - collect variables in buffer
+@@ -178,17 +176,14 @@ efi_status_t __maybe_unused efi_var_collect(struct efi_var_file **bufp, loff_t *
+ efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe);
+ 
+ /**
+- * efi_var_from_file() - read variables from file
+- *
+- * File ubootefi.var is read from the EFI system partitions and the variables
+- * stored in the file are created.
++ * efi_var_from_storage() - read variables
+  *
+  * In case the file does not exist yet or a variable cannot be set EFI_SUCCESS
+  * is returned.
+  *
+  * Return:	status code
+  */
+-efi_status_t efi_var_from_file(void);
++efi_status_t efi_var_from_storage(void);
+ 
+ /**
+  * efi_var_mem_init() - set-up variable list
+diff --git a/lib/efi_loader/efi_var_file.c b/lib/efi_loader/efi_var_file.c
+index 749c0ddb..3b5c5b09 100644
+--- a/lib/efi_loader/efi_var_file.c
++++ b/lib/efi_loader/efi_var_file.c
+@@ -46,13 +46,13 @@ static efi_status_t __maybe_unused efi_set_blk_dev_to_system_partition(void)
+ }
+ 
+ /**
+- * efi_var_to_file() - save non-volatile variables as file
++ * efi_var_to_storage() - save non-volatile variables as file
+  *
+  * File ubootefi.var is created on the EFI system partion.
+  *
+  * Return:	status code
+  */
+-efi_status_t efi_var_to_file(void)
++efi_status_t efi_var_to_storage(void)
+ {
+ 	efi_status_t ret;
+ 	struct efi_var_file *buf;
+@@ -80,7 +80,7 @@ error:
+ }
+ 
+ /**
+- * efi_var_from_file() - read variables from file
++ * efi_var_from_storage() - read variables from file
+  *
+  * File ubootefi.var is read from the EFI system partitions and the variables
+  * stored in the file are created.
+@@ -93,7 +93,7 @@ error:
+  *
+  * Return:	status code
+  */
+-efi_status_t efi_var_from_file(void)
++efi_status_t efi_var_from_storage(void)
+ {
+ 	struct efi_var_file *buf;
+ 	loff_t len;
+diff --git a/lib/efi_loader/efi_variable.c b/lib/efi_loader/efi_variable.c
+index b852775a..9e5c4c71 100644
+--- a/lib/efi_loader/efi_variable.c
++++ b/lib/efi_loader/efi_variable.c
+@@ -405,7 +405,7 @@ efi_status_t efi_set_variable_int(const u16 *variable_name,
+ 		if (IS_ENABLED(CONFIG_EFI_VARIABLE_NO_STORE))
+ 			return EFI_SUCCESS;
+ 
+-		efi_var_to_file();
++		efi_var_to_storage();
+ 	}
+ 
+ 	return EFI_SUCCESS;
+@@ -600,7 +600,7 @@ efi_status_t efi_init_variables(void)
+ 		return ret;
+ 
+ 	if (!IS_ENABLED(CONFIG_EFI_VARIABLE_NO_STORE)) {
+-		ret = efi_var_from_file();
++		ret = efi_var_from_storage();
+ 		if (ret != EFI_SUCCESS)
+ 			return ret;
+ 	}
+-- 
+2.55.0
+

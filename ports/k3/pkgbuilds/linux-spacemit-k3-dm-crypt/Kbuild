@@ -1,0 +1,1 @@
+obj-m := async_tx.o async_xor.o dm-bufio.o dm-crypt.o dm-integrity.o

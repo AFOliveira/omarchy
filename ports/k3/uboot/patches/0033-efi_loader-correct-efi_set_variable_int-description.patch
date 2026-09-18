@@ -1,0 +1,30 @@
+From 616b3d3e152bd958d11295bc95efe9877bc505bb Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Wed, 18 Sep 2024 23:51:34 +0200
+Subject: [PATCH 33/40] efi_loader: correct efi_set_variable_int() description
+
+The name used in the function description must match the function.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit 89d911e386cc439c68ab961e76937c377e7d7127)
+---
+ include/efi_variable.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/efi_variable.h b/include/efi_variable.h
+index 223bb9a4..4065cf45 100644
+--- a/include/efi_variable.h
++++ b/include/efi_variable.h
+@@ -38,7 +38,7 @@ efi_status_t efi_get_variable_int(const u16 *variable_name,
+ 				  void *data, u64 *timep);
+ 
+ /**
+- * efi_set_variable() - set value of a UEFI variable
++ * efi_set_variable_int() - set value of a UEFI variable
+  *
+  * @variable_name:	name of the variable
+  * @vendor:		vendor GUID
+-- 
+2.55.0
+

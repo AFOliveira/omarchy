@@ -1,0 +1,30 @@
+From af64afb789d4ff296b5fb0fa4afc03565d8d229e Mon Sep 17 00:00:00 2001
+From: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Date: Thu, 29 Dec 2022 09:23:03 +0100
+Subject: [PATCH 05/40] efi_loader: typo non-volatile in efi_var_restore
+
+It is volatile variables that we do not allow to be restored from file.
+
+Signed-off-by: Heinrich Schuchardt <heinrich.schuchardt@canonical.com>
+Reviewed-by: Ilias Apalodimas <ilias.apalodimas@linaro.org>
+(cherry picked from commit fcf583b4a7f74de1475a953bd934efcdd4e34309)
+---
+ lib/efi_loader/efi_var_file.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/efi_var_file.c b/lib/efi_loader/efi_var_file.c
+index 76a2ff9e..67d9fe6d 100644
+--- a/lib/efi_loader/efi_var_file.c
++++ b/lib/efi_loader/efi_var_file.c
+@@ -176,7 +176,7 @@ efi_status_t efi_var_restore(struct efi_var_file *buf, bool safe)
+ 		data = var->name + u16_strlen(var->name) + 1;
+ 
+ 		/*
+-		 * Secure boot related and non-volatile variables shall only be
++		 * Secure boot related and volatile variables shall only be
+ 		 * restored from U-Boot's preseed.
+ 		 */
+ 		if (!safe &&
+-- 
+2.55.0
+

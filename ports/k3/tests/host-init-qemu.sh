@@ -16,7 +16,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v "$port_dir:/src:ro" -v "$test_dir:/out" \
   "${K3_BUILD_IMAGE:-omarchy-k3-builder:trixie}" bash -euo pipefail -c '
   common=(-O2 -static -march=rv64gc -mabi=lp64d -Wall -Wextra -Werror)
-  riscv64-linux-gnu-gcc "${common[@]}" /src/host-init.c -o /out/host-init
+  ! riscv64-linux-gnu-gcc "${common[@]}" /src/host-init.c -o /out/host-init-without-boot-device 2>/dev/null
   riscv64-linux-gnu-gcc "${common[@]}" -DBOOT_DEVICE=\"/dev/vdb\" -DGUARD_SECONDS=\"30\" /src/host-init.c -o /out/host-init-qemu
   riscv64-linux-gnu-gcc "${common[@]}" /src/boot-guard.c -o /out/boot-guard
   riscv64-linux-gnu-gcc "${common[@]}" /src/tests/host-init-fixture.c -o /out/fixture

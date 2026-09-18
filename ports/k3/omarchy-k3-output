@@ -7,6 +7,10 @@ if ! hyprctl monitors all -j | jq -e '.[] | select(.name == "K3-CLOUD")' >/dev/n
   hyprctl output create headless K3-CLOUD
 fi
 hyprctl keyword monitor "K3-CLOUD,1920x1080@60,0x0,1"
-hyprctl keyword monitor "WAYLAND-1,disable"
+# The cloud viewer shows only K3-CLOUD; turn off whatever else the DRM device
+# exposes (SpacemiT's display connector, or the virtual connector of vkms).
+hyprctl monitors all -j | jq -r '.[] | select(.name != "K3-CLOUD") | .name' | while read -r name; do
+  hyprctl keyword monitor "$name,disable" >/dev/null
+done
 hyprctl dispatch focusmonitor K3-CLOUD
 hyprctl dispatch workspace 1

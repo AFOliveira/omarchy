@@ -1,0 +1,29 @@
+From 0ac56f9d79c6ae874b00ab5e2a29585997e9fd99 Mon Sep 17 00:00:00 2001
+From: Bin Meng <bmeng@tinylab.org>
+Date: Wed, 5 Apr 2023 20:15:19 +0800
+Subject: [PATCH 15/40] efi: loader: Make efi_runtime_mmio static
+
+efi_runtime_mmio is only referenced in efi_boottime.c
+
+Signed-off-by: Bin Meng <bmeng@tinylab.org>
+(cherry picked from commit 6fc4fc38ac4d11ac53b4d539588d216d107f7703)
+---
+ lib/efi_loader/efi_runtime.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/efi_loader/efi_runtime.c b/lib/efi_loader/efi_runtime.c
+index f7855a19..5277f9b0 100644
+--- a/lib/efi_loader/efi_runtime.c
++++ b/lib/efi_loader/efi_runtime.c
+@@ -32,7 +32,7 @@ struct efi_runtime_mmio_list {
+ };
+ 
+ /* This list contains all runtime available mmio regions */
+-LIST_HEAD(efi_runtime_mmio);
++static LIST_HEAD(efi_runtime_mmio);
+ 
+ static efi_status_t __efi_runtime EFIAPI efi_unimplemented(void);
+ 
+-- 
+2.55.0
+
