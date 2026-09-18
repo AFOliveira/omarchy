@@ -286,7 +286,7 @@ trusted_file() {
 # guessed at, since a pattern read wrongly would match nothing and leave the
 # real file unchecked.
 config_graph_is_trusted() {
-  local file=$1 depth=${2:-0} pattern match listing directory
+  local file=$1 depth=${2:-0} pattern match listing directory base ancestor
   local -a patterns=() matches
   (( depth <= 16 )) || return 1
   trusted_file "$file" || return 1
@@ -310,13 +310,20 @@ config_graph_is_trusted() {
     # or the nearest part of it that exists. Wildcards in the directory part
     # could reach anywhere and are refused.
     directory=${pattern%/*}
-    [[ $directory != *[*?[]* ]] || return 1
+    base=${pattern##*/}
+    [[ -n $base && $directory != *[*?[]* ]] || return 1
     directory=$root_prefix${directory:-/}
-    while [[ -n $directory && ! -e $directory && ! -L $directory ]]; do directory=${directory%/*}; done
-    trusted_directory "${directory:-/}" || return 1
-    listing=$(compgen -G "$root_prefix$pattern") || listing=""
+    ancestor=$directory
+    while [[ -n $ancestor && ! -e $ancestor && ! -L $ancestor ]]; do ancestor=${ancestor%/*}; done
+    trusted_directory "${ancestor:-/}" || return 1
+    # A directory that does not exist yet has no matches. One that does is
+    # listed in full, and a listing that fails is not taken as empty. find's
+    # -name matches dotfiles a shell glob would skip, so it checks more.
     matches=()
-    [[ -z $listing ]] || mapfile -t matches <<<"$listing"
+    if [[ -e $directory || -L $directory ]]; then
+      mapfile -d '' -t matches < <(/usr/bin/find "$directory" -mindepth 1 -maxdepth 1 -name "$base" -print0)
+      wait "$!" || return 1
+    fi
     for match in "${matches[@]}"; do
       config_graph_is_trusted "$match" $(( depth + 1 )) || return 1
     done

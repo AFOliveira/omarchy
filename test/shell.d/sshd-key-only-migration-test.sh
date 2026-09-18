@@ -57,6 +57,13 @@ cat >"$b/awk" <<'SH'
 if [[ ${AWK_FAIL:-0} == 1 && $* == *'tolower(keyword) != "include"'* ]]; then echo /etc/ssh/sshd_config.d/*.conf; exit 42; fi
 exec /usr/bin/awk "$@"
 SH
+# FIND_FAIL makes listing an Include directory report one entry and then
+# fail, as an interrupted enumeration would.
+cat >"$b/find" <<'SH'
+#!/bin/bash
+if [[ ${FIND_FAIL:-0} == 1 && ${*: -1} == -print0 ]]; then printf '%s\0' "$1/a.conf"; exit 1; fi
+exec /usr/bin/find "$@"
+SH
 # MARKER_LOOKUP_FAIL makes looking up the completion marker fail with an I/O
 # error rather than report it present or absent.
 cat >"$b/stat" <<'SH'
@@ -111,7 +118,7 @@ sed -e 's#^root_prefix=""$#root_prefix=$TEST_ROOT#' \
  -e "s#-- /run#-- $t/run#g" -e "s#-L /run#-L $t/run#g" -e "s#== /run#== $t/run#g" \
  -e "s#/usr/bin/systemctl#$b/systemctl#g" -e "s#/usr/bin/ssh-keygen#$b/ssh-keygen#g" -e "s#/usr/bin/sshd#$b/sshd#g" \
  -e "s#/usr/bin/passwd#$b/passwd#g" -e "s#/usr/bin/id#$b/id#g" -e "s#/usr/bin/getent#$b/getent#g" -e "s#/usr/bin/setpriv#$b/setpriv#g" \
- -e "s#/usr/bin/omarchy-pkg-add#$b/omarchy-pkg-add#g" -e "s#/usr/bin/omarchy-cmd-missing#$b/omarchy-cmd-missing#g" -e "s#/usr/bin/ufw#$b/ufw#g" -e "s#/usr/bin/mv#$b/mv#g" -e "s#/usr/bin/stat#$b/stat#g" -e "s#/usr/bin/awk#$b/awk#g" \
+ -e "s#/usr/bin/omarchy-pkg-add#$b/omarchy-pkg-add#g" -e "s#/usr/bin/omarchy-cmd-missing#$b/omarchy-cmd-missing#g" -e "s#/usr/bin/ufw#$b/ufw#g" -e "s#/usr/bin/mv#$b/mv#g" -e "s#/usr/bin/stat#$b/stat#g" -e "s#/usr/bin/awk#$b/awk#g" -e "s#/usr/bin/find#$b/find#g" \
  "$repo/bin/omarchy-migrate-sshd-key-only" >"$mapped/bin/omarchy-migrate-sshd-key-only"; chmod 0755 "$mapped/bin/"*
 grep -qx 'root_prefix=$TEST_ROOT' "$mapped/bin/omarchy-migrate-sshd-key-only" || { echo "test could not redirect the machine paths" >&2; exit 1; }
 /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/key"; key=$(<"$t/key.pub")
@@ -207,7 +214,7 @@ if /usr/bin/bash "$mapped/bin/omarchy-migrate-sshd-key-only" -p >/dev/null 2>&1;
 # ---- Setup's machine phase: --setup UID -- KEY... ----
 /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/other"; other=$(<"$t/other.pub")
 sprep() { prepare "$1"; rm -f "$t/$1/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; echo 'nologin:x:1002:1002::/home/nologin:/usr/bin/nologin' >>"$t/$1/root/etc/passwd"; }
-srun() { local name=$1; shift; env -u SUDO_UID TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" MARKER_LOOKUP_FAIL="${MARKER_LOOKUP_FAIL:-0}" AWK_FAIL="${AWK_FAIL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
+srun() { local name=$1; shift; env -u SUDO_UID TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" MARKER_LOOKUP_FAIL="${MARKER_LOOKUP_FAIL:-0}" AWK_FAIL="${AWK_FAIL:-0}" FIND_FAIL="${FIND_FAIL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
 cfg() { printf '%s' "$t/$1/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; }
 marker() { printf '%s' "$t/$1/root/var/lib/omarchy/migrations/1788163637"; }
 untouched() { [[ ! -e $(cfg "$1") && ! -e $t/$1/state/active && ! -e $t/$1/state/enabled && ! -e $t/$1/state/rule && ! -e $(marker "$1") ]] || { echo "$1 changed the machine" >&2; exit 1; }; }
@@ -266,6 +273,9 @@ srun s-cfg-empty-ok --setup 1000 -- "$key" >/dev/null || { echo "setup refused a
 # A configuration that cannot be read in full proves nothing.
 sprep s-cfg-parse; AWK_FAIL=1 srun s-cfg-parse --setup 1000 -- "$key" >"$t/s-cfg-parse.out" 2>&1 && { echo "setup trusted a configuration it could not parse" >&2; exit 1; }
 untouched s-cfg-parse; grep -q 'is not a root-owned file only root can write' "$t/s-cfg-parse.out" || { echo "a parser failure was refused for another reason" >&2; cat "$t/s-cfg-parse.out" >&2; exit 1; }
+# Nor does a listing of an Include directory that fails part way.
+sprep s-cfg-list; FIND_FAIL=1 srun s-cfg-list --setup 1000 -- "$key" >"$t/s-cfg-list.out" 2>&1 && { echo "setup trusted an Include directory it could not list" >&2; exit 1; }
+untouched s-cfg-list; grep -q 'is not a root-owned file only root can write' "$t/s-cfg-list.out" || { echo "a listing failure was refused for another reason" >&2; cat "$t/s-cfg-list.out" >&2; exit 1; }
 # The same nested include, only root-writable, is accepted.
 sprep s-cfg-nested-ok; echo 'Include extra.conf' >>"$t/s-cfg-nested-ok/root/etc/ssh/sshd_config"; echo 'Include nested/*.conf' >"$t/s-cfg-nested-ok/root/etc/ssh/extra.conf"; mkdir -p "$t/s-cfg-nested-ok/root/etc/ssh/nested"; echo 'Port 22' >"$t/s-cfg-nested-ok/root/etc/ssh/nested/a.conf"
 srun s-cfg-nested-ok --setup 1000 -- "$key" >/dev/null || { echo "setup refused a trusted nested include" >&2; exit 1; }
