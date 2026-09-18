@@ -130,8 +130,8 @@ sed \
   -e "s#/usr/bin/mv#$stub/mv#g" \
   "$ROOT/bin/omarchy-setup-security-sshd" >"$mapped_sshd"
 # A copy whose final revocation gives up quickly, to test that bound.
-sed 's#local bound=30 #local bound=1 #' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
-grep -q 'local bound=1 ' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
+sed 's#local - bound=30 #local - bound=1 #' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
+grep -q 'local - bound=1 ' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
 chmod 0755 "$mapped_root/bin/"*
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/key"
@@ -290,8 +290,8 @@ for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 
 if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-hang/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung final revocation held setup forever"; fi
 wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
 grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-hang.out" || fail "a hung final revocation was not reported" "$(cat "$tmp/revoke-hang.out")"
+! grep -q 'Killed' "$tmp/revoke-hang.out" || fail "a killed revocation leaked a job report" "$(cat "$tmp/revoke-hang.out")"
 [[ $(grep -c '^sudo -k$' "$tmp/revoke-hang/events") == 4 ]] || fail "a hung final revocation was not retried" "$(cat "$tmp/revoke-hang/events")"
-xargs -r kill -KILL <"$tmp/revoke-hang/state/hang.pids" 2>/dev/null || true
 unset LIMIT_FAIL REVOKE_HANG SETUP_BIN
 # Nor does a signal to setup's whole process group unbound it, even when the
 # hung revocation ignores that signal. Setup leads its own group here.
@@ -304,19 +304,25 @@ for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 
 if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-group/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a group signal left a hung final revocation unbounded"; fi
 wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
 grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-group.out" || fail "a hung final revocation after a group signal was not reported" "$(cat "$tmp/revoke-group.out")"
-xargs -r kill -KILL <"$tmp/revoke-group/state/hang.pids" 2>/dev/null || true
 unset LIMIT_FAIL REVOKE_HANG REVOKE_IGNORE_TERM RUN_WRAPPER SETUP_BIN
-# A revoker that exits but leaves something running is bounded by its process
-# group, which is what gets killed, never a PID that may have been reused.
-LIMIT_FAIL=1 REVOKE_ORPHAN=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
+# A revoker that exits but leaves something running has still revoked: its
+# exit, not its leftover, ends the wait, and nothing of it is killed.
+# With the full 30-second bound, finishing within 15 seconds proves the wait
+# ended at the revoker's exit rather than the deadline.
+LIMIT_FAIL=1 REVOKE_ORPHAN=1
 run revoke-orphan "--key=$key" >"$tmp/revoke-orphan.out" 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
 if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-orphan/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a revoker's leftover process held setup forever"; fi
 wait "$runner" 2>/dev/null || true
-orphan=$(<"$tmp/revoke-orphan/state/hang.pids")
-if kill -0 "$orphan" 2>/dev/null; then kill -KILL "$orphan" 2>/dev/null; fail "a revoker's leftover process outlived the bounded revocation"; fi
 ! grep -q 'could not invalidate' "$tmp/revoke-orphan.out" || fail "a revocation that succeeded was reported as failed"
-unset LIMIT_FAIL REVOKE_ORPHAN SETUP_BIN
+[[ $(grep -c '^sudo -k$' "$tmp/revoke-orphan/events") == 2 ]] || fail "a revocation that succeeded was retried" "$(cat "$tmp/revoke-orphan/events")"
+# The leftover is a live 30-second sleep this fixture started moments ago.
+xargs -r kill -KILL <"$tmp/revoke-orphan/state/hang.pids" 2>/dev/null || true
+unset LIMIT_FAIL REVOKE_ORPHAN
+# A repeated wait never probes a PID that may already belong to another
+# process: it repeats only when a trapped signal interrupted it.
+! sed -n '/^wait_for_cleanup_child() {/,/^}/p' "$ROOT/bin/omarchy-setup-security-sshd" | grep -q 'kill -0' ||
+  fail "the cleanup wait still probes a PID after collecting its status"
 # Without a descriptor to bound its final revocation, setup refuses before
 # anything privileged. A copy whose reservation cannot succeed stands in for
 # running out of descriptors.
