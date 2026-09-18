@@ -50,7 +50,12 @@ case $1 in choose) printf '%s\n' "${GUM_CHOICE:-}" ;; input) [[ ${GUM_CANCEL:-0}
 SH
 cat >"$stub/mv" <<'SH'
 #!/bin/bash
-[[ ${*: -1} != */authorized_keys ]] || echo authorized-key >>"$EVENTS"
+if [[ ${*: -1} == */authorized_keys ]]; then
+  echo authorized-key >>"$EVENTS"
+  # The second move onto authorized_keys is rollback restoring the original.
+  if [[ ${KEYS_HANG:-0} == 1 && -e $STATE/keys-moved ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; exit 1; fi
+  touch "$STATE/keys-moved"
+fi
 exec /usr/bin/mv "$@"
 SH
 
@@ -58,7 +63,17 @@ cat >"$stub/sudo" <<'SH'
 #!/bin/bash
 set -euo pipefail
 echo "sudo $*" >>"$EVENTS"
-[[ ${1:-} != -k ]] || exit 0
+if [[ ${1:-} == -k ]]; then
+  # The first revocation is setup's entry; a later one is cleanup's final one,
+  # which runs under timeout, so setup is timeout's parent.
+  if [[ -e $STATE/k-seen ]]; then
+    p=$PPID; [[ $(ps -o comm= -p "$p") != timeout ]] || p=$(ps -o ppid= -p "$p" | tr -d ' ')
+    echo "$p" >"$STATE/setup.pid"
+    if [[ ${REVOKE_SLOW:-0} == 1 ]]; then touch "$STATE/revoking"; sleep 1; echo revoked >>"$EVENTS"; fi
+    if [[ ${REVOKE_HANG:-0} == 1 ]]; then sleep 30 & echo $! >"$STATE/hang.pid"; wait $!; fi
+  fi
+  touch "$STATE/k-seen"; exit 0
+fi
 map() { [[ $1 == /etc/* || $1 == /var/* ]] && printf '%s%s' "$FAKE_ROOT" "$1" || printf %s "$1"; }
 case $1 in
 systemctl)
@@ -76,7 +91,7 @@ ufw)
   shift
   if [[ $1 == show ]]; then [[ ${UFW_QUERY_ERROR:-0} != 1 ]] || exit 1; [[ -e $STATE/rule && ${VERIFY_MISS:-0} != 1 ]] && echo "ufw limit 22/tcp comment 'omarchy-sshd'"; exit 0
   elif [[ $1 == limit ]]; then [[ ${LIMIT_PARTIAL:-0} != 1 ]] || { touch "$STATE/rule"; exit 1; }; [[ ${LIMIT_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/rule"; [[ ${LIMIT_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"
-  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; if [[ ${DELETE_HANG:-0} == 1 ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
+  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || { trap "" TERM; kill -TERM "$PPID"; }; if [[ ${DELETE_HANG:-0} == 1 ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
   elif [[ $1 == reload ]]; then n=0; [[ ! -e $STATE/ufw-reloads ]] || read -r n <"$STATE/ufw-reloads"; n=$((n+1)); echo "$n" >"$STATE/ufw-reloads"; [[ ${UFW_RELOAD_ALWAYS_FAIL:-0} != 1 && (${UFW_RELOAD_ONCE:-0} != 1 || $n != 1) ]]
   fi ;;
 test) p=$(map "$3"); case $2 in -e) [[ -e $p ]] ;; -L) [[ -L $p ]] ;; -f) [[ -f $p ]] ;; esac ;;
@@ -112,6 +127,9 @@ sed \
   -e "s#/usr/bin/gum#$stub/gum#g" \
   -e "s#/usr/bin/mv#$stub/mv#g" \
   "$ROOT/bin/omarchy-setup-security-sshd" >"$mapped_sshd"
+# A copy whose final revocation gives up quickly, to test that bound.
+sed 's#/usr/bin/timeout -k 5 30 #/usr/bin/timeout -k 1 1 #' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
+grep -q 'timeout -k 1 1 ' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
 chmod 0755 "$mapped_root/bin/"*
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/key"
@@ -134,9 +152,9 @@ run() {
     MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" MATCH_KBD_AUTH="${MATCH_KBD_AUTH:-}" MATCH_AUTH_METHODS="${MATCH_AUTH_METHODS:-}" MATCH_PUBKEY_AUTH="${MATCH_PUBKEY_AUTH:-}" MATCH_KEYS_SETTING="${MATCH_KEYS_SETTING:-}" \
     ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" \
     ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" LIMIT_SIGNAL="${LIMIT_SIGNAL:-0}" BACKUP_SIGNAL="${BACKUP_SIGNAL:-0}" \
-    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" \
+    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" KEYS_HANG="${KEYS_HANG:-0}" REVOKE_SLOW="${REVOKE_SLOW:-0}" REVOKE_HANG="${REVOKE_HANG:-0}" \
     LIMIT_FAIL="${LIMIT_FAIL:-0}" LIMIT_PARTIAL="${LIMIT_PARTIAL:-0}" VERIFY_MISS="${VERIFY_MISS:-0}" UFW_RELOAD_ONCE="${UFW_RELOAD_ONCE:-0}" UFW_RELOAD_ALWAYS_FAIL="${UFW_RELOAD_ALWAYS_FAIL:-0}" DELETE_FAIL="${DELETE_FAIL:-0}" CONFIG_RM_FAIL="${CONFIG_RM_FAIL:-0}" \
-    "$mapped_sshd" "$@"
+    "${SETUP_BIN:-$mapped_sshd}" "$@"
 }
 no_publish() { ! grep -Eq 'sudo systemctl (start|enable|reload)|sudo ufw limit' "$tmp/$1/events" || fail "$1 published SSH" "$(cat "$tmp/$1/events")"; }
 rolled_back() { [[ ! -e $tmp/$1/state/active && ! -e $tmp/$1/state/enabled && ! -e $tmp/$1/state/rule && ! -e $tmp/$1/home/.ssh/authorized_keys ]] || fail "$1 did not roll back"; }
@@ -210,7 +228,8 @@ if run "$name" "--key=$key" >/dev/null 2>&1; then fail "setup interrupted after 
 ! compgen -G "$tmp/$name/root/etc/ssh/sshd_config.d/.00-omarchy-key-only.backup.*" >/dev/null || fail "an interrupted setup left its config backup behind"
 [[ $(<"$cfg") == ADMIN ]] || fail "an interrupted setup changed the existing config"
 unset BACKUP_SIGNAL
-# A second signal arriving while rollback runs must not abort it.
+# A second signal arriving while rollback runs must not abort it. The delete
+# ignores the TERM forwarded to it, so only the shell's handling is tested.
 UFW_RELOAD_ONCE=1 DELETE_SIGNAL=1
 if run rollback-signal "--key=$key" >/dev/null 2>&1; then fail "a failed setup reported success"; fi
 rolled_back rollback-signal
@@ -235,6 +254,40 @@ wait "$runner" 2>/dev/null || true
 grep -q 'CRITICAL: SSH setup rollback was incomplete' "$tmp/rollback-hang.out" || fail "an interrupted rollback step was not reported" "$(cat "$tmp/rollback-hang.out")"
 [[ $(tail -n1 "$tmp/rollback-hang/events") == 'sudo -k' ]] || fail "rollback did not finish after its hung command was stopped"
 unset UFW_RELOAD_ONCE DELETE_HANG
+# The same holds for restoring authorized_keys, which runs without sudo.
+name=keys-hang; mkdir -p "$tmp/$name/home/.ssh"; chmod 0700 "$tmp/$name/home/.ssh"; echo "$key" >"$tmp/$name/home/.ssh/authorized_keys"; chmod 0600 "$tmp/$name/home/.ssh/authorized_keys"
+LIMIT_FAIL=1 KEYS_HANG=1
+run "$name" "--key=$key" >"$tmp/$name.out" 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -s $tmp/$name/state/setup.pid ]] && break; sleep 0.05; done
+[[ -s $tmp/$name/state/setup.pid ]] || fail "the rollback never reached the hanging key restoration"
+kill -TERM "$(<"$tmp/$name/state/setup.pid")" 2>/dev/null || true
+for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+kill -KILL "$(<"$tmp/$name/state/hang.pid")" 2>/dev/null || true
+if kill -0 "$runner" 2>/dev/null; then wait "$runner" 2>/dev/null || true; fail "a TERM to setup did not reach its hung key restoration"; fi
+wait "$runner" 2>/dev/null || true
+grep -q 'CRITICAL: SSH setup rollback was incomplete' "$tmp/$name.out" || fail "an interrupted key restoration was not reported" "$(cat "$tmp/$name.out")"
+[[ $(tail -n1 "$tmp/$name/events") == 'sudo -k' ]] || fail "rollback did not revoke after its hung key restoration was stopped"
+unset LIMIT_FAIL KEYS_HANG
+# The final revocation is not something a signal stops: a TERM sent to setup
+# while it runs is held, and the revocation completes.
+LIMIT_FAIL=1 REVOKE_SLOW=1
+run revoke-signal "--key=$key" >"$tmp/revoke-signal.out" 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -e $tmp/revoke-signal/state/revoking ]] && break; sleep 0.05; done
+[[ -e $tmp/revoke-signal/state/revoking && -s $tmp/revoke-signal/state/setup.pid ]] || fail "the rollback never reached its final revocation"
+kill -TERM "$(<"$tmp/revoke-signal/state/setup.pid")" 2>/dev/null || true
+wait "$runner" 2>/dev/null || true
+grep -qx revoked "$tmp/revoke-signal/events" || fail "a TERM to setup interrupted its final revocation" "$(tail -n3 "$tmp/revoke-signal/events")"
+! grep -q 'could not invalidate' "$tmp/revoke-signal.out" || fail "a completed final revocation was reported as failed"
+unset LIMIT_FAIL REVOKE_SLOW
+# A final revocation that hangs is bounded and reported, not waited on forever.
+LIMIT_FAIL=1 REVOKE_HANG=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
+run revoke-hang "--key=$key" >"$tmp/revoke-hang.out" 2>&1 & runner=$!
+for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$runner" 2>/dev/null; then pkill -KILL -f "sleep 30" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung final revocation held setup forever"; fi
+wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
+grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-hang.out" || fail "a hung final revocation was not reported" "$(cat "$tmp/revoke-hang.out")"
+[[ $(grep -c '^sudo -k$' "$tmp/revoke-hang/events") == 4 ]] || fail "a hung final revocation was not retried" "$(cat "$tmp/revoke-hang/events")"
+unset LIMIT_FAIL REVOKE_HANG SETUP_BIN
 # The completion certificate never outlives an incomplete setup: an earlier
 # one is invalidated, and a signal right after writing it removes it again.
 name=marker-signal; mkdir -p "$tmp/$name/root/var/lib/omarchy/migrations"; : >"$tmp/$name/root/var/lib/omarchy/migrations/1788163637"

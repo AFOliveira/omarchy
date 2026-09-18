@@ -159,37 +159,64 @@ sshd_enabled_state() {
   esac
 }
 
-# Cleanup must finish even when a further signal arrives, yet a command it runs
-# must not become impossible to stop: a signal sent only to this shell would
-# otherwise wait behind a hung child. Each cleanup command runs as a background
-# child that the shell waits on; wait is interruptible, so a signal is
-# forwarded to that child and cleanup then continues with the next step.
+# Once cleanup starts it must finish, yet a command it runs must not become
+# impossible to stop: a signal sent only to this shell would otherwise wait
+# behind a hung child. Before cleanup, a signal ends setup, which rolls back.
+# During cleanup, each command runs as a waited-on background child and a
+# signal is forwarded to it; one arriving before its PID is known is held and
+# forwarded as soon as it is. The final revocation is never forwarded a
+# signal; timeout bounds it instead.
+CLEANUP_ACTIVE=false
 CLEANUP_CHILD=""
-forward_cleanup_signal() {
-  [[ -z $CLEANUP_CHILD ]] || kill -TERM "$CLEANUP_CHILD" 2>/dev/null || true
+CLEANUP_SIGNAL_PENDING=false
+handle_setup_signal() {
+  if [[ $CLEANUP_ACTIVE != "true" ]]; then
+    CLEANUP_ACTIVE=true
+    exit "$1"
+  elif [[ -n $CLEANUP_CHILD ]]; then
+    kill -TERM "$CLEANUP_CHILD" 2>/dev/null || true
+  else
+    CLEANUP_SIGNAL_PENDING=true
+  fi
+}
+wait_for_cleanup_child() {
+  local status
+  while :; do
+    wait "$1" && status=0 || status=$?
+    kill -0 "$1" 2>/dev/null || break
+  done
+  return "$status"
 }
 run_cleanup() {
   local status
+  CLEANUP_SIGNAL_PENDING=false
   "$@" &
   CLEANUP_CHILD=$!
-  while :; do
-    wait "$CLEANUP_CHILD" && status=0 || status=$?
-    kill -0 "$CLEANUP_CHILD" 2>/dev/null || break
-  done
+  if [[ $CLEANUP_SIGNAL_PENDING == "true" ]]; then
+    kill -TERM "$CLEANUP_CHILD" 2>/dev/null || true
+  fi
+  wait_for_cleanup_child "$CLEANUP_CHILD" && status=0 || status=$?
   CLEANUP_CHILD=""
   return "$status"
+}
+# timeout runs sudo in its own process group, so a signal to this group does
+# not reach it either; an attempt that fails anyway is retried.
+revoke_cleanup_sudo() {
+  local attempt
+  for attempt in 1 2 3; do
+    /usr/bin/timeout -k 5 30 /usr/bin/sudo -k >/dev/null 2>&1 &
+    wait_for_cleanup_child "$!" && return 0
+  done
+  return 1
 }
 
 rollback_setup() {
   local exit_status=$?
+  CLEANUP_ACTIVE=true
   local rollback_failed=false config_restored=false
   trap - EXIT
-  # A second signal must not abort restoration or the final revocation; it is
-  # forwarded to the running cleanup command instead. A handler rather than an
-  # ignored disposition, since exec inherits ignored signals.
-  trap forward_cleanup_signal HUP INT TERM
 
-  [[ -z $AUTHORIZED_KEYS_TEMP ]] || /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP"
+  [[ -z $AUTHORIZED_KEYS_TEMP ]] || run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP" || true
 
   if [[ $SETUP_COMPLETE != "true" ]]; then
     # First, so nothing below can leave a certification of a restored config.
@@ -249,16 +276,16 @@ rollback_setup() {
     fi
     if [[ $AUTHORIZED_KEYS_TOUCHED == "true" ]]; then
       if [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
-        if /usr/bin/mv -fT -- "$AUTHORIZED_KEYS_BACKUP" "$AUTHORIZED_KEYS"; then
+        if run_cleanup /usr/bin/mv -fT -- "$AUTHORIZED_KEYS_BACKUP" "$AUTHORIZED_KEYS"; then
           AUTHORIZED_KEYS_BACKUP=""
         else
           rollback_failed=true
         fi
       elif [[ $AUTHORIZED_KEYS_WAS_PRESENT != "true" ]]; then
-        /usr/bin/rm -f -- "$AUTHORIZED_KEYS" || rollback_failed=true
+        run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS" || rollback_failed=true
       fi
     elif [[ -n $AUTHORIZED_KEYS_BACKUP ]]; then
-      /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" || rollback_failed=true
+      run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" || rollback_failed=true
       AUTHORIZED_KEYS_BACKUP=""
     fi
   elif [[ -n $HARDENING_BACKUP ]]; then
@@ -267,7 +294,7 @@ rollback_setup() {
     }
   fi
   if [[ $SETUP_COMPLETE == "true" && -n $AUTHORIZED_KEYS_BACKUP ]]; then
-    /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" ||
+    run_cleanup /usr/bin/rm -f -- "$AUTHORIZED_KEYS_BACKUP" ||
       echo "WARNING: SSH setup succeeded but could not remove $AUTHORIZED_KEYS_BACKUP" >&2
   fi
 
@@ -276,7 +303,7 @@ rollback_setup() {
     ((exit_status != 0)) || exit_status=1
   fi
 
-  if ! run_cleanup /usr/bin/sudo -k >/dev/null 2>&1; then
+  if ! revoke_cleanup_sudo; then
     echo "CRITICAL: SSH setup could not invalidate cached sudo authorization." >&2
     ((exit_status != 0)) || exit_status=1
   fi
@@ -284,7 +311,9 @@ rollback_setup() {
   exit "$exit_status"
 }
 trap rollback_setup EXIT
-omarchy_security_install_signal_exit_traps
+trap 'handle_setup_signal 129' HUP
+trap 'handle_setup_signal 130' INT
+trap 'handle_setup_signal 143' TERM
 
 open_firewall() {
   if /usr/bin/omarchy-cmd-missing ufw; then
