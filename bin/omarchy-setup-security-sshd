@@ -202,53 +202,34 @@ run_cleanup() {
 # The final revocation stays a direct child of this shell: under
 # timestamp_type=ppid, and without a terminal, sudo keys the cached
 # authorization by its parent, so an intermediary would revoke some other
-# record and still succeed. Its stdout is a pipe only it holds, so its exit
-# arrives as end-of-file and read's own timeout bounds it, with no watchdog
-# process to lose or leave behind; a signal interrupting read does not end the
-# wait. A failed attempt, such as one a signal to the whole group killed, is
-# retried.
-revoke_pipe_closed() {
-  local started=$SECONDS status
-  while (( SECONDS - started < $2 )); do
-    read -r -t 1 -u "$1" _ && continue
-    status=$?
-    (( status > 128 )) || return 0
-  done
-  return 1
+# record and still succeed. Job control gives it a process group of its own
+# in the same session, so a signal to this shell's group does not reach it,
+# and the group ID stays reserved while it or anything it started lives.
+# The wait is bounded by polling that group, pausing on a descriptor
+# reserved before the first privileged call; no watchdog process is involved.
+# A failed attempt is retried.
+# Pauses up to a second, or until a signal arrives, without a child process.
+cleanup_pause() {
+  read -r -t 1 -u "$CLEANUP_CLOCK" _ || true
 }
 revoke_sudo_once() {
-  local bound=30 pipe="" reader="" writer="" revoke
-  # Without descriptors for the pipe, revoke unbounded rather than not at all.
-  if ! { exec {pipe}<> <(:); } 2>/dev/null; then
-    /usr/bin/sudo -k >/dev/null 2>&1
-    return
-  fi
-  { exec {reader}<"/dev/fd/$pipe"; } 2>/dev/null || reader=""
-  [[ -z $reader ]] || { exec {writer}>"/dev/fd/$pipe"; } 2>/dev/null || writer=""
-  exec {pipe}>&-
-  if [[ -z $reader || -z $writer ]]; then
-    [[ -z $reader ]] || exec {reader}<&-
-    /usr/bin/sudo -k >/dev/null 2>&1
-    return
-  fi
-  /usr/bin/sudo -k 2>/dev/null >&"$writer" {reader}<&- &
+  local bound=30 revoke started
+  set -m
+  /usr/bin/sudo -k >/dev/null 2>&1 &
   revoke=$!
-  exec {writer}>&-
-  if revoke_pipe_closed "$reader" "$bound"; then
-    exec {reader}<&-
-    wait_for_cleanup_child "$revoke"
-    return
+  set +m
+  started=$SECONDS
+  while kill -0 -- "-$revoke" 2>/dev/null && (( SECONDS - started < bound )); do cleanup_pause; done
+  if kill -0 -- "-$revoke" 2>/dev/null; then
+    # A live group keeps its ID reserved, so this reaches only the revoker
+    # and anything it left behind. One that survives even this is abandoned
+    # rather than waited on forever.
+    kill -KILL -- "-$revoke" 2>/dev/null || true
+    started=$SECONDS
+    while kill -0 -- "-$revoke" 2>/dev/null && (( SECONDS - started < 2 )); do cleanup_pause; done
+    ! kill -0 -- "-$revoke" 2>/dev/null || return 1
   fi
-  # The pipe is still open, so its only holder is alive and the PID its own.
-  kill -KILL "$revoke" 2>/dev/null || true
-  # A revoker that does not go even then is abandoned, not waited on forever.
-  if revoke_pipe_closed "$reader" 2; then
-    exec {reader}<&-
-    wait_for_cleanup_child "$revoke" || true
-  else
-    exec {reader}<&-
-  fi
-  return 1
+  wait_for_cleanup_child "$revoke"
 }
 revoke_cleanup_sudo() {
   local attempt
@@ -357,6 +338,14 @@ rollback_setup() {
 
   exit "$exit_status"
 }
+# Cleanup's bounded revocation pauses on this descriptor. Reserve it before
+# anything privileged, so running out of descriptors refuses setup instead of
+# leaving the final revocation unbounded.
+CLEANUP_CLOCK=""
+if ! { exec {CLEANUP_CLOCK}<> <(:); } 2>/dev/null; then
+  echo "Could not reserve a descriptor for SSH setup cleanup; refusing to start." >&2
+  exit 1
+fi
 # One assignment-only command records the status and marks cleanup active, so
 # no signal handler can run between the two and abandon the rollback.
 trap 'CLEANUP_EXIT_STATUS=$? CLEANUP_ACTIVE=true; rollback_setup' EXIT

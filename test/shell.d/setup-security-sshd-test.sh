@@ -69,6 +69,7 @@ if [[ ${1:-} == -k ]]; then
   if [[ -e $STATE/k-seen ]]; then
     echo "$PPID" >"$STATE/setup.pid"; echo "$PPID" >>"$STATE/final-k.ppid"
     if [[ ${REVOKE_SLOW:-0} == 1 ]]; then touch "$STATE/revoking"; sleep 1; echo revoked >>"$EVENTS"; fi
+    if [[ ${REVOKE_ORPHAN:-0} == 1 ]]; then sleep 30 & echo $! >>"$STATE/hang.pids"; exit 0; fi
     if [[ ${REVOKE_HANG:-0} == 1 ]]; then [[ ${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & echo $! >>"$STATE/hang.pids"; wait $!; fi
   else
     echo "$PPID" >"$STATE/k-seen"
@@ -153,7 +154,7 @@ run() {
     MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" MATCH_KBD_AUTH="${MATCH_KBD_AUTH:-}" MATCH_AUTH_METHODS="${MATCH_AUTH_METHODS:-}" MATCH_PUBKEY_AUTH="${MATCH_PUBKEY_AUTH:-}" MATCH_KEYS_SETTING="${MATCH_KEYS_SETTING:-}" \
     ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" \
     ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" LIMIT_SIGNAL="${LIMIT_SIGNAL:-0}" BACKUP_SIGNAL="${BACKUP_SIGNAL:-0}" \
-    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" KEYS_HANG="${KEYS_HANG:-0}" REVOKE_SLOW="${REVOKE_SLOW:-0}" REVOKE_HANG="${REVOKE_HANG:-0}" REVOKE_IGNORE_TERM="${REVOKE_IGNORE_TERM:-0}" \
+    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" KEYS_HANG="${KEYS_HANG:-0}" REVOKE_SLOW="${REVOKE_SLOW:-0}" REVOKE_HANG="${REVOKE_HANG:-0}" REVOKE_IGNORE_TERM="${REVOKE_IGNORE_TERM:-0}" REVOKE_ORPHAN="${REVOKE_ORPHAN:-0}" \
     LIMIT_FAIL="${LIMIT_FAIL:-0}" LIMIT_PARTIAL="${LIMIT_PARTIAL:-0}" VERIFY_MISS="${VERIFY_MISS:-0}" UFW_RELOAD_ONCE="${UFW_RELOAD_ONCE:-0}" UFW_RELOAD_ALWAYS_FAIL="${UFW_RELOAD_ALWAYS_FAIL:-0}" DELETE_FAIL="${DELETE_FAIL:-0}" CONFIG_RM_FAIL="${CONFIG_RM_FAIL:-0}" \
     "${SETUP_BIN:-$mapped_sshd}" "$@"
 }
@@ -305,6 +306,28 @@ wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocatio
 grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-group.out" || fail "a hung final revocation after a group signal was not reported" "$(cat "$tmp/revoke-group.out")"
 xargs -r kill -KILL <"$tmp/revoke-group/state/hang.pids" 2>/dev/null || true
 unset LIMIT_FAIL REVOKE_HANG REVOKE_IGNORE_TERM RUN_WRAPPER SETUP_BIN
+# A revoker that exits but leaves something running is bounded by its process
+# group, which is what gets killed, never a PID that may have been reused.
+LIMIT_FAIL=1 REVOKE_ORPHAN=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
+run revoke-orphan "--key=$key" >"$tmp/revoke-orphan.out" 2>&1 & runner=$!
+for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-orphan/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a revoker's leftover process held setup forever"; fi
+wait "$runner" 2>/dev/null || true
+orphan=$(<"$tmp/revoke-orphan/state/hang.pids")
+if kill -0 "$orphan" 2>/dev/null; then kill -KILL "$orphan" 2>/dev/null; fail "a revoker's leftover process outlived the bounded revocation"; fi
+! grep -q 'could not invalidate' "$tmp/revoke-orphan.out" || fail "a revocation that succeeded was reported as failed"
+unset LIMIT_FAIL REVOKE_ORPHAN SETUP_BIN
+# Without a descriptor to bound its final revocation, setup refuses before
+# anything privileged. A copy whose reservation cannot succeed stands in for
+# running out of descriptors.
+sed "s#exec {CLEANUP_CLOCK}<> <(:)#exec {CLEANUP_CLOCK}<>$tmp/missing/clock#" "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-nofd"
+grep -qF "$tmp/missing/clock" "$mapped_root/bin/omarchy-setup-security-sshd-nofd" || fail "test could not make the cleanup reservation fail"
+chmod 0755 "$mapped_root/bin/omarchy-setup-security-sshd-nofd"
+SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-nofd"
+if run nofd "--key=$key" >"$tmp/nofd.out" 2>&1; then fail "setup without a cleanup descriptor succeeded"; fi
+[[ ! -s $tmp/nofd/events ]] || fail "setup without a cleanup descriptor ran sudo" "$(cat "$tmp/nofd/events")"
+grep -q 'Could not reserve a descriptor' "$tmp/nofd.out" || fail "setup without a cleanup descriptor did not say why" "$(cat "$tmp/nofd.out")"
+unset SETUP_BIN
 # A signal can arrive as a non-signal failure enters cleanup; the EXIT trap's
 # first command both records the status and marks cleanup active.
 grep -qxF "trap 'CLEANUP_EXIT_STATUS=\$? CLEANUP_ACTIVE=true; rollback_setup' EXIT" "$ROOT/bin/omarchy-setup-security-sshd" ||
