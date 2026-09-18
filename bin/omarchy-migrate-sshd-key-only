@@ -100,9 +100,31 @@ service_enabled_state() {
   esac
 }
 
+# systemctl disable ignores a masked unit and still succeeds, so a runtime
+# mask must be lifted for the disable. While it is lifted, a key-only guard
+# keeps a daemon that starts, even after SIGKILL and a reboot, from taking
+# passwords; the mask is put back on every catchable exit, retried if that
+# fails, and a further signal during that restore is held.
+runtime_mask_lifted=false
+runtime_mask_cleaning=false
+runtime_mask_guard=false
 restore_runtime_mask() {
-  /usr/bin/systemctl mask --runtime sshd.service >/dev/null 2>&1 ||
-    echo "CRITICAL: could not restore the runtime mask on sshd.service." >&2
+  local status=$?
+  runtime_mask_cleaning=true
+  if [[ $runtime_mask_lifted == "true" ]]; then
+    if /usr/bin/systemctl mask --runtime sshd.service >/dev/null 2>&1; then
+      runtime_mask_lifted=false
+    else
+      echo "CRITICAL: could not restore the runtime mask on sshd.service; the key-only guard at $key_only_config stays." >&2
+      (( status != 0 )) || status=1
+    fi
+  fi
+  exit "$status"
+}
+hold_runtime_mask_signal() {
+  [[ $runtime_mask_cleaning != "true" ]] || return 0
+  runtime_mask_cleaning=true
+  exit "$1"
 }
 
 disable_affected() {
@@ -114,14 +136,18 @@ disable_affected() {
     return 1
   fi
   (( active_status == 0 || enabled_status == 0 )) || return 0
-  # systemctl disable ignores a masked unit and still succeeds, so a runtime
-  # mask is lifted for the disable and put back afterwards, on every exit.
   if [[ $(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) == "masked-runtime" ]]; then
     runtime_masked=true
     trap restore_runtime_mask EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'hold_runtime_mask_signal 129' HUP
+    trap 'hold_runtime_mask_signal 130' INT
+    trap 'hold_runtime_mask_signal 143' TERM
+    if [[ ! -e $key_only_config && ! -L $key_only_config ]]; then
+      { echo "# Written by Omarchy while disabling sshd; no account has a usable key."; key_only_policy; } |
+        /usr/bin/install -DT -o root -g root -m 0644 /dev/stdin "$key_only_config" || exit 1
+      runtime_mask_guard=true
+    fi
+    runtime_mask_lifted=true
     /usr/bin/systemctl unmask --runtime sshd.service || {
       echo "Could not lift the runtime mask on sshd.service to disable it; rerun omarchy-migrate with administrator privileges." >&2
       exit 1
@@ -138,11 +164,13 @@ disable_affected() {
     exit 1
   }
   if [[ $runtime_masked == "true" ]]; then
+    /usr/bin/systemctl mask --runtime sshd.service || exit 1
+    runtime_mask_lifted=false
     trap - EXIT HUP INT TERM
-    /usr/bin/systemctl mask --runtime sshd.service || {
-      echo "CRITICAL: could not restore the runtime mask on sshd.service." >&2
-      exit 1
-    }
+    if [[ $runtime_mask_guard == "true" ]]; then
+      /usr/bin/rm -f -- "$key_only_config" ||
+        echo "WARNING: could not remove the key-only guard at $key_only_config" >&2
+    fi
   fi
   echo "Disabled sshd because a machine account with usable key-only access could not be proven. Run omarchy-setup-security-sshd to repair it."
 }
