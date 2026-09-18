@@ -113,10 +113,16 @@ prepare unrevoked-text; touch "$t/unrevoked-text/state/"{active,enabled}; REVOKE
 # sshd refuses every key when a text list has a line that is not a bare key,
 # so such a list proves no login either.
 printf 'this-is-not-a-key\n' >"$t/malformed-revoked.txt"; printf 'restrict %s\n' "$(<"$t/rsa.pub")" >"$t/options-revoked.txt"
-for list in malformed options; do
+printf 'ssh-ed25519 AAAA\n' >"$t/baddata-revoked.txt"
+for list in malformed options baddata; do
   prepare "$list-revoked"; touch "$t/$list-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/$list-revoked.txt" run "$list-revoked"
   [[ ! -e $t/$list-revoked/state/active ]] || { echo "a $list revocation list was treated as revoking nothing" >&2; exit 1; }
 done
+# A certificate listed for some other key is a valid entry and revokes only it.
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/ca"; /usr/bin/ssh-keygen -q -s "$t/ca" -I other -n other "$t/rsa.pub"
+cp "$t/rsa-cert.pub" "$t/cert-revoked.txt"
+prepare cert-revoked; touch "$t/cert-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/cert-revoked.txt" run cert-revoked
+[[ -e $t/cert-revoked/state/active ]] || { echo "a valid certificate entry was treated as a malformed revocation list" >&2; exit 1; }
 # An account sshd refuses outright, or forces into a command, proves no login.
 prepare refused; touch "$t/refused/state/"{active,enabled}; REFUSE_CONNECTION=yes run refused; [[ ! -e $t/refused/state/active ]]
 prepare forced; touch "$t/forced/state/"{active,enabled}; FORCE_COMMAND=/usr/bin/false run forced; [[ ! -e $t/forced/state/active ]]

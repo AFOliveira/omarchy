@@ -91,7 +91,7 @@ omarchy_sshd_key_line_accepted() {
 # RevokedKeys is either an OpenSSH KRL or a text list of public keys; only the
 # KRL form is understood by ssh-keygen -Q. Any read or parse error fails closed.
 omarchy_sshd_key_not_revoked() {
-  local file=$1 type=$2 key=$3 runner=${4:-} magic listing line
+  local file=$1 type=$2 key=$3 runner=${4:-} magic listing line known_types
   local -a fields
   magic=$($runner /usr/bin/head -c 6 -- "$file" 2>/dev/null) || return 1
   if [[ $magic == SSHKRL ]]; then
@@ -99,13 +99,17 @@ omarchy_sshd_key_not_revoked() {
     return
   fi
   listing=$($runner /usr/bin/cat -- "$file" 2>/dev/null) || return 1
-  # sshd requires every other line to start with a public key and refuses
-  # authentication when one does not, so a malformed list revokes everything.
+  # sshd requires every other line to start with a public key of a type it
+  # knows, certificates included, and refuses authentication when one does
+  # not, so a malformed list revokes everything. Ask OpenSSH which types it
+  # knows and whether each line parses, as sshd itself does.
+  known_types=$(/usr/bin/ssh -Q key 2>/dev/null) || return 1
   while IFS= read -r line; do
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
     read -r -a fields <<<"$line"
-    omarchy_sshd_is_key_type "${fields[0]:-}" && [[ ${fields[1]:-} =~ ^[A-Za-z0-9+/]+=*$ ]] || return 1
-    [[ ${fields[0]} == "$type" && ${fields[1]} == "$key" ]] && return 1
+    [[ -n ${fields[0]:-} && $'\n'$known_types$'\n' == *$'\n'"${fields[0]}"$'\n'* ]] || return 1
+    /usr/bin/ssh-keygen -lf /dev/stdin <<<"$line" >/dev/null 2>&1 || return 1
+    [[ ${fields[0]} == "$type" && ${fields[1]:-} == "$key" ]] && return 1
   done <<<"$listing"
   return 0
 }
