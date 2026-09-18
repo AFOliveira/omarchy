@@ -273,17 +273,29 @@ trusted_file() {
 # A configuration file anyone but root can change could change the policy
 # between its proof and the daemon reading it. The main file and everything
 # it includes, however deep, must be trusted files. Relative Include paths
-# are resolved from /etc/ssh, as sshd does.
+# are resolved from /etc/ssh, as sshd does. sshd also takes "Include=path"
+# and quoted or escaped arguments; only plain whitespace-separated patterns
+# are resolved here, and any other Include form is refused rather than
+# guessed at, since a pattern read wrongly would match nothing and leave the
+# real file unchecked.
 config_graph_is_trusted() {
   local file=$1 depth=${2:-0} pattern match
   local -a patterns matches
   (( depth <= 16 )) || return 1
   trusted_file "$file" || return 1
   mapfile -t patterns < <(/usr/bin/awk '
-    { line=$0; sub(/[[:space:]]*#.*/, "", line); sub(/^[[:space:]]+/, "", line) }
-    tolower(line) ~ /^include[[:space:]]/ { n=split(line, f, /[[:space:]]+/); for (i=2; i<=n; i++) print f[i] }
+    {
+      line=$0; sub(/^[[:space:]]+/, "", line)
+      if (line == "" || substr(line, 1, 1) == "#") next
+      keyword=line; sub(/[[:space:]=].*/, "", keyword)
+      if (tolower(keyword) != "include") next
+      rest=substr(line, length(keyword) + 1); sub(/^[[:space:]]*=?[[:space:]]*/, "", rest); sub(/[[:space:]]+$/, "", rest)
+      if (rest == "" || rest ~ /["\047\\#]/) { print "\001"; next }
+      n=split(rest, f, /[[:space:]]+/); for (i=1; i<=n; i++) print f[i]
+    }
   ' "$file") || return 1
   for pattern in "${patterns[@]}"; do
+    [[ $pattern != $'\001' && $pattern != "~"* ]] || return 1
     [[ $pattern == /* ]] || pattern=/etc/ssh/$pattern
     mapfile -t matches < <(compgen -G "$root_prefix$pattern" || true)
     for match in "${matches[@]}"; do
@@ -292,11 +304,13 @@ config_graph_is_trusted() {
   done
 }
 
+# sshd takes "Keyword value" and "Keyword=value" alike, so the keyword ends
+# at whitespace or "=".
 precedence_is_provable() {
   /usr/bin/awk '
     { line=$0; sub(/[[:space:]]*#.*/, "", line); sub(/^[[:space:]]+/, "", line) }
     line !~ /^[[:space:]]*$/ {
-      split(line,f,/[[:space:]]+/); key=tolower(f[1])
+      key=line; sub(/[[:space:]=].*/, "", key); key=tolower(key)
       if (!included) {
         if (key=="include" && line ~ /^[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+\/etc\/ssh\/sshd_config\.d\/\*\.conf[[:space:]]*$/) included=1
         else if (key=="include" || key=="match" || key=="passwordauthentication" || key=="kbdinteractiveauthentication" || key=="authenticationmethods" || key=="pubkeyauthentication" || key=="authorizedkeysfile") exit 1

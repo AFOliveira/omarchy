@@ -134,6 +134,7 @@ prepare unsafe-query-error; rm "$t/unsafe-query-error/root/home/keyed/.ssh/autho
 prepare symlink-key; mv "$t/symlink-key/root/home/keyed/.ssh/authorized_keys" "$t/symlink-key/root/home/key"; ln -s ../key "$t/symlink-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/symlink-key/state/"{active,enabled}; run symlink-key; [[ ! -e $t/symlink-key/state/active ]]
 # A configuration anyone but root can write proves nothing about the policy
 # the daemon will read, so the migration disables rather than trusts it.
+prepare quoted-include; echo 'Include "/etc/ssh/untrusted file.conf"' >>"$t/quoted-include/root/etc/ssh/sshd_config"; echo 'Port 22' >"$t/quoted-include/root/etc/ssh/untrusted file.conf"; chmod 0666 "$t/quoted-include/root/etc/ssh/untrusted file.conf"; touch "$t/quoted-include/state/"{active,enabled}; run quoted-include; [[ ! -e $t/quoted-include/state/active ]] || { echo "a quoted include of a writable file was trusted" >&2; exit 1; }
 prepare writable-config; chmod 0666 "$t/writable-config/root/etc/ssh/sshd_config"; touch "$t/writable-config/state/"{active,enabled}; run writable-config; [[ ! -e $t/writable-config/state/active ]] || { echo "a writable sshd_config was trusted" >&2; exit 1; }
 # Drop-ins are read in byte order: "0-admin.conf" comes before Omarchy's file
 # even in a locale whose collation would ignore the dash.
@@ -235,10 +236,18 @@ sprep s-cfg-writable; chmod 0666 "$t/s-cfg-writable/root/etc/ssh/sshd_config"
 sprep s-cfg-symlink; mv "$t/s-cfg-symlink/root/etc/ssh/sshd_config" "$t/s-cfg-symlink/root/etc/ssh/real_config"; ln -s real_config "$t/s-cfg-symlink/root/etc/ssh/sshd_config"
 sprep s-cfg-dropin; echo 'Port 22' >"$t/s-cfg-dropin/root/etc/ssh/sshd_config.d/20-other.conf"; chmod 0666 "$t/s-cfg-dropin/root/etc/ssh/sshd_config.d/20-other.conf"
 sprep s-cfg-include; echo 'Include extra.conf' >>"$t/s-cfg-include/root/etc/ssh/sshd_config"; echo 'Include nested/*.conf' >"$t/s-cfg-include/root/etc/ssh/extra.conf"; mkdir -p "$t/s-cfg-include/root/etc/ssh/nested"; echo 'Port 22' >"$t/s-cfg-include/root/etc/ssh/nested/a.conf"; chmod 0664 "$t/s-cfg-include/root/etc/ssh/nested/a.conf"
-for c in s-cfg-writable s-cfg-symlink s-cfg-dropin s-cfg-include; do
+# sshd reads quoted, escaped and "Include=" arguments too. A form the check
+# cannot resolve is refused, never taken to match nothing.
+sprep s-cfg-quoted; echo 'Include "/etc/ssh/untrusted file.conf"' >>"$t/s-cfg-quoted/root/etc/ssh/sshd_config"; echo 'AuthorizedKeysCommand /usr/bin/cat /tmp/attacker.pub' >"$t/s-cfg-quoted/root/etc/ssh/untrusted file.conf"; chmod 0666 "$t/s-cfg-quoted/root/etc/ssh/untrusted file.conf"
+sprep s-cfg-escaped; echo 'Include /etc/ssh/untrusted\ file.conf' >>"$t/s-cfg-escaped/root/etc/ssh/sshd_config"; : >"$t/s-cfg-escaped/root/etc/ssh/untrusted file.conf"
+sprep s-cfg-equals; echo 'Include=extra.conf' >>"$t/s-cfg-equals/root/etc/ssh/sshd_config"; echo 'Port 22' >"$t/s-cfg-equals/root/etc/ssh/extra.conf"; chmod 0666 "$t/s-cfg-equals/root/etc/ssh/extra.conf"
+for c in s-cfg-writable s-cfg-symlink s-cfg-dropin s-cfg-include s-cfg-quoted s-cfg-escaped s-cfg-equals; do
   if srun "$c" --setup 1000 -- "$key" >"$t/$c.out" 2>&1; then echo "setup trusted an untrusted configuration: $c" >&2; exit 1; fi
   untouched "$c"; grep -q 'is not a root-owned file only root can write' "$t/$c.out" || { echo "$c was refused for another reason" >&2; cat "$t/$c.out" >&2; exit 1; }
 done
+# An "Include=" ahead of the drop-in glob is read first, so precedence fails.
+sprep s-cfg-eq-first; printf 'Include=/etc/ssh/early.conf\nInclude /etc/ssh/sshd_config.d/*.conf\n' >"$t/s-cfg-eq-first/root/etc/ssh/sshd_config"; echo 'AuthorizedKeysCommand /usr/bin/true' >"$t/s-cfg-eq-first/root/etc/ssh/early.conf"
+if srun s-cfg-eq-first --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup accepted an Include= read before its drop-in" >&2; exit 1; fi; rolled s-cfg-eq-first
 # The same nested include, only root-writable, is accepted.
 sprep s-cfg-nested-ok; echo 'Include extra.conf' >>"$t/s-cfg-nested-ok/root/etc/ssh/sshd_config"; echo 'Include nested/*.conf' >"$t/s-cfg-nested-ok/root/etc/ssh/extra.conf"; mkdir -p "$t/s-cfg-nested-ok/root/etc/ssh/nested"; echo 'Port 22' >"$t/s-cfg-nested-ok/root/etc/ssh/nested/a.conf"
 srun s-cfg-nested-ok --setup 1000 -- "$key" >/dev/null || { echo "setup refused a trusted nested include" >&2; exit 1; }
