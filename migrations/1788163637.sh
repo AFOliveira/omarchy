@@ -25,30 +25,54 @@ else
   # timestamp_type=ppid, and without a terminal, sudo keys the cached
   # authorization by its parent, so an intermediary would revoke some other
   # record and still succeed. Job control gives it a process group of its own
-  # in the same session, so a signal to this shell's group does not reach it,
-  # and the group ID stays reserved while it or anything it started lives.
-  # The wait is bounded by polling that group, pausing on a descriptor
-  # reserved before the first privileged call; no watchdog process is involved.
-  # A failed attempt is retried. Running out of descriptors for that pause
-  # leaves the migration pending instead of its revocation unbounded.
+  # in the same session, so a signal to this shell's group does not reach it.
+  # The wait is bounded by reading reports on a descriptor reserved before the
+  # first privileged call, and a failed attempt is retried.
+  # The keeper shares the revoker's process group. It reports that group, then
+  # polls the revoker's PID, which cannot be reused while the keeper holds it as
+  # the group ID, so "No such process" means the revoker exited and was reaped.
+  # It then waits for this shell's release, so the group ID stays reserved
+  # until the shell is finished with it. It runs without the caller's
+  # environment, and exits 0, so the job status is the revoker's.
+  ssh_migration_revoke_keeper='read -r _ _ _ _ group _ </proc/self/stat
+  printf "group %s %s\n" "$group" "$1" >&3
+  while status=$(kill -0 "$group" 2>&1) || [[ $status != *"No such process"* ]]; do
+    read -r -t 0.2 -u 4 _ _ || true
+  done
+  printf "done - %s\n" "$1" >&3
+  while read -r -u 4 word serial; do
+    [[ $word != release || $serial != "$1" ]] || exit 0
+  done'
+  # Running out of descriptors for its reports leaves the migration pending
+  # instead of its revocation unbounded.
   ssh_migration_clock=""
-  if ! { exec {ssh_migration_clock}<> <(:); } 2>/dev/null; then
+  ssh_migration_hold=""
+  if ! { exec {ssh_migration_clock}<> <(:); } 2>/dev/null || ! { exec {ssh_migration_hold}<> <(:); } 2>/dev/null; then
     echo "Could not reserve a descriptor for the SSH migration's cleanup." >&2
     exit 1
   fi
   # Once cleanup starts, a signal is held rather than acted on: the exit
   # revocation must finish.
   ssh_migration_cleaning=false
+  ssh_migration_wait_interrupted=false
+  ssh_migration_revoke_serial=0
   handle_ssh_migration_signal() {
-    [[ $ssh_migration_cleaning == "true" ]] && return
+    if [[ $ssh_migration_cleaning == "true" ]]; then
+      ssh_migration_wait_interrupted=true
+      return
+    fi
     ssh_migration_cleaning=true
     exit "$1"
   }
+  # wait returns early when a trapped signal arrives; only then is it
+  # repeated, never by probing a PID that may already belong to someone else.
   wait_for_ssh_migration_revoke() {
-    local status
+    local status=127 result
     while :; do
-      wait "$1" && status=0 || status=$?
-      kill -0 "$1" 2>/dev/null || break
+      ssh_migration_wait_interrupted=false
+      wait "$1" && result=0 || result=$?
+      (( result == 127 && status != 127 )) || status=$result
+      [[ $ssh_migration_wait_interrupted == "true" && $result != 127 ]] || break
     done
     return "$status"
   }
@@ -57,23 +81,42 @@ else
     read -r -t 1 -u "$ssh_migration_clock" _ || true
   }
   revoke_ssh_migration_sudo_once() {
-    local bound=30 revoke started
+    local - bound=30 serial keeper word value tag group="" finished=false started
+    set -o pipefail
+    ssh_migration_revoke_serial=$(( ssh_migration_revoke_serial + 1 ))
+    serial=$ssh_migration_revoke_serial
     set -m
-    /usr/bin/sudo -k >/dev/null 2>&1 &
-    revoke=$!
+    /usr/bin/sudo -k >/dev/null 2>&1 |
+      /usr/bin/env -i /usr/bin/bash -p -c "$ssh_migration_revoke_keeper" omarchy-revoke-keeper "$serial" 3>&"$ssh_migration_clock" 4<&"$ssh_migration_hold" &
+    keeper=$!
     set +m
     started=$SECONDS
-    while kill -0 -- "-$revoke" 2>/dev/null && (( SECONDS - started < bound )); do ssh_migration_pause; done
-    if kill -0 -- "-$revoke" 2>/dev/null; then
-      # A live group keeps its ID reserved, so this reaches only the revoker
-      # and anything it left behind. One that survives even this is abandoned
-      # rather than waited on forever.
-      kill -KILL -- "-$revoke" 2>/dev/null || true
-      started=$SECONDS
-      while kill -0 -- "-$revoke" 2>/dev/null && (( SECONDS - started < 2 )); do ssh_migration_pause; done
-      ! kill -0 -- "-$revoke" 2>/dev/null || return 1
+    while (( SECONDS - started < bound )); do
+      read -r -t 1 -u "$ssh_migration_clock" word value tag || continue
+      [[ $tag == "$serial" ]] || continue
+      if [[ $word == "group" ]]; then
+        group=$value
+      elif [[ $word == "done" ]]; then
+        finished=true
+        break
+      fi
+    done
+    if [[ $finished == "true" ]]; then
+      printf 'release %s\n' "$serial" >&"$ssh_migration_hold"
+      # Bash reports a job it started under job control; that report is noise.
+      wait_for_ssh_migration_revoke "$keeper" 2>/dev/null
+      return
     fi
-    wait_for_ssh_migration_revoke "$revoke"
+    # Past the deadline, the group is killed while the keeper still reserves
+    # its ID; without the keeper's report there is nothing safe to signal.
+    [[ -n $group ]] || return 1
+    kill -KILL -- "-$group" 2>/dev/null || true
+    started=$SECONDS
+    while kill -0 -- "-$group" 2>/dev/null && (( SECONDS - started < 2 )); do ssh_migration_pause; done
+    # One that survives even this is abandoned rather than waited on forever.
+    ! kill -0 -- "-$group" 2>/dev/null || return 1
+    wait_for_ssh_migration_revoke "$keeper" 2>/dev/null || true
+    return 1
   }
   cleanup_ssh_migration_sudo() {
     local status=$ssh_migration_status attempt revoked=false
