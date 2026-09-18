@@ -14,7 +14,8 @@ sshd_may_be_exposed() {
   local enabled active
   enabled=$(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) || true
   active=$(/usr/bin/systemctl is-active sshd.service 2>/dev/null) || true
-  case "$enabled" in disabled | masked | masked-runtime | not-found) ;; *) return 0 ;; esac
+  # A runtime mask hides a persistent enablement that returns at boot.
+  case "$enabled" in disabled | masked | not-found) ;; *) return 0 ;; esac
   case "$active" in inactive | failed) return 1 ;; *) return 0 ;; esac
 }
 if [[ ! -e $legacy_config && ! -L $legacy_config ]]; then
