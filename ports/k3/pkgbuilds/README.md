@@ -16,7 +16,13 @@ than by scripts in this port:
 | `spacemit-k3-com260-devicetree` | none | the mainline device tree of this board, given to mainline kernels as a systemd-stub addon whose `.uname` matches only that kernel |
 | `pvrsrvkm-k3-dkms` | SpacemiT's kernel tree at `4158237f`, `drivers/gpu/drm/img-rogue` (Imagination DDK 24.2@6603887) | the GPU driver the desktop renders with on Arch's kernel, built by DKMS for 7.x kernels: Makefile paths pointed at the module directory, DVFS left out, one patch releasing the GPU from reset; `prepare()` fetches only that directory and checks its git tree hash; blacklists `powervr` (see `../arch-kernel/README.md`) |
 | `powervr-k3-dkms` | Linux 7.2.6 `drivers/gpu/drm/imagination` | plus the upstream-in-review patch to probe without a power domain; runs the GPU as revision 36.52.104.182. Installed but blacklisted while `pvrsrvkm-k3-dkms` is: its Mesa user space reaches only OpenGL ES 2.0 through Zink |
+| `linux-k3` | Arch `linux` 7.2.6.arch2-1 | the same kernel built from [AFOliveira/linux, `riscv/k3-v7.2.6-arch2`](https://github.com/AFOliveira/linux/tree/riscv/k3-v7.2.6-arch2): Arch's tag, Arch RISC-V's seven RevyOS patches, SpacemiT's UFS (21) and img-rogue GPU (25) commits with their authors, and six port commits; Arch's config plus `SCSI_UFS_SPACEMIT_K3=m` and `POWERVR_ROGUE=m`; installs next to `linux` and ships the board's DTB (see `../arch-kernel/README.md`) |
 | `linux-spacemit-k3-dm-crypt` | none | `dm-crypt`, `dm-integrity`, `dm-bufio`, `async_tx` and `async_xor` built out of tree from the stable kernel sources at the vendor's version, because the vendor kernel is built without `CONFIG_DM_CRYPT` |
+
+The three DKMS packages build for Arch's release format only
+(`BUILD_EXCLUSIVE_KERNEL="^7\.[0-9.]+-arch[0-9]+-[0-9]+$"`), so they skip
+`linux-k3`, whose release ends in `-k3` and which carries both drivers in its
+tree, and SpacemiT's `6.18.3-generic`.
 
 The two Limine recipes build with `gradle installDist` instead of
 `nativeCompile` and install the jars under `/usr/share/java/<name>/` with a

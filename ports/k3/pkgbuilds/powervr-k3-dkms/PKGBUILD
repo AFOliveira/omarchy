@@ -12,7 +12,7 @@
 pkgname=powervr-k3-dkms
 _kver=7.2.6
 pkgver=${_kver}
-pkgrel=3
+pkgrel=4
 pkgdesc="Mainline PowerVR driver with SpacemiT K3 support (DKMS)"
 arch=(any)
 url="https://www.kernel.org/"
@@ -173,7 +173,7 @@ sha256sums=('da8fcc63cf8adfd2eaecc2f0fe72be749d7f1e7711ff99d3563cdd1c90d80e9b'
             'f9f41bb397a0ea3392dce2d9a34f4661a700c307bc143976f6b4d6d710ccf0b9'
             '86cb8ee02f778fd0d2a8e9ab83f2ab6a86b906cd3e19096d7320a78d7983e53a'
             'cab0717e50629853b307455c6cb14c8000ded2ec341e1d703115a063bc613f4a'
-            'cb767b93ec530f7c128441360042248bf1aef0b4b36a0e5213e72dd6bb2a5095')
+            '093ea3a6bcfe4ece386caf8d4904b72ab5a20658e86a8390febd4c1c9f7e9b37')
 
 prepare() {
   rm -rf build && mkdir build

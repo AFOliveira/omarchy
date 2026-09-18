@@ -7,10 +7,12 @@
 # from an addon: a small PE file with a .dtb section in the ESP's
 # loader/addons/, which the stub applies (and U-Boot fixes up through
 # EFI_DT_FIXUP_PROTOCOL) only to a UKI whose .uname matches the addon's. So one
-# addon per mainline kernel, and none for SpacemiT's kernel.
+# addon per mainline kernel, and none for SpacemiT's kernel. A kernel that ships
+# this board's tree itself (linux-k3 installs it under dtb/) gets its own copy;
+# the others get the one this package builds.
 set -euo pipefail
 
-dtb=/usr/share/spacemit-k3-com260/k3-com260-cloud.dtb
+package_dtb=/usr/share/spacemit-k3-com260/k3-com260-cloud.dtb
 stub=/usr/lib/systemd/boot/efi/addonriscv64.efi.stub
 vendor_pkgbase=linux-spacemit-k3
 
@@ -27,9 +29,11 @@ for kdir in /usr/lib/modules/*/; do
   [[ $(<"$kdir/pkgbase") == "$vendor_pkgbase" ]] && continue
   out=$dir/spacemit-k3-com260-$kver.addon.efi
   wanted+=("$out")
+  dtb=$package_dtb
+  [[ -f $kdir/dtb/spacemit/k3-com260-cloud.dtb ]] && dtb=$kdir/dtb/spacemit/k3-com260-cloud.dtb
   if [[ ! -f $out || $out -ot $dtb ]]; then
     ukify build --stub="$stub" --devicetree="$dtb" --uname="$kver" --output="$out" >/dev/null
-    echo "Device tree addon for $kver: $out"
+    echo "Device tree addon for $kver from $dtb: $out"
   fi
 done
 

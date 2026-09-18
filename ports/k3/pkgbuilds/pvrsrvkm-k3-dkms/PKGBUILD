@@ -17,7 +17,7 @@ pkgname=pvrsrvkm-k3-dkms
 _commit=4158237f35b8fd62ba198c1627e5a66e5a34c50f
 _tree=a4e5010620bb536e7f8e292a4765806ec672ff56
 pkgver=24.2.6603887
-pkgrel=1
+pkgrel=2
 pkgdesc="SpacemiT K3 PowerVR GPU driver (Imagination DDK) for mainline kernels (DKMS)"
 arch=(any)
 url="https://github.com/spacemit-com/linux-6.18"
@@ -28,7 +28,7 @@ source=(0001-spacemit-release-the-GPU-from-reset.patch
         dkms.conf
         pvrsrvkm-k3.conf)
 sha256sums=('b459271db836e0609e86c407d2fa5ab5b27715331894aac4df44190398ac9e05'
-            '39bf189a0a6ea8e000ec3d3ece9b82008b9756df21c2efa5dfe9611e9fbe3f52'
+            'e61796b474f6b6328a348eb2201fb47aa6a8230ae8db8ba7512c668e523eb151'
             '39c0e455ca1f8b5293e51ce7f8476e57dfec9a0378b651192941101d2f5299fa')
 
 prepare() {

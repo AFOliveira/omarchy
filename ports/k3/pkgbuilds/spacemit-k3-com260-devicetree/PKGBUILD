@@ -5,7 +5,7 @@
 
 pkgname=spacemit-k3-com260-devicetree
 pkgver=7.2.6
-pkgrel=5
+pkgrel=6
 pkgdesc="Mainline device tree for the SpacemiT K3 CoM260, as systemd-stub addons for mainline kernels"
 arch=(riscv64)
 url="https://www.kernel.org/"
@@ -30,7 +30,7 @@ sha256sums=('ce2a4283323591d91ef9ffd49b0d6f3f680be6fb648e836f7f5e758dcb06db32'
             '392400a309a54ea5b1a2ac2e52773d3ab68e07323109b9aed88a69fedc74e082'
             'aebbb963897e11120cad2f1e7f354b4b0f3e98c702b7dfc8089845bdfa6053a2'
             '77f19987c84c573a5582a052720e6c6013f4a6646cd871a185b1e5997ef91023'
-            '4eee325df9fa1e13662f57dfb200320826b2824472ceeed6270d0cda372a6763'
+            'f3e71679dbc0aad127abb124ee66cb78952db4fa9d6137b5f79aad6dcd274ed4'
             'eb4bafd04e9ed61661f6bb483356bb5b0fbab9d6a1c0501ffbc049e074cd5ffd')
 
 prepare() {

@@ -77,6 +77,53 @@ cannot give Hyprland OpenGL ES 3. The Mesa main build used for the test is kept
 as `../../build/k3-16gb-port/opt-mesa-git-26.3.0-devel.tar.zst` (it was
 `/opt/mesa-git`).
 
+## `linux-k3`: the same kernel with SpacemiT's drivers in the tree, 2026-09-18
+
+The DKMS packages build SpacemiT's drivers next to Arch's kernel. `linux-k3`
+puts them in the kernel tree instead, as commits on a fork of Arch's kernel
+repository: [AFOliveira/linux, branch
+`riscv/k3-v7.2.6-arch2`](https://github.com/AFOliveira/linux/tree/riscv/k3-v7.2.6-arch2).
+
+| Commits | What they are |
+| --- | --- |
+| Arch's tag `v7.2.6-arch2` | the source of Arch's `linux` 7.2.6.arch2 |
+| 7 | the RevyOS patches Arch RISC-V applies to it (T-Head write-once erratum, TTM coherency, Rust with gcc), with their authors |
+| 21 | SpacemiT's UFS host driver history from `spacemit-com/linux-6.18`, through the `ufs-spacemit_k3` → `ufs-spacemit` rename, with their authors |
+| 25 | SpacemiT's img-rogue history (Imagination's DDK 24.2@6603887), with their authors |
+| 6 | the port's: build wiring for both drivers (SpacemiT's own Kconfig and Makefile lines), the UFS driver on the 7.x callbacks, the GPU released from reset, the powervr probe without power domains, and `k3-com260-cloud.dts` |
+
+SpacemiT's commits were replayed with `git am --include` limited to each
+driver's files, so their Kconfig, Makefile and device-tree hunks written for
+6.18 do not come along; the result is byte-identical to their tree at
+`4158237f` (the UFS files' blobs and the whole `img-rogue` tree hash).
+
+`../pkgbuilds/linux-k3` builds it with Arch's config plus
+`SCSI_UFS_SPACEMIT_K3=m` and `POWERVR_ROGUE=m`; after `olddefconfig` those two
+lines are the only difference from the running `linux`'s `/proc/config.gz`,
+and the module set is Arch's plus `ufs-spacemit` and `pvrsrvkm`. The package
+installs next to `linux` as the menu entry `Omarchy/linux-k3`, ships the
+board's DTB (which the device-tree addon then uses), and the DKMS packages skip
+it.
+
+Verified with `bootctl set-oneshot Omarchy.linux-k3` on 2026-09-18:
+`7.2.6-arch2-1-k3` boots the LUKS root through the in-tree
+`kernel/drivers/ufs/host/ufs-spacemit.ko`, the GPU is driven by the in-tree
+`kernel/drivers/gpu/drm/img-rogue/pvrsrvkm.ko` (no DKMS modules exist for this
+kernel), the device tree is the board's (`SpacemiT K3 CoM260 (BianbuCloud)`),
+Hyprland renders on `/dev/dri/card1`, no units fail, and the boot takes 22.5 s.
+glmark2 scores **402**, against 399 for the same driver built by DKMS on
+`linux`. The default entry is still `Omarchy/linux`.
+
+That package was cross-built on an x86_64 machine with
+`riscv64-linux-gnu-gcc` 16.2.1 20260810, rustc 1.98.1 and bindgen 0.73.2,
+the same versions Arch RISC-V builds with natively; the only config line that
+differs is `CONFIG_CC_VERSION_TEXT`. A cross build only makes the kernel
+package, since the headers package carries host tools. The recipe in the repo
+is the native one.
+
+glmark2 needs no VNC viewer attached: with the provider's display preview
+connected, `wayvnc` copies every frame and the same kernel scores 291.
+
 ## What upstream already provides for this board
 
 Linux 7.2 carries the K3 SoC support SpacemiT upstreamed: `CONFIG_ARCH_SPACEMIT`,
@@ -116,7 +163,8 @@ Under the ignored `build/k3-16gb-port/` directory:
 `desktop-arch-kernel-gpu.png` (the desktop rendered by `pvrsrvkm` on
 `7.2.6-arch2-1`), `glmark2-arch-kernel-ddk.txt`,
 `glmark2-vendor-kernel-powervr.txt`, `glmark2-arch-kernel-llvmpipe.txt`,
-`glmark2-arch-kernel-powervr-zink.txt`, `gpu-arch-kernel-vkcube-zink.txt`,
+`glmark2-arch-kernel-powervr-zink.txt`, `glmark2-linux-k3-intree.txt` (with
+and without a VNC viewer attached), `gpu-arch-kernel-vkcube-zink.txt`,
 `vkcube-arch-kernel-powervr.png`, `mesa-main-powervr-zink.txt`,
 `u-boot-ee6c094b-gpu-power.itb`, and from the first bring-up
 `arch-kernel-running.txt` and `serial-arch-kernel-boot.txt`.

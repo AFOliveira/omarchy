@@ -9,7 +9,7 @@ pkgname=ufs-spacemit-dkms
 _vendorcommit=4158237f35b8fd62ba198c1627e5a66e5a34c50f
 _kver=7.2.6
 pkgver=6.18.r${_vendorcommit::7}
-pkgrel=2
+pkgrel=3
 pkgdesc="SpacemiT K3 UFS host controller driver for mainline kernels (DKMS)"
 arch=(any)
 url="https://github.com/spacemit-com/linux-6.18"
@@ -26,7 +26,7 @@ sha256sums=('0234d9a1accb2bb898d520d9aa53ddc3bcaec14007a1bab0bd462e06b288a190'
             'a74af48418a97a136eeb23d9ad300648671ce85f8a0732dbd9afea1bb33d4a7c'
             'facdf4b3d8892f89dda4e66d1176763196e175e7ae0404389d829015e87dea5d'
             'e3c1c449140f259c027e668f048ef4f161e768a6420e35766cc462ae666065fe'
-            'edb91ee84c478ce7222eccb0671c79e6e5c044f8acd7bfa7dcfe343cfc671758')
+            '257eceb398e9eeb548342de6efcbed36b66850a2e075876b42d4dd798c475ed1')
 
 prepare() {
   # makepkg links the sources in, and patch will not work through a link
