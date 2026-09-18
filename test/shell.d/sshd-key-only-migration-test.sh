@@ -194,8 +194,8 @@ echo "sudo \$*" >>"$m/calls"
 [[ \$1 == -k ]] || exit 1
 if [[ -e $m/revoked-once ]]; then
   echo "\$PPID" >"$m/migration.pid"
-  if [[ \${REVOKE_ORPHAN:-0} == 1 ]]; then sleep 30 & echo \$! >>"$m/hang.pids"; echo revoked >>"$m/calls"; exit 0; fi
-  if [[ \${REVOKE_HANG:-0} == 1 ]]; then [[ \${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & echo \$! >>"$m/hang.pids"; wait \$!; fi
+  if [[ \${REVOKE_ORPHAN:-0} == 1 ]]; then sleep 30 & echo revoked >>"$m/calls"; exit 0; fi
+  if [[ \${REVOKE_HANG:-0} == 1 ]]; then [[ \${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & wait \$!; fi
   sleep 1; echo revoked >>"$m/calls"
 else
   echo "\$PPID" >"$m/revoked-once"
@@ -210,47 +210,47 @@ kill -TERM "$(<"$m/migration.pid")" 2>/dev/null || true
 if wait "$runner" 2>/dev/null; then fail "a migration whose machine phase failed reported success"; fi
 grep -qx revoked "$m/calls" || fail "a TERM to the migration interrupted its exit revocation" "$(cat "$m/calls")"
 [[ $(<"$m/migration.pid") == "$(<"$m/revoked-once")" ]] || fail "the exit revocation ran under a different parent than the entry revocation"
-# Without a descriptor to bound its exit revocation, the migration stays
-# pending before anything privileged rather than revoke unbounded.
+# Where bounded jobs cannot work, the migration stays pending before anything
+# privileged rather than revoke unbounded.
 : >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-if bash -c 'ulimit -n 10 && exec bash -euo pipefail "$1"' _ "$m/migration" >/dev/null 2>&1; then fail "a migration without a cleanup descriptor reported success"; fi
-[[ ! -s $m/calls ]] || fail "a migration without a cleanup descriptor ran sudo" "$(cat "$m/calls")"
+sed 's#</proc/self/stat#</proc/self/omarchy-missing#' "$m/migration" >"$m/migration-nojob"
+grep -qF '</proc/self/omarchy-missing' "$m/migration-nojob" || fail "test could not break the cleanup keeper"
+if bash -euo pipefail "$m/migration-nojob" >/dev/null 2>&1; then fail "a migration without bounded jobs reported success"; fi
+[[ ! -s $m/calls ]] || fail "a migration without bounded jobs ran sudo" "$(cat "$m/calls")"
 pass "a TERM during the exit revocation does not stop it"
 
 # An exit revocation that hangs is bounded, retried, and fails the migration.
 : >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
-sed 's#local - bound=30 #local - bound=1 #' "$m/migration" >"$m/migration-fast"
-grep -q 'local - bound=1 ' "$m/migration-fast" || fail "test could not shorten the revocation bound"
+sed 's#ssh_migration_revoke_bound=30$#ssh_migration_revoke_bound=1#' "$m/migration" >"$m/migration-fast"
+grep -q 'ssh_migration_revoke_bound=1$' "$m/migration-fast" || fail "test could not shorten the revocation bound"
 REVOKE_HANG=1 bash -euo pipefail "$m/migration-fast" >/dev/null 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$m/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung exit revocation held the migration forever"; fi
+kill -0 "$runner" 2>/dev/null && fail "a hung exit revocation held the migration forever"
 if wait "$runner" 2>/dev/null; then fail "a migration whose exit revocation never completed reported success"; fi
 [[ $(grep -c '^sudo -k$' "$m/calls") == 4 ]] || fail "a hung exit revocation was not retried" "$(cat "$m/calls")"
 # Nor does a signal to the migration's whole process group unbound it, even
 # when the hung revocation ignores that signal. The migration leads its group.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid" "$m/hang.pids"
+: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
 REVOKE_HANG=1 REVOKE_IGNORE_TERM=1 setsid bash -euo pipefail "$m/migration-fast" >/dev/null 2>&1 & runner=$!
 for (( i = 0; i < 200; i++ )); do [[ -s $m/migration.pid ]] && break; sleep 0.05; done
 [[ -s $m/migration.pid ]] || fail "the migration never reached its exit revocation"
 kill -TERM -- "-$(<"$m/migration.pid")" 2>/dev/null || true
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$m/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a group signal left a hung exit revocation unbounded"; fi
+kill -0 "$runner" 2>/dev/null && fail "a group signal left a hung exit revocation unbounded"
 if wait "$runner" 2>/dev/null; then fail "a migration whose exit revocation never completed reported success"; fi
 # A revoker that exits but leaves something running has still revoked: its
 # exit, not its leftover, ends the wait, and nothing of it is killed.
-: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid" "$m/hang.pids"
+: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
 # With the full 30-second bound, finishing within 15 seconds proves the wait
 # ended at the revoker's exit rather than the deadline.
 REVOKE_ORPHAN=1 bash -euo pipefail "$m/migration" >/dev/null 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$m/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a revoker's leftover process held the migration forever"; fi
+kill -0 "$runner" 2>/dev/null && fail "a revoker's leftover process held the migration forever"
 wait "$runner" 2>/dev/null || true
 [[ $(grep -c '^sudo -k$' "$m/calls") == 2 ]] || fail "a revocation that succeeded was retried" "$(cat "$m/calls")"
-# The leftover is a live 30-second sleep this fixture started moments ago.
-xargs -r kill -KILL <"$m/hang.pids" 2>/dev/null || true
 rm -f "$m/etc/10-omarchy-hardening.conf"
 grep -qF "trap 'ssh_migration_status=\$? ssh_migration_cleaning=true; cleanup_ssh_migration_sudo' EXIT" "$ROOT/migrations/1788163637.sh" ||
   fail "the migration's EXIT trap does not mark cleanup active in its first command"
-! sed -n '/^  wait_for_ssh_migration_revoke() {/,/^  }/p' "$ROOT/migrations/1788163637.sh" | grep -q 'kill -0' ||
-  fail "the migration's revocation wait still probes a PID after collecting its status"
+kills=$(grep -nE '(^|[^[:alnum:]_])kill ' "$ROOT/migrations/1788163637.sh" | grep -vE 'kill -0 "\$group"|kill -KILL -- "-\$group"' || true)
+[[ -z $kills ]] || fail "the migration signals a process outside its keeper" "$kills"
 pass "a hung exit revocation is bounded and retried"

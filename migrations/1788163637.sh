@@ -21,108 +21,56 @@ fi
 if ((EUID == 0)); then
   /usr/bin/omarchy-migrate-sshd-key-only
 else
-  # The final revocation stays a direct child of this shell: under
-  # timestamp_type=ppid, and without a terminal, sudo keys the cached
-  # authorization by its parent, so an intermediary would revoke some other
-  # record and still succeed. Job control gives it a process group of its own
-  # in the same session, so a signal to this shell's group does not reach it.
-  # The wait is bounded by reading reports on a descriptor reserved before the
-  # first privileged call, and a failed attempt is retried.
-  # The keeper shares the revoker's process group. It reports that group, then
-  # polls the revoker's PID, which cannot be reused while the keeper holds it as
-  # the group ID, so "No such process" means the revoker exited and was reaped.
-  # It then waits for this shell's release, so the group ID stays reserved
-  # until the shell is finished with it. It runs without the caller's
-  # environment, and exits 0, so the job status is the revoker's.
-  ssh_migration_revoke_keeper='read -r _ _ _ _ group _ </proc/self/stat
-  printf "group %s %s\n" "$group" "$1" >&3
+  # The keeper is the second process of each bounded job, so it shares the
+  # command's process group, whose ID is the command's PID and stays reserved
+  # while the keeper lives. It polls that PID, treating only "No such process"
+  # as gone, and at its deadline kills its own group, which cannot be anyone
+  # else's. It ignores job-control signals, so neither an interrupt at the
+  # terminal nor this shell's death leaves the command unbounded. It runs
+  # without the caller's environment and fails fast without /proc.
+  ssh_migration_keeper='trap "" HUP INT QUIT TERM TSTP TTIN TTOU
+  read -r _ _ _ _ group _ </proc/self/stat || exit 3
+  [[ $group =~ ^[0-9]+$ ]] || exit 3
+  started=$SECONDS
   while status=$(kill -0 "$group" 2>&1) || [[ $status != *"No such process"* ]]; do
-    read -r -t 0.2 -u 4 _ _ || true
-  done
-  printf "done - %s\n" "$1" >&3
-  while read -r -u 4 word serial; do
-    [[ $word != release || $serial != "$1" ]] || exit 0
+    (( SECONDS - started < $1 )) || kill -KILL -- "-$group"
+    /usr/bin/sleep 0.2
   done'
-  # Running out of descriptors for its reports leaves the migration pending
-  # instead of its revocation unbounded.
-  ssh_migration_clock=""
-  ssh_migration_hold=""
-  if ! { exec {ssh_migration_clock}<> <(:); } 2>/dev/null || ! { exec {ssh_migration_hold}<> <(:); } 2>/dev/null; then
-    echo "Could not reserve a descriptor for the SSH migration's cleanup." >&2
+  # Runs a command as a foreground job under job control: a direct child of
+  # this shell, which sudo needs under timestamp_type=ppid or without a
+  # terminal, in a process group of its own, so a signal to this shell's group
+  # does not reach it. A signal to this shell waits for the job, which the
+  # keeper bounds. Its status is the command's.
+  run_ssh_migration_bounded() {
+    local - bound=$1 status
+    shift
+    set -m
+    "$@" >&2 | /usr/bin/env -i /usr/bin/bash -p -c "$ssh_migration_keeper" omarchy-cleanup-keeper "$bound"
+    status=("${PIPESTATUS[@]}")
+    set +m
+    (( status[1] == 0 )) || return 125
+    return "${status[0]}"
+  }
+  # An environment without bounded jobs leaves the migration pending before
+  # anything privileged instead of its revocation unbounded.
+  if ! run_ssh_migration_bounded 5 /usr/bin/true 2>/dev/null; then
+    echo "Could not start a bounded job for the SSH migration's cleanup." >&2
     exit 1
   fi
   # Once cleanup starts, a signal is held rather than acted on: the exit
-  # revocation must finish.
+  # revocation must finish, and its job bounds it.
   ssh_migration_cleaning=false
-  ssh_migration_wait_interrupted=false
-  ssh_migration_revoke_serial=0
+  ssh_migration_revoke_bound=30
   handle_ssh_migration_signal() {
-    if [[ $ssh_migration_cleaning == "true" ]]; then
-      ssh_migration_wait_interrupted=true
-      return
-    fi
+    [[ $ssh_migration_cleaning != "true" ]] || return 0
     ssh_migration_cleaning=true
     exit "$1"
-  }
-  # wait returns early when a trapped signal arrives; only then is it
-  # repeated, never by probing a PID that may already belong to someone else.
-  wait_for_ssh_migration_revoke() {
-    local status=127 result
-    while :; do
-      ssh_migration_wait_interrupted=false
-      wait "$1" && result=0 || result=$?
-      (( result == 127 && status != 127 )) || status=$result
-      [[ $ssh_migration_wait_interrupted == "true" && $result != 127 ]] || break
-    done
-    return "$status"
-  }
-  # Pauses up to a second, or until a signal arrives, without a child process.
-  ssh_migration_pause() {
-    read -r -t 1 -u "$ssh_migration_clock" _ || true
-  }
-  revoke_ssh_migration_sudo_once() {
-    local - bound=30 serial keeper word value tag group="" finished=false started
-    set -o pipefail
-    ssh_migration_revoke_serial=$(( ssh_migration_revoke_serial + 1 ))
-    serial=$ssh_migration_revoke_serial
-    set -m
-    /usr/bin/sudo -k >/dev/null 2>&1 |
-      /usr/bin/env -i /usr/bin/bash -p -c "$ssh_migration_revoke_keeper" omarchy-revoke-keeper "$serial" 3>&"$ssh_migration_clock" 4<&"$ssh_migration_hold" &
-    keeper=$!
-    set +m
-    started=$SECONDS
-    while (( SECONDS - started < bound )); do
-      read -r -t 1 -u "$ssh_migration_clock" word value tag || continue
-      [[ $tag == "$serial" ]] || continue
-      if [[ $word == "group" ]]; then
-        group=$value
-      elif [[ $word == "done" ]]; then
-        finished=true
-        break
-      fi
-    done
-    if [[ $finished == "true" ]]; then
-      printf 'release %s\n' "$serial" >&"$ssh_migration_hold"
-      # Bash reports a job it started under job control; that report is noise.
-      wait_for_ssh_migration_revoke "$keeper" 2>/dev/null
-      return
-    fi
-    # Past the deadline, the group is killed while the keeper still reserves
-    # its ID; without the keeper's report there is nothing safe to signal.
-    [[ -n $group ]] || return 1
-    kill -KILL -- "-$group" 2>/dev/null || true
-    started=$SECONDS
-    while kill -0 -- "-$group" 2>/dev/null && (( SECONDS - started < 2 )); do ssh_migration_pause; done
-    # One that survives even this is abandoned rather than waited on forever.
-    ! kill -0 -- "-$group" 2>/dev/null || return 1
-    wait_for_ssh_migration_revoke "$keeper" 2>/dev/null || true
-    return 1
   }
   cleanup_ssh_migration_sudo() {
     local status=$ssh_migration_status attempt revoked=false
     trap - EXIT
     for attempt in 1 2 3; do
-      if revoke_ssh_migration_sudo_once; then
+      if run_ssh_migration_bounded "$ssh_migration_revoke_bound" /usr/bin/sudo -k 2>/dev/null; then
         revoked=true
         break
       fi

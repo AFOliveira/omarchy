@@ -53,7 +53,7 @@ cat >"$stub/mv" <<'SH'
 if [[ ${*: -1} == */authorized_keys ]]; then
   echo authorized-key >>"$EVENTS"
   # The second move onto authorized_keys is rollback restoring the original.
-  if [[ ${KEYS_HANG:-0} == 1 && -e $STATE/keys-moved ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; exit 1; fi
+  if [[ ${KEYS_HANG:-0} == 1 && -e $STATE/keys-moved ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & wait $! || true; exit 1; fi
   touch "$STATE/keys-moved"
 fi
 exec /usr/bin/mv "$@"
@@ -69,8 +69,8 @@ if [[ ${1:-} == -k ]]; then
   if [[ -e $STATE/k-seen ]]; then
     echo "$PPID" >"$STATE/setup.pid"; echo "$PPID" >>"$STATE/final-k.ppid"
     if [[ ${REVOKE_SLOW:-0} == 1 ]]; then touch "$STATE/revoking"; sleep 1; echo revoked >>"$EVENTS"; fi
-    if [[ ${REVOKE_ORPHAN:-0} == 1 ]]; then sleep 30 & echo $! >>"$STATE/hang.pids"; exit 0; fi
-    if [[ ${REVOKE_HANG:-0} == 1 ]]; then [[ ${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & echo $! >>"$STATE/hang.pids"; wait $!; fi
+    if [[ ${REVOKE_ORPHAN:-0} == 1 ]]; then sleep 30 & exit 0; fi
+    if [[ ${REVOKE_HANG:-0} == 1 ]]; then [[ ${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & wait $!; fi
   else
     echo "$PPID" >"$STATE/k-seen"
   fi
@@ -93,7 +93,7 @@ ufw)
   shift
   if [[ $1 == show ]]; then [[ ${UFW_QUERY_ERROR:-0} != 1 ]] || exit 1; [[ -e $STATE/rule && ${VERIFY_MISS:-0} != 1 ]] && echo "ufw limit 22/tcp comment 'omarchy-sshd'"; exit 0
   elif [[ $1 == limit ]]; then [[ ${LIMIT_PARTIAL:-0} != 1 ]] || { touch "$STATE/rule"; exit 1; }; [[ ${LIMIT_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/rule"; [[ ${LIMIT_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"
-  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || { trap "" TERM; kill -TERM "$PPID"; }; if [[ ${DELETE_HANG:-0} == 1 ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
+  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || { trap "" TERM; kill -TERM "$PPID"; }; if [[ ${DELETE_HANG:-0} == 1 ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
   elif [[ $1 == reload ]]; then n=0; [[ ! -e $STATE/ufw-reloads ]] || read -r n <"$STATE/ufw-reloads"; n=$((n+1)); echo "$n" >"$STATE/ufw-reloads"; [[ ${UFW_RELOAD_ALWAYS_FAIL:-0} != 1 && (${UFW_RELOAD_ONCE:-0} != 1 || $n != 1) ]]
   fi ;;
 test) p=$(map "$3"); case $2 in -e) [[ -e $p ]] ;; -L) [[ -L $p ]] ;; -f) [[ -f $p ]] ;; esac ;;
@@ -129,9 +129,13 @@ sed \
   -e "s#/usr/bin/gum#$stub/gum#g" \
   -e "s#/usr/bin/mv#$stub/mv#g" \
   "$ROOT/bin/omarchy-setup-security-sshd" >"$mapped_sshd"
-# A copy whose final revocation gives up quickly, to test that bound.
-sed 's#local - bound=30 #local - bound=1 #' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
-grep -q 'local - bound=1 ' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
+# A copy whose cleanup jobs give up quickly, to test those bounds.
+sed -e 's#^CLEANUP_COMMAND_BOUND=120$#CLEANUP_COMMAND_BOUND=1#' -e 's#^CLEANUP_REVOKE_BOUND=30$#CLEANUP_REVOKE_BOUND=1#' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
+grep -qx 'CLEANUP_COMMAND_BOUND=1' "$mapped_root/bin/omarchy-setup-security-sshd-fast" && grep -qx 'CLEANUP_REVOKE_BOUND=1' "$mapped_root/bin/omarchy-setup-security-sshd-fast" ||
+  fail "test could not shorten the cleanup bounds"
+# A copy whose keeper cannot identify its job, as without /proc.
+sed 's#</proc/self/stat#</proc/self/omarchy-missing#' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-nojob"
+grep -qF '</proc/self/omarchy-missing' "$mapped_root/bin/omarchy-setup-security-sshd-nojob" || fail "test could not break the cleanup keeper"
 chmod 0755 "$mapped_root/bin/"*
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/key"
@@ -230,46 +234,45 @@ if run "$name" "--key=$key" >/dev/null 2>&1; then fail "setup interrupted after 
 ! compgen -G "$tmp/$name/root/etc/ssh/sshd_config.d/.00-omarchy-key-only.backup.*" >/dev/null || fail "an interrupted setup left its config backup behind"
 [[ $(<"$cfg") == ADMIN ]] || fail "an interrupted setup changed the existing config"
 unset BACKUP_SIGNAL
-# A second signal arriving while rollback runs must not abort it. The delete
-# ignores the TERM forwarded to it, so only the shell's handling is tested.
+# A second signal arriving while rollback runs is held; it does not abort it.
 UFW_RELOAD_ONCE=1 DELETE_SIGNAL=1
 if run rollback-signal "--key=$key" >/dev/null 2>&1; then fail "a failed setup reported success"; fi
 rolled_back rollback-signal
 [[ $(tail -n1 "$tmp/rollback-signal/events") == 'sudo -k' ]] || fail "a signal during rollback skipped the final revocation" "$(tail -n3 "$tmp/rollback-signal/events")"
 unset UFW_RELOAD_ONCE DELETE_SIGNAL
-# A command that hangs during rollback must not hold rollback forever: a TERM
-# sent only to the setup process, as \`kill $pid\` or timeout --foreground do,
-# is forwarded to that command and rollback goes on with its remaining steps.
-UFW_RELOAD_ONCE=1 DELETE_HANG=1
+# A command that hangs during rollback is bounded: a TERM sent only to setup,
+# as `kill $pid` or timeout --foreground send, is held, the hung command is
+# killed at its deadline, and rollback goes on with its remaining steps.
+# Nothing here kills recorded PIDs; every stand-in that hangs is a bounded
+# sleep inside a job the cleanup bounds.
+UFW_RELOAD_ONCE=1 DELETE_HANG=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
 run rollback-hang "--key=$key" >"$tmp/rollback-hang.out" 2>&1 & runner=$!
 for (( i = 0; i < 200; i++ )); do [[ -s $tmp/rollback-hang/state/setup.pid ]] && break; sleep 0.05; done
 [[ -s $tmp/rollback-hang/state/setup.pid ]] || fail "the rollback never reached the hanging firewall command"
 kill -TERM "$(<"$tmp/rollback-hang/state/setup.pid")" 2>/dev/null || true
-for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-kill -KILL "$(<"$tmp/rollback-hang/state/hang.pid")" 2>/dev/null || true
-if kill -0 "$runner" 2>/dev/null; then wait "$runner" 2>/dev/null || true; fail "a TERM to setup did not reach its hung rollback command"; fi
+for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+kill -0 "$runner" 2>/dev/null && fail "a hung rollback command held setup forever"
 wait "$runner" 2>/dev/null || true
-# The stopped delete did not remove the rule, so rollback must say so, and
+# The killed delete did not remove the rule, so rollback must say so, and
 # still restore everything else and revoke.
 [[ ! -e $tmp/rollback-hang/state/active && ! -e $tmp/rollback-hang/state/enabled && ! -e $tmp/rollback-hang/home/.ssh/authorized_keys ]] ||
-  fail "rollback did not restore the service and keys after its hung command was stopped"
+  fail "rollback did not restore the service and keys after its hung command was killed"
 grep -q 'CRITICAL: SSH setup rollback was incomplete' "$tmp/rollback-hang.out" || fail "an interrupted rollback step was not reported" "$(cat "$tmp/rollback-hang.out")"
-[[ $(tail -n1 "$tmp/rollback-hang/events") == 'sudo -k' ]] || fail "rollback did not finish after its hung command was stopped"
-unset UFW_RELOAD_ONCE DELETE_HANG
+[[ $(tail -n1 "$tmp/rollback-hang/events") == 'sudo -k' ]] || fail "rollback did not finish after its hung command was killed"
+unset UFW_RELOAD_ONCE DELETE_HANG SETUP_BIN
 # The same holds for restoring authorized_keys, which runs without sudo.
 name=keys-hang; mkdir -p "$tmp/$name/home/.ssh"; chmod 0700 "$tmp/$name/home/.ssh"; echo "$key" >"$tmp/$name/home/.ssh/authorized_keys"; chmod 0600 "$tmp/$name/home/.ssh/authorized_keys"
-LIMIT_FAIL=1 KEYS_HANG=1
+LIMIT_FAIL=1 KEYS_HANG=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
 run "$name" "--key=$key" >"$tmp/$name.out" 2>&1 & runner=$!
 for (( i = 0; i < 200; i++ )); do [[ -s $tmp/$name/state/setup.pid ]] && break; sleep 0.05; done
 [[ -s $tmp/$name/state/setup.pid ]] || fail "the rollback never reached the hanging key restoration"
 kill -TERM "$(<"$tmp/$name/state/setup.pid")" 2>/dev/null || true
-for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-kill -KILL "$(<"$tmp/$name/state/hang.pid")" 2>/dev/null || true
-if kill -0 "$runner" 2>/dev/null; then wait "$runner" 2>/dev/null || true; fail "a TERM to setup did not reach its hung key restoration"; fi
+for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+kill -0 "$runner" 2>/dev/null && fail "a hung key restoration held setup forever"
 wait "$runner" 2>/dev/null || true
 grep -q 'CRITICAL: SSH setup rollback was incomplete' "$tmp/$name.out" || fail "an interrupted key restoration was not reported" "$(cat "$tmp/$name.out")"
-[[ $(tail -n1 "$tmp/$name/events") == 'sudo -k' ]] || fail "rollback did not revoke after its hung key restoration was stopped"
-unset LIMIT_FAIL KEYS_HANG
+[[ $(tail -n1 "$tmp/$name/events") == 'sudo -k' ]] || fail "rollback did not revoke after its hung key restoration was killed"
+unset LIMIT_FAIL KEYS_HANG SETUP_BIN
 # The final revocation is not something a signal stops: a TERM sent to setup
 # while it runs is held, and the revocation completes.
 LIMIT_FAIL=1 REVOKE_SLOW=1
@@ -287,7 +290,7 @@ unset LIMIT_FAIL REVOKE_SLOW
 LIMIT_FAIL=1 REVOKE_HANG=1 SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
 run revoke-hang "--key=$key" >"$tmp/revoke-hang.out" 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-hang/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung final revocation held setup forever"; fi
+kill -0 "$runner" 2>/dev/null && fail "a hung final revocation held setup forever"
 wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
 grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-hang.out" || fail "a hung final revocation was not reported" "$(cat "$tmp/revoke-hang.out")"
 ! grep -q 'Killed' "$tmp/revoke-hang.out" || fail "a killed revocation leaked a job report" "$(cat "$tmp/revoke-hang.out")"
@@ -301,38 +304,31 @@ for (( i = 0; i < 200; i++ )); do [[ -s $tmp/revoke-group/state/setup.pid ]] && 
 [[ -s $tmp/revoke-group/state/setup.pid ]] || fail "the rollback never reached its final revocation"
 kill -TERM -- "-$(<"$tmp/revoke-group/state/setup.pid")" 2>/dev/null || true
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-group/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a group signal left a hung final revocation unbounded"; fi
+kill -0 "$runner" 2>/dev/null && fail "a group signal left a hung final revocation unbounded"
 wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
 grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-group.out" || fail "a hung final revocation after a group signal was not reported" "$(cat "$tmp/revoke-group.out")"
 unset LIMIT_FAIL REVOKE_HANG REVOKE_IGNORE_TERM RUN_WRAPPER SETUP_BIN
 # A revoker that exits but leaves something running has still revoked: its
-# exit, not its leftover, ends the wait, and nothing of it is killed.
-# With the full 30-second bound, finishing within 15 seconds proves the wait
-# ended at the revoker's exit rather than the deadline.
+# exit, not its leftover, ends the job. With the full 30-second bound,
+# finishing within 15 seconds proves that. The leftover is a 30-second sleep.
 LIMIT_FAIL=1 REVOKE_ORPHAN=1
 run revoke-orphan "--key=$key" >"$tmp/revoke-orphan.out" 2>&1 & runner=$!
 for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-orphan/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a revoker's leftover process held setup forever"; fi
+kill -0 "$runner" 2>/dev/null && fail "a revoker's leftover process held setup forever"
 wait "$runner" 2>/dev/null || true
 ! grep -q 'could not invalidate' "$tmp/revoke-orphan.out" || fail "a revocation that succeeded was reported as failed"
 [[ $(grep -c '^sudo -k$' "$tmp/revoke-orphan/events") == 2 ]] || fail "a revocation that succeeded was retried" "$(cat "$tmp/revoke-orphan/events")"
-# The leftover is a live 30-second sleep this fixture started moments ago.
-xargs -r kill -KILL <"$tmp/revoke-orphan/state/hang.pids" 2>/dev/null || true
 unset LIMIT_FAIL REVOKE_ORPHAN
-# A repeated wait never probes a PID that may already belong to another
-# process: it repeats only when a trapped signal interrupted it.
-! sed -n '/^wait_for_cleanup_child() {/,/^}/p' "$ROOT/bin/omarchy-setup-security-sshd" | grep -q 'kill -0' ||
-  fail "the cleanup wait still probes a PID after collecting its status"
-# Without a descriptor to bound its final revocation, setup refuses before
-# anything privileged. A copy whose reservation cannot succeed stands in for
-# running out of descriptors.
-sed "s#exec {CLEANUP_CLOCK}<> <(:)#exec {CLEANUP_CLOCK}<>$tmp/missing/clock#" "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-nofd"
-grep -qF "$tmp/missing/clock" "$mapped_root/bin/omarchy-setup-security-sshd-nofd" || fail "test could not make the cleanup reservation fail"
-chmod 0755 "$mapped_root/bin/omarchy-setup-security-sshd-nofd"
-SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-nofd"
-if run nofd "--key=$key" >"$tmp/nofd.out" 2>&1; then fail "setup without a cleanup descriptor succeeded"; fi
-[[ ! -s $tmp/nofd/events ]] || fail "setup without a cleanup descriptor ran sudo" "$(cat "$tmp/nofd/events")"
-grep -q 'Could not reserve a descriptor' "$tmp/nofd.out" || fail "setup without a cleanup descriptor did not say why" "$(cat "$tmp/nofd.out")"
+# Cleanup never signals a PID it recorded: the only signals in setup are the
+# keeper's, on the group it belongs to and the PID that group reserves.
+kills=$(grep -nE '(^|[^[:alnum:]_])kill ' "$ROOT/bin/omarchy-setup-security-sshd" | grep -vE 'kill -0 "\$group"|kill -KILL -- "-\$group"' || true)
+[[ -z $kills ]] || fail "setup signals a process outside its keeper" "$kills"
+# Where bounded cleanup jobs cannot work, setup refuses before anything
+# privileged rather than run a cleanup it could not bound.
+SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-nojob"
+if run nojob "--key=$key" >"$tmp/nojob.out" 2>&1; then fail "setup without bounded cleanup jobs succeeded"; fi
+[[ ! -s $tmp/nojob/events ]] || fail "setup without bounded cleanup jobs ran sudo" "$(cat "$tmp/nojob/events")"
+grep -q 'Could not start a bounded cleanup job' "$tmp/nojob.out" || fail "setup without bounded cleanup jobs did not say why" "$(cat "$tmp/nojob.out")"
 unset SETUP_BIN
 # A signal can arrive as a non-signal failure enters cleanup; the EXIT trap's
 # first command both records the status and marks cleanup active.
