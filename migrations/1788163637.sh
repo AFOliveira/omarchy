@@ -24,8 +24,9 @@ else
   cleanup_ssh_migration_sudo() {
     local status=$?
     trap - EXIT
-    # A second signal must not interrupt the revocation.
-    trap '' HUP INT TERM
+    # A second signal must not interrupt the revocation; a handler rather than
+    # an ignored disposition keeps sudo itself interruptible.
+    trap ':' HUP INT TERM
     /usr/bin/sudo -k >/dev/null 2>&1 || status=1
     exit "$status"
   }

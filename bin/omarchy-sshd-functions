@@ -99,14 +99,13 @@ omarchy_sshd_key_not_revoked() {
     return
   fi
   listing=$($runner /usr/bin/cat -- "$file" 2>/dev/null) || return 1
+  # sshd requires every other line to start with a public key and refuses
+  # authentication when one does not, so a malformed list revokes everything.
   while IFS= read -r line; do
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
     read -r -a fields <<<"$line"
-    if omarchy_sshd_is_key_type "${fields[0]:-}"; then
-      [[ ${fields[0]} == "$type" && ${fields[1]:-} == "$key" ]] && return 1
-    else
-      [[ ${fields[1]:-} == "$type" && ${fields[2]:-} == "$key" ]] && return 1
-    fi
+    omarchy_sshd_is_key_type "${fields[0]:-}" && [[ ${fields[1]:-} =~ ^[A-Za-z0-9+/]+=*$ ]] || return 1
+    [[ ${fields[0]} == "$type" && ${fields[1]} == "$key" ]] && return 1
   done <<<"$listing"
   return 0
 }

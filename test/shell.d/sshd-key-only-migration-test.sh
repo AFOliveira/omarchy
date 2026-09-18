@@ -110,6 +110,13 @@ prepare revoked; touch "$t/revoked/state/"{active,enabled}; REVOKED_KEYS="$t/krl
 printf '# revoked\n%s\n' "$key" >"$t/revoked.txt"; cp "$t/rsa.pub" "$t/other-revoked.txt"
 prepare revoked-text; touch "$t/revoked-text/state/"{active,enabled}; REVOKED_KEYS="$t/revoked.txt" run revoked-text; [[ ! -e $t/revoked-text/state/active ]]
 prepare unrevoked-text; touch "$t/unrevoked-text/state/"{active,enabled}; REVOKED_KEYS="$t/other-revoked.txt" run unrevoked-text; [[ -e $t/unrevoked-text/state/active ]]
+# sshd refuses every key when a text list has a line that is not a bare key,
+# so such a list proves no login either.
+printf 'this-is-not-a-key\n' >"$t/malformed-revoked.txt"; printf 'restrict %s\n' "$(<"$t/rsa.pub")" >"$t/options-revoked.txt"
+for list in malformed options; do
+  prepare "$list-revoked"; touch "$t/$list-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/$list-revoked.txt" run "$list-revoked"
+  [[ ! -e $t/$list-revoked/state/active ]] || { echo "a $list revocation list was treated as revoking nothing" >&2; exit 1; }
+done
 # An account sshd refuses outright, or forces into a command, proves no login.
 prepare refused; touch "$t/refused/state/"{active,enabled}; REFUSE_CONNECTION=yes run refused; [[ ! -e $t/refused/state/active ]]
 prepare forced; touch "$t/forced/state/"{active,enabled}; FORCE_COMMAND=/usr/bin/false run forced; [[ ! -e $t/forced/state/active ]]

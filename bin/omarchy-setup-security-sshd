@@ -101,6 +101,7 @@ AUTHORIZED_KEYS_BACKUP=""
 AUTHORIZED_KEYS_WAS_PRESENT=false
 AUTHORIZED_KEYS_TOUCHED=false
 SETUP_COMPLETE=false
+COMPLETION_MARKER_ARMED=false
 
 setup_sshd_package() {
   echo "Installing the OpenSSH server prerequisites..."
@@ -162,12 +163,18 @@ rollback_setup() {
   local exit_status=$?
   local rollback_failed=false config_restored=false
   trap - EXIT
-  # A second signal must not abort restoration or the final revocation.
-  trap '' HUP INT TERM
+  # A second signal must not abort restoration or the final revocation. A
+  # handler rather than an ignored disposition, so the commands run below stay
+  # interruptible: exec resets handled signals but inherits ignored ones.
+  trap ':' HUP INT TERM
 
   [[ -z $AUTHORIZED_KEYS_TEMP ]] || /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP"
 
   if [[ $SETUP_COMPLETE != "true" ]]; then
+    # First, so nothing below can leave a certification of a restored config.
+    if [[ $COMPLETION_MARKER_ARMED == "true" ]]; then
+      /usr/bin/sudo rm -f "$COMPLETION_MARKER" >/dev/null 2>&1 || rollback_failed=true
+    fi
     if [[ $FIREWALL_RULE_ADDED == "true" ]]; then
       # Armed before the mutation, so a signal cannot leave our rule behind.
       # The rule was proven absent beforehand, so deleting it is always ours to
@@ -635,10 +642,15 @@ authorize_collected_keys
 # state could not be recorded. Installing openssh neither enables nor starts it.
 setup_sshd_package
 record_existing_state
+# Setup is about to change the SSH configuration, so any earlier
+# certification no longer describes it. Removing it arms its rollback too.
+COMPLETION_MARKER_ARMED=true
+/usr/bin/sudo rm -f "$COMPLETION_MARKER"
 disable_password_auth
 publish_sshd
 open_firewall
 # Certify the conversion for the SSH migrations only once it is published.
+# Rollback removes it again unless SETUP_COMPLETE is reached.
 /usr/bin/sudo install -D -o root -g root -m 0644 /dev/null "$COMPLETION_MARKER"
 
 SETUP_COMPLETE=true

@@ -76,13 +76,13 @@ ufw)
   shift
   if [[ $1 == show ]]; then [[ ${UFW_QUERY_ERROR:-0} != 1 ]] || exit 1; [[ -e $STATE/rule && ${VERIFY_MISS:-0} != 1 ]] && echo "ufw limit 22/tcp comment 'omarchy-sshd'"; exit 0
   elif [[ $1 == limit ]]; then [[ ${LIMIT_PARTIAL:-0} != 1 ]] || { touch "$STATE/rule"; exit 1; }; [[ ${LIMIT_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/rule"; [[ ${LIMIT_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"
-  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
+  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; if [[ ${DELETE_HANG:-0} == 1 ]]; then sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
   elif [[ $1 == reload ]]; then n=0; [[ ! -e $STATE/ufw-reloads ]] || read -r n <"$STATE/ufw-reloads"; n=$((n+1)); echo "$n" >"$STATE/ufw-reloads"; [[ ${UFW_RELOAD_ALWAYS_FAIL:-0} != 1 && (${UFW_RELOAD_ONCE:-0} != 1 || $n != 1) ]]
   fi ;;
 test) p=$(map "$3"); case $2 in -e) [[ -e $p ]] ;; -L) [[ -L $p ]] ;; -f) [[ -f $p ]] ;; esac ;;
 mktemp) p=$(map "$2"); mkdir -p "${p%/*}"; /usr/bin/mktemp "$p" ;;
 cp) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); /usr/bin/cp -a "$s" "$d"; [[ ${BACKUP_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID" ;;
-install) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); mkdir -p "${d%/*}"; /usr/bin/install -m0644 "$s" "$d"; if [[ $d == *.conf ]]; then echo installed-hardening; else echo installed-marker; fi >>"$EVENTS" ;;
+install) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); mkdir -p "${d%/*}"; /usr/bin/install -m0644 "$s" "$d"; if [[ $d == *.conf ]]; then echo installed-hardening; else echo installed-marker; [[ ${MARKER_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; fi >>"$EVENTS" ;;
 /usr/bin/awk) x=("$@"); x[-1]=$(map "${x[-1]}"); exec "${x[@]}" ;;
 /usr/bin/find) x=("$@"); x[1]=$(map "${x[1]}"); exec "${x[@]}" ;;
 ssh-keygen) echo host-keygen >>"$EVENTS"; [[ ${HOSTKEY_FAIL:-0} != 1 ]] || exit 1; touch "$FAKE_ROOT/etc/ssh/ssh_host_key" ;;
@@ -134,7 +134,7 @@ run() {
     MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" MATCH_KBD_AUTH="${MATCH_KBD_AUTH:-}" MATCH_AUTH_METHODS="${MATCH_AUTH_METHODS:-}" MATCH_PUBKEY_AUTH="${MATCH_PUBKEY_AUTH:-}" MATCH_KEYS_SETTING="${MATCH_KEYS_SETTING:-}" \
     ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" \
     ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" LIMIT_SIGNAL="${LIMIT_SIGNAL:-0}" BACKUP_SIGNAL="${BACKUP_SIGNAL:-0}" \
-    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" \
+    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" \
     LIMIT_FAIL="${LIMIT_FAIL:-0}" LIMIT_PARTIAL="${LIMIT_PARTIAL:-0}" VERIFY_MISS="${VERIFY_MISS:-0}" UFW_RELOAD_ONCE="${UFW_RELOAD_ONCE:-0}" UFW_RELOAD_ALWAYS_FAIL="${UFW_RELOAD_ALWAYS_FAIL:-0}" DELETE_FAIL="${DELETE_FAIL:-0}" CONFIG_RM_FAIL="${CONFIG_RM_FAIL:-0}" \
     "$mapped_sshd" "$@"
 }
@@ -216,7 +216,33 @@ if run rollback-signal "--key=$key" >/dev/null 2>&1; then fail "a failed setup r
 rolled_back rollback-signal
 [[ $(tail -n1 "$tmp/rollback-signal/events") == 'sudo -k' ]] || fail "a signal during rollback skipped the final revocation" "$(tail -n3 "$tmp/rollback-signal/events")"
 unset UFW_RELOAD_ONCE DELETE_SIGNAL
-pass "firewall query errors and signals during firewall, backup or rollback changes roll back cleanly"
+# A command that hangs during rollback must still die on TERM, so rollback
+# can go on: cleanup handles further signals rather than ignoring them, and an
+# ignored disposition would be inherited by the command.
+UFW_RELOAD_ONCE=1 DELETE_HANG=1
+run rollback-hang "--key=$key" >/dev/null 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -s $tmp/rollback-hang/state/hang.pid ]] && break; sleep 0.05; done
+[[ -s $tmp/rollback-hang/state/hang.pid ]] || fail "the rollback never reached the hanging firewall command"
+kill -TERM "$(<"$tmp/rollback-hang/state/hang.pid")" 2>/dev/null || true
+for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$runner" 2>/dev/null; then kill -KILL "$(<"$tmp/rollback-hang/state/hang.pid")" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung rollback command ignored TERM"; fi
+wait "$runner" 2>/dev/null || true
+rolled_back rollback-hang
+[[ $(tail -n1 "$tmp/rollback-hang/events") == 'sudo -k' ]] || fail "rollback did not finish after its hung command was stopped"
+unset UFW_RELOAD_ONCE DELETE_HANG
+# The completion certificate never outlives an incomplete setup: an earlier
+# one is invalidated, and a signal right after writing it removes it again.
+name=marker-signal; mkdir -p "$tmp/$name/root/var/lib/omarchy/migrations"; : >"$tmp/$name/root/var/lib/omarchy/migrations/1788163637"
+MARKER_SIGNAL=1
+if run "$name" "--key=$key" >/dev/null 2>&1; then fail "setup interrupted after certifying reported success"; fi
+[[ ! -e $tmp/$name/root/var/lib/omarchy/migrations/1788163637 ]] || fail "an interrupted setup left its completion certificate"
+rolled_back "$name"; unset MARKER_SIGNAL
+name=stale-marker; mkdir -p "$tmp/$name/root/var/lib/omarchy/migrations"; : >"$tmp/$name/root/var/lib/omarchy/migrations/1788163637"
+T_FAIL=1
+if run "$name" "--key=$key" >/dev/null 2>&1; then fail "a failed setup reported success"; fi
+[[ ! -e $tmp/$name/root/var/lib/omarchy/migrations/1788163637 ]] || fail "a failed setup left an earlier completion certificate in place"
+unset T_FAIL
+pass "firewall query errors and signals during firewall, backup, certification or rollback changes roll back cleanly"
 
 for c in hostkey syntax dump pass kbd methods pubkey keysfile matched; do case $c in hostkey) HOSTKEY_FAIL=1;; syntax) T_FAIL=1;; dump) DUMP_FAIL=1;; pass) PASS_AUTH=yes;; kbd) KBD_AUTH=yes;; methods) AUTH_METHODS=any;; pubkey) PUBKEY_AUTH=no;; keysfile) AUTHORIZED_KEYS_SETTING=/etc/ssh/admin_keys;; matched) MATCH_PASS_AUTH=yes;; esac; if run "$c" "--key=$key" >/dev/null 2>&1; then fail "$c succeeds"; fi; no_publish "$c"; rolled_back "$c"; unset HOSTKEY_FAIL T_FAIL DUMP_FAIL PASS_AUTH KBD_AUTH AUTH_METHODS PUBKEY_AUTH AUTHORIZED_KEYS_SETTING MATCH_PASS_AUTH; done
 pass "host-key, syntax, and effective-policy failures are pre-publication"
