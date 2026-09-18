@@ -4,16 +4,23 @@ legacy_config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf
 key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf
 completion_marker=/var/lib/omarchy/migrations/1788163637
 
-# The machine phase repairs the file old Omarchy wrote and validates a
-# key-only file that was never certified, such as one an interrupted setup
-# left behind. With neither, or once a validated conversion is recorded, later
+# The machine phase repairs the file old Omarchy wrote, validates a key-only
+# file that was never certified, such as one an interrupted setup left
+# behind, and makes key-only, or disables, a daemon old setup exposed without
+# either. Otherwise, and once a validated conversion is recorded, later
 # accounts finish here without privileges instead of prompting, or failing
 # outright when they cannot use sudo.
+sshd_may_be_exposed() {
+  local enabled active
+  enabled=$(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) || true
+  active=$(/usr/bin/systemctl is-active sshd.service 2>/dev/null) || true
+  case "$enabled" in disabled | masked | masked-runtime | not-found) ;; *) return 0 ;; esac
+  case "$active" in inactive | failed) return 1 ;; *) return 0 ;; esac
+}
 if [[ ! -e $legacy_config && ! -L $legacy_config ]]; then
   if [[ ! -e $key_only_config && ! -L $key_only_config ]]; then
-    exit 0
-  fi
-  if [[ -f $completion_marker && ! -L $completion_marker && $(/usr/bin/stat -c %u -- "$completion_marker" 2>/dev/null) == 0 ]]; then
+    sshd_may_be_exposed || exit 0
+  elif [[ -f $completion_marker && ! -L $completion_marker && $(/usr/bin/stat -c %u -- "$completion_marker" 2>/dev/null) == 0 ]]; then
     exit 0
   fi
 fi
