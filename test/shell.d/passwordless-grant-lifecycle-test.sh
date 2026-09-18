@@ -48,9 +48,18 @@ mkdir -p "$test_tmp/source/migrations"
 sed "s|/usr/bin/omarchy-sudo-passwordless|$test_tmp/omarchy-sudo-passwordless|g" \
   "$ROOT/migrations/1788163635.sh" >"$test_tmp/source/migrations/1788163635.sh"
 printf 'echo "later migration ran"\n' >"$test_tmp/source/migrations/1788163636.sh"
+# The migration runner is a protected entrypoint: it runs from a source root
+# holding itself, its library and the no-update wrapper, under privileged Bash,
+# with every sudo it or the wrapper would reach mapped to the stand-in.
+mkdir -p "$test_tmp/source/bin" "$test_tmp/source/default/omarchy/sudo-no-update"
+cp "$test_tmp/omarchy-security-functions" "$test_tmp/source/bin/omarchy-security-functions"
+sed "s|/usr/bin/sudo|$test_tmp/bin/sudo|g" "$ROOT/bin/omarchy-migrate" >"$test_tmp/source/bin/omarchy-migrate"
+sed "s|/usr/bin/sudo|$test_tmp/bin/sudo|g" "$ROOT/default/omarchy/sudo-no-update/sudo" >"$test_tmp/source/default/omarchy/sudo-no-update/sudo"
+printf '#!/bin/bash\nexit 0\n' >"$test_tmp/source/bin/omarchy-notification-dismiss"
+chmod 0755 "$test_tmp/source/bin/"* "$test_tmp/source/default/omarchy/sudo-no-update/sudo"
 run_migrations() {
   TEST_MIGRATION=1 OMARCHY_PATH="$test_tmp/source" OMARCHY_MIGRATION_STATE="$test_tmp/$1" \
-    PATH="$test_tmp/bin:$PATH" /usr/bin/bash "$ROOT/bin/omarchy-migrate" >"$test_tmp/migrations.log" 2>&1
+    PATH="$test_tmp/bin:$PATH" /usr/bin/bash -p "$test_tmp/source/bin/omarchy-migrate" >"$test_tmp/migrations.log" 2>&1
 }
 marker="$test_tmp/var/lib/omarchy/migrations/1788163635"
 (
@@ -72,7 +81,8 @@ marker="$test_tmp/var/lib/omarchy/migrations/1788163635"
   : >"$test_tmp/commands"
   TEST_NO_SUDO=1 run_migrations second
   [[ -f $test_tmp/second/1788163636.sh ]]
-  ! grep -q '^sudo ' "$test_tmp/commands"
+  # The runner's own revocations and capability probe are not authorization.
+  ! grep -Ev '^sudo (-k|-h)$' "$test_tmp/commands" | grep -q '^sudo '
   cmp "$(rule_file 1000)" "$test_tmp/renewed"
 )
 pass "migration completion is machine-wide, retryable, and needs no sudo for later users"

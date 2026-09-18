@@ -99,9 +99,10 @@ wait_for_pacman_transaction() {
 }
 
 # Revoke before waiting or touching state. Every exit, including failed and
-# interrupted migrations, must revoke again before returning to user code.
-omarchy_security_revoke_sudo_timestamp || exit 1
+# interrupted migrations, must revoke again before returning to user code, so
+# the traps go in first and also cover a failure of this entry revocation.
 omarchy_security_install_sudo_cleanup_traps
+omarchy_security_revoke_sudo_timestamp || exit 1
 omarchy_security_enable_no_update_sudo
 
 wait_for_pacman_transaction

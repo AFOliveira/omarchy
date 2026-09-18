@@ -128,6 +128,19 @@ grep -Fq 'pm_async=off mem_sleep_default=deep' "$tmp/t2.conf" || fail "T2 retry 
 grep -Fq '[Fan2]' "$tmp/fan.conf" || fail "T2 retry did not add the second fan"
 [[ $(grep -c '^rebuild$' "$tmp/t2.log") == 1 ]] || fail "T2 retry did not run exactly one successful rebuild"
 T2_PRESENT=1 root_run "$t2_body" --machine
+# Completion means a successful rebuild of the new parameters. Without the
+# drop-in, or with a drop-in that has neither the old nor the new parameters,
+# there is nothing to rebuild, and no marker may stop a later run from
+# rebuilding once the parameters are configured.
+for layout in missing unrelated; do
+  rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf '[Fan1]\n[Fan2]\n' >"$tmp/fan.conf"
+  if [[ $layout == missing ]]; then rm -f "$tmp/t2.conf"; else printf 'options=quiet\n' >"$tmp/t2.conf"; fi
+  T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
+  [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 $layout drop-in published completion without a rebuild"
+done
+printf 'options=pm_async=off mem_sleep_default=deep\n' >"$tmp/t2.conf"
+T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
+[[ -e $tmp/t2.marker && $(grep -c '^rebuild$' "$tmp/t2.log") == 1 ]] || fail "T2 parameters configured later were not rebuilt"
 pass "T2 machine body preserves discovery and rebuild failures, completes a retry, and replays without mutation"
 
 t2_dispatch="$tmp/t2-dispatch.sh"; script_copy 1785944594 "$t2_dispatch"
