@@ -33,14 +33,18 @@ limine_mentions() {
   for wanted in "$@"; do [[ $active == *"$wanted"* ]] || return 1; done
 }
 
-# Root decisions use Limine's own view of the effective command line, after
-# its quoting, =/+= ordering and per-kernel keys: 0 when every given parameter
-# is an exact token, 1 when one is not, 2 when Limine cannot be asked.
+# Root decisions use Limine's own view of the effective command line for the
+# T2 kernel, after its quoting, =/+= ordering and per-kernel keys, read the way
+# limine-mkinitcpio reads it: 0 when every given parameter is an exact token, 1
+# when one is not, 2 when Limine cannot be asked. Limine prints its usage and
+# exits 0 on arguments it does not accept, so that answer is refused too.
 effective_cmdline_has() {
-  local cmdline wanted token found
+  local output cmdline wanted token found
   local -a tokens
-  cmdline=$(/usr/bin/limine-entry-tool --get-cmdline 2>/dev/null) || return 2
-  read -r -a tokens <<<"${cmdline//$'\n'/ }"
+  output=$(/usr/bin/limine-entry-tool --get-cmdline linux-t2 --no-mutex --no-hooks 2>/dev/null) || return 2
+  [[ $output != *"Usage: limine-entry-tool"* ]] || return 2
+  cmdline=${output##*$'\n'}
+  read -r -a tokens <<<"$cmdline"
   for wanted in "$@"; do
     found=1
     for token in "${tokens[@]}"; do

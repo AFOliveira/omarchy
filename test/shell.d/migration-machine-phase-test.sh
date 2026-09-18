@@ -92,7 +92,7 @@ wait "$bt_pid_one"; wait "$bt_pid_two"
 pass "Bluetooth full no-argument dispatch preserves sudo arguments, clean environment, flock serialization, recheck, and marker replay"
 
 
-# Stand-in for limine-entry-tool --get-cmdline: applies = and += in order for
+# Stand-in for limine-entry-tool --get-cmdline linux-t2: applies = and += in order for
 # the default key to the drop-in's active lines, stripping one pair of double
 # quotes, the way Limine resolves the installer's format. T2_EFFECTIVE, when
 # set, overrides the answer to model a form the rewrite cannot change.
@@ -100,6 +100,8 @@ write_entry_stub() {
   cat >"$1" <<SH
 #!/bin/bash
 [[ \${1:-} == --get-cmdline ]] || exit 64
+# The real tool prints its usage and exits 0 without a kernel name.
+[[ \${2:-} == linux-t2 ]] || { printf 'Invalid arguments\nUsage: limine-entry-tool [options] [--quiet]\n'; exit 0; }
 [[ -z \${T2_EFFECTIVE:-} ]] || { printf '%s\n' "\$T2_EFFECTIVE"; exit 0; }
 cmdline=""
 [[ -f '$2' ]] || { echo; exit 0; }
@@ -200,6 +202,10 @@ t2_case 'KERNEL_CMDLINE[default]+=" pcie_ports=compat pcie_ports=compat"'
 rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf 'KERNEL_CMDLINE[default]+=" pcie_ports=compat"\n' >"$tmp/t2.conf"
 if T2_PRESENT=1 T2_EFFECTIVE='quiet pcie_ports=compat' T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine; then fail "T2 completed while Limine still applies the old parameter"; fi
 [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 rebuilt or certified with the old parameter still effective"
+# Limine's usage text, printed with status 0, is not a command line.
+rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf 'KERNEL_CMDLINE[default]+=" pm_async=off mem_sleep_default=deep"\n' >"$tmp/t2.conf"
+if T2_PRESENT=1 T2_EFFECTIVE=$'Invalid arguments\nUsage: limine-entry-tool [options] [--quiet]' T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine; then fail "T2 completed on Limine's usage text"; fi
+[[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 rebuilt or certified from Limine's usage text"
 # A drop-in that cannot be read is neither configured nor unconfigured.
 rm -f "$tmp/t2.marker"; printf 'KERNEL_CMDLINE[default]+=" pcie_ports=compat"\n' >"$tmp/t2.conf"
 if T2_PRESENT=1 T2_GREP_FAIL=1 T2_LOG="$tmp/t2.log" root_run "$t2_grep_body" --machine; then fail "a Limine read error was treated as nothing to repair"; fi
