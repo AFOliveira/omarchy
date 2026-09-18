@@ -69,7 +69,7 @@ if [[ ${1:-} == -k ]]; then
   if [[ -e $STATE/k-seen ]]; then
     echo "$PPID" >"$STATE/setup.pid"; echo "$PPID" >>"$STATE/final-k.ppid"
     if [[ ${REVOKE_SLOW:-0} == 1 ]]; then touch "$STATE/revoking"; sleep 1; echo revoked >>"$EVENTS"; fi
-    if [[ ${REVOKE_HANG:-0} == 1 ]]; then sleep 30 & echo $! >>"$STATE/hang.pids"; wait $!; fi
+    if [[ ${REVOKE_HANG:-0} == 1 ]]; then [[ ${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; echo $$ >>"$STATE/hang.pids"; sleep 30 & echo $! >>"$STATE/hang.pids"; wait $!; fi
   else
     echo "$PPID" >"$STATE/k-seen"
   fi
@@ -129,8 +129,8 @@ sed \
   -e "s#/usr/bin/mv#$stub/mv#g" \
   "$ROOT/bin/omarchy-setup-security-sshd" >"$mapped_sshd"
 # A copy whose final revocation gives up quickly, to test that bound.
-sed 's#/usr/bin/timeout 30 /usr/bin/tail#/usr/bin/timeout 1 /usr/bin/tail#' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
-grep -q 'timeout 1 /usr/bin/tail' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
+sed 's#local bound=30 #local bound=1 #' "$mapped_sshd" >"$mapped_root/bin/omarchy-setup-security-sshd-fast"
+grep -q 'local bound=1 ' "$mapped_root/bin/omarchy-setup-security-sshd-fast" || fail "test could not shorten the revocation bound"
 chmod 0755 "$mapped_root/bin/"*
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/key"
@@ -145,7 +145,7 @@ run() {
   [[ ${PRE_ENABLED:-0} != 1 ]] || touch "$d/state/enabled"
   [[ ${PRE_RULE:-0} != 1 ]] || touch "$d/state/rule"
   [[ ${UNIT_MISSING:-0} != 1 ]] || touch "$d/state/no-unit"
-  env HOME="$d/home" PATH="$stub:/usr/bin" OMARCHY_PATH="$mapped_root" FAKE_ROOT="$d/root" STATE="$d/state" EVENTS="$d/events" USER=audit TEST_UID="$test_uid" \
+  ${RUN_WRAPPER:-} env HOME="$d/home" PATH="$stub:/usr/bin" OMARCHY_PATH="$mapped_root" FAKE_ROOT="$d/root" STATE="$d/state" EVENTS="$d/events" USER=audit TEST_UID="$test_uid" \
     TEST_ACCOUNT="${TEST_ACCOUNT:-audit}" TEST_GROUPS="${TEST_GROUPS:-audit sshers}" ACCOUNT_STATUS="${ACCOUNT_STATUS:-P}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" \
     PACKAGE_FAIL="${PACKAGE_FAIL:-0}" GH_FAIL="${GH_FAIL:-0}" GH_KEYS="${GH_KEYS:-}" GUM_CHOICE="${GUM_CHOICE:-}" GUM_INPUT="${GUM_INPUT:-}" GUM_CANCEL="${GUM_CANCEL:-0}" \
     START_FAIL="${START_FAIL:-0}" START_PARTIAL="${START_PARTIAL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" ENABLE_PARTIAL="${ENABLE_PARTIAL:-0}" RELOAD_ONCE="${RELOAD_ONCE:-0}" RELOAD_ALWAYS_FAIL="${RELOAD_ALWAYS_FAIL:-0}" \
@@ -153,7 +153,7 @@ run() {
     MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" MATCH_KBD_AUTH="${MATCH_KBD_AUTH:-}" MATCH_AUTH_METHODS="${MATCH_AUTH_METHODS:-}" MATCH_PUBKEY_AUTH="${MATCH_PUBKEY_AUTH:-}" MATCH_KEYS_SETTING="${MATCH_KEYS_SETTING:-}" \
     ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" \
     ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" LIMIT_SIGNAL="${LIMIT_SIGNAL:-0}" BACKUP_SIGNAL="${BACKUP_SIGNAL:-0}" \
-    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" KEYS_HANG="${KEYS_HANG:-0}" REVOKE_SLOW="${REVOKE_SLOW:-0}" REVOKE_HANG="${REVOKE_HANG:-0}" \
+    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" DELETE_HANG="${DELETE_HANG:-0}" KEYS_HANG="${KEYS_HANG:-0}" REVOKE_SLOW="${REVOKE_SLOW:-0}" REVOKE_HANG="${REVOKE_HANG:-0}" REVOKE_IGNORE_TERM="${REVOKE_IGNORE_TERM:-0}" \
     LIMIT_FAIL="${LIMIT_FAIL:-0}" LIMIT_PARTIAL="${LIMIT_PARTIAL:-0}" VERIFY_MISS="${VERIFY_MISS:-0}" UFW_RELOAD_ONCE="${UFW_RELOAD_ONCE:-0}" UFW_RELOAD_ALWAYS_FAIL="${UFW_RELOAD_ALWAYS_FAIL:-0}" DELETE_FAIL="${DELETE_FAIL:-0}" CONFIG_RM_FAIL="${CONFIG_RM_FAIL:-0}" \
     "${SETUP_BIN:-$mapped_sshd}" "$@"
 }
@@ -292,6 +292,19 @@ grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-hang.out" 
 [[ $(grep -c '^sudo -k$' "$tmp/revoke-hang/events") == 4 ]] || fail "a hung final revocation was not retried" "$(cat "$tmp/revoke-hang/events")"
 xargs -r kill -KILL <"$tmp/revoke-hang/state/hang.pids" 2>/dev/null || true
 unset LIMIT_FAIL REVOKE_HANG SETUP_BIN
+# Nor does a signal to setup's whole process group unbound it, even when the
+# hung revocation ignores that signal. Setup leads its own group here.
+LIMIT_FAIL=1 REVOKE_HANG=1 REVOKE_IGNORE_TERM=1 RUN_WRAPPER=setsid SETUP_BIN="$mapped_root/bin/omarchy-setup-security-sshd-fast"
+run revoke-group "--key=$key" >"$tmp/revoke-group.out" 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -s $tmp/revoke-group/state/setup.pid ]] && break; sleep 0.05; done
+[[ -s $tmp/revoke-group/state/setup.pid ]] || fail "the rollback never reached its final revocation"
+kill -TERM -- "-$(<"$tmp/revoke-group/state/setup.pid")" 2>/dev/null || true
+for (( i = 0; i < 300; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$runner" 2>/dev/null; then xargs -r kill -KILL <"$tmp/revoke-group/state/hang.pids" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a group signal left a hung final revocation unbounded"; fi
+wait "$runner" 2>/dev/null && fail "setup succeeded although its final revocation never completed" || true
+grep -q 'could not invalidate cached sudo authorization' "$tmp/revoke-group.out" || fail "a hung final revocation after a group signal was not reported" "$(cat "$tmp/revoke-group.out")"
+xargs -r kill -KILL <"$tmp/revoke-group/state/hang.pids" 2>/dev/null || true
+unset LIMIT_FAIL REVOKE_HANG REVOKE_IGNORE_TERM RUN_WRAPPER SETUP_BIN
 # A signal can arrive as a non-signal failure enters cleanup; the EXIT trap's
 # first command both records the status and marks cleanup active.
 grep -qxF "trap 'CLEANUP_EXIT_STATUS=\$? CLEANUP_ACTIVE=true; rollback_setup' EXIT" "$ROOT/bin/omarchy-setup-security-sshd" ||
