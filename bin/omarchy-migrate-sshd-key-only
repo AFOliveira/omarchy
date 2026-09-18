@@ -248,6 +248,50 @@ enumerate_login_accounts() {
   ((${#eligible_names[@]} > 0))
 }
 
+# Every directory from the system root down to DIR must be real, root-owned
+# and writable by no one else, so nothing below it can be swapped.
+trusted_directory() {
+  local dir=$1 owner mode top=${root_prefix:-/}
+  while :; do
+    [[ -d $dir && ! -L $dir ]] || return 1
+    read -r owner mode < <(/usr/bin/stat -c '%u %a' -- "$dir") || return 1
+    [[ $owner == 0 && $mode =~ ^[0-7]+$ ]] && ! ((8#$mode & 022)) || return 1
+    [[ $dir != "$top" && $dir != "/" ]] || return 0
+    dir=${dir%/*}
+    [[ -n $dir ]] || dir=/
+  done
+}
+
+trusted_file() {
+  local file=$1 owner mode
+  [[ -f $file && ! -L $file ]] || return 1
+  read -r owner mode < <(/usr/bin/stat -c '%u %a' -- "$file") || return 1
+  [[ $owner == 0 && $mode =~ ^[0-7]+$ ]] && ! ((8#$mode & 022)) || return 1
+  trusted_directory "${file%/*}"
+}
+
+# A configuration file anyone but root can change could change the policy
+# between its proof and the daemon reading it. The main file and everything
+# it includes, however deep, must be trusted files. Relative Include paths
+# are resolved from /etc/ssh, as sshd does.
+config_graph_is_trusted() {
+  local file=$1 depth=${2:-0} pattern match
+  local -a patterns matches
+  (( depth <= 16 )) || return 1
+  trusted_file "$file" || return 1
+  mapfile -t patterns < <(/usr/bin/awk '
+    { line=$0; sub(/[[:space:]]*#.*/, "", line); sub(/^[[:space:]]+/, "", line) }
+    tolower(line) ~ /^include[[:space:]]/ { n=split(line, f, /[[:space:]]+/); for (i=2; i<=n; i++) print f[i] }
+  ' "$file") || return 1
+  for pattern in "${patterns[@]}"; do
+    [[ $pattern == /* ]] || pattern=/etc/ssh/$pattern
+    mapfile -t matches < <(compgen -G "$root_prefix$pattern" || true)
+    for match in "${matches[@]}"; do
+      config_graph_is_trusted "$match" $(( depth + 1 )) || return 1
+    done
+  done
+}
+
 precedence_is_provable() {
   /usr/bin/awk '
     { line=$0; sub(/[[:space:]]*#.*/, "", line); sub(/^[[:space:]]+/, "", line) }
@@ -327,7 +371,7 @@ migrate_machine() {
     exit 0
   fi
 
-  if ! enumerate_login_accounts || ((${#keyed_names[@]} == 0)) || ! precedence_is_provable; then
+  if ! enumerate_login_accounts || ((${#keyed_names[@]} == 0)) || ! config_graph_is_trusted "$main_config" || ! precedence_is_provable; then
     disable_affected
     exit 0
   fi
@@ -461,20 +505,6 @@ account_authorized_keys_hold() {
   done
 }
 
-# Every directory from the system root down to DIR must be real, root-owned
-# and writable by no one else, so nothing below it can be swapped.
-trusted_directory() {
-  local dir=$1 owner mode top=${root_prefix:-/}
-  while :; do
-    [[ -d $dir && ! -L $dir ]] || return 1
-    read -r owner mode < <(/usr/bin/stat -c '%u %a' -- "$dir") || return 1
-    [[ $owner == 0 && $mode =~ ^[0-7]+$ ]] && ! ((8#$mode & 022)) || return 1
-    [[ $dir != "$top" && $dir != "/" ]] || return 0
-    dir=${dir%/*}
-    [[ -n $dir ]] || dir=/
-  done
-}
-
 ensure_trusted_directory() {
   local dir=$1
   [[ -e $dir || -L $dir ]] || {
@@ -497,6 +527,10 @@ setup_destinations_are_safe() {
     echo "$completion_marker is not a regular file; refusing SSH setup." >&2
     return 1
   fi
+  config_graph_is_trusted "$main_config" || {
+    echo "$main_config or a file it includes is not a root-owned file only root can write; refusing SSH setup." >&2
+    return 1
+  }
 }
 
 # 0 when the Omarchy rule is present, 1 when UFW proves it absent, 2 when UFW
@@ -554,7 +588,7 @@ install_key_only_config() {
 # effective policy, for the whole daemon and for this account, must be
 # key-only, admit the account, and accept one of its collected keys.
 prove_key_only_policy() {
-  local dump key
+  local dump key revoked
   precedence_is_provable || {
     echo "sshd_config must include /etc/ssh/sshd_config.d/*.conf before authentication or Match directives, and $key_only_config must be the first drop-in." >&2
     return 1
@@ -575,6 +609,11 @@ prove_key_only_policy() {
     echo "sshd refuses or forces a command for $setup_name." >&2
     return 1
   }
+  revoked=$(/usr/bin/awk 'tolower($1) == "revokedkeys" { print $2; exit }' <<<"$dump")
+  if [[ -n $revoked && ${revoked,,} != none ]] && ! trusted_file "$root_prefix$revoked"; then
+    echo "The RevokedKeys file $revoked is not a root-owned file only root can write; refusing SSH setup." >&2
+    return 1
+  fi
   for key in "${setup_keys[@]}"; do
     omarchy_sshd_key_line_accepted "$key" "$dump" && return 0
   done
@@ -625,11 +664,16 @@ commit_setup_machine() {
   marker_stage=""
 }
 
-# 0 committed, 1 not committed, 2 unknown.
+# 0 committed, 1 not committed, 2 unknown. Once the commit was attempted,
+# only a lookup that positively reports no such file means it did not happen;
+# any other failure to look is unknown.
 commit_outcome() {
-  local content
+  local content lookup
   [[ $commit_attempted == "true" ]] || return 1
-  [[ -e $completion_marker || -L $completion_marker ]] || return 1
+  if ! lookup=$(LC_ALL=C /usr/bin/stat -c %F -- "$completion_marker" 2>&1); then
+    [[ $lookup == *": No such file or directory" ]] && return 1
+    return 2
+  fi
   [[ -f $completion_marker && ! -L $completion_marker ]] || return 2
   content=$(<"$completion_marker") || return 2
   [[ $content == "$setup_token" ]] && return 0
