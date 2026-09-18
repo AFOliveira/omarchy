@@ -73,10 +73,10 @@ expected_steps() {
     omarchy-update-analyze-logs \
     omarchy-update-status \
     omarchy-update-restart \
-    omarchy-update-stay-awake \
     omarchy-update-aur-pkgs \
     omarchy-hook \
     omarchy-update-mise \
+    omarchy-update-stay-awake \
     omarchy-update-restart
 }
 

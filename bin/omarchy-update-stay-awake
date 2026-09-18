@@ -15,8 +15,10 @@ omarchy_security_require_privileged_bash_startup || exit 126
 set -e
 omarchy_security_sanitize_bash_environment "$0" "$@"
 omarchy_security_require_source_root "$0"
-omarchy_security_revoke_sudo_timestamp || exit 1
+# Traps first, so a signal or failure during the entry revocation still
+# exits through the cleanup path.
 omarchy_security_install_sudo_cleanup_traps
+omarchy_security_revoke_sudo_timestamp || exit 1
 omarchy_security_enable_no_update_sudo
 
 stay_awake_state="$HOME/.local/state/omarchy/indicators/stay-awake"

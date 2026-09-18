@@ -30,6 +30,7 @@ PY
 }
 
 copy_boundary_file bin/omarchy-security-functions
+copy_boundary_file bin/omarchy-update-pacman
 copy_boundary_file default/omarchy/sudo-no-update/sudo
 
 cat >"$SUDO_TEST_ROOT/mock/sudo" <<'STUB'
@@ -82,8 +83,19 @@ cat >"$SUDO_TEST_ROOT/bin/test-step" <<'STUB'
 set -euo pipefail
 step=${0##*/}
 printf 'step:%s %s\n' "$step" "$*" >>"$SUDO_TEST_LOG"
+if [[ $step == "systemd-run" ]]; then
+  # omarchy-update-pacman registers the transaction as a PID 1 scope on booted
+  # hosts. Run the wrapped command in place so the pacman step still executes.
+  while (( $# )) && [[ $1 == -* ]]; do shift; done
+  exec "$@"
+fi
 if [[ $step == "omarchy-hook" || $step == "omarchy-update-mise" ]]; then
   [[ ! -e $SUDO_TEST_CACHE ]] || exit 91
+fi
+if [[ -n ${SUDO_TEST_REMOVE_WRAPPER_STEP:-} && "$step $*" == $SUDO_TEST_REMOVE_WRAPPER_STEP ]]; then
+  # Model a package transaction replacing the running tree with a release
+  # that predates the wrapper.
+  /usr/bin/rm -f "$OMARCHY_PATH/default/omarchy/sudo-no-update/sudo"
 fi
 if [[ ${SUDO_TEST_FAIL_STEP:-} == "$step" ]]; then
   # Model a misbehaving child leaving state behind, then failing. Cleanup must
@@ -108,7 +120,7 @@ case "$step" in
 esac
 STUB
 chmod +x "$SUDO_TEST_ROOT/bin/test-step"
-for step in omarchy-update-lock omarchy-update-requires-free-space omarchy-update-confirm omarchy-update-pkg-prune omarchy-snapshot omarchy-update-stay-awake omarchy-update-dev omarchy-update-keyring omarchy-update-system-pkgs omarchy-migrate omarchy-hook omarchy-update-aur-pkgs omarchy-update-mise omarchy-update-orphan-pkgs omarchy-update-analyze-logs omarchy-update-status omarchy-update-restart omarchy-pkg-aur-accessible omarchy-notification-dismiss pacman cp yay; do
+for step in omarchy-update-lock omarchy-update-requires-free-space omarchy-update-confirm omarchy-update-pkg-prune omarchy-snapshot omarchy-update-stay-awake omarchy-update-dev omarchy-update-keyring omarchy-update-system-pkgs omarchy-migrate omarchy-hook omarchy-update-aur-pkgs omarchy-update-mise omarchy-update-orphan-pkgs omarchy-update-analyze-logs omarchy-update-status omarchy-update-restart omarchy-pkg-aur-accessible omarchy-notification-dismiss pacman systemd-run cp yay; do
   ln -s test-step "$SUDO_TEST_ROOT/bin/$step"
 done
 ln -s ../bin/test-step "$SUDO_TEST_ROOT/mock/pacman"
@@ -116,7 +128,7 @@ ln -s ../bin/test-step "$SUDO_TEST_ROOT/mock/pacman"
 reset_boundary() {
   : >"$SUDO_TEST_LOG"
   /usr/bin/rm -f "$SUDO_TEST_CACHE" "$SUDO_TEST_ROOT/revoke-fail"
-  unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED
+  unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED SUDO_TEST_REMOVE_WRAPPER_STEP
 }
 assert_boundary_cold() {
   [[ ! -e $SUDO_TEST_CACHE ]] || fail "$1 left cached authorization"

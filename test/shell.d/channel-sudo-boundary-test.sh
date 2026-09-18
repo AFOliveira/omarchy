@@ -47,8 +47,12 @@ sudo = [event for event in events if event.startswith('sudo ')]
 assert all(event in ('sudo -h', 'sudo -k') or event.startswith('sudo -N ') for event in sudo), events
 hooks = [i for i, event in enumerate(events) if event.startswith('step:omarchy-hook ')]
 assert len(hooks) == 2, events
-assert events[hooks[-1]] == 'step:omarchy-hook pre-refresh-pacman', events
-assert not any(event.startswith('sudo -N ') for event in events[hooks[0]:]), events
+assert events[hooks[0]] == 'step:omarchy-hook pre-refresh-pacman', events
+assert events[hooks[1]] == 'step:omarchy-hook post-update', events
+assert events[hooks[0] - 1] == 'sudo -k' and events[hooks[0] + 1] == 'sudo -k', events
+transaction = next(i for i, event in enumerate(events) if event.startswith('step:pacman '))
+assert hooks[0] < transaction, events
+assert not any(event.startswith('sudo -N ') for event in events[hooks[1]:]), events
 PY
 }
 
@@ -59,7 +63,7 @@ for channel in stable rc edge dev; do
   reset_boundary
   run_channel "$channel" || fail "$channel failed" "$(<"$boundary_tmp/output")"
   assert_scoped_channel "$channel"
-  pass "$channel starts cold, authorizes only individual commands, defers hooks and exits cold"
+  pass "$channel starts cold, authorizes only individual commands, runs the refresh hook cold before its transaction and exits cold"
 done
 
 reset_boundary
@@ -78,6 +82,59 @@ reset_boundary
 OMARCHY_PATH="$SUDO_TEST_HOME/omarchy" run_channel stable || fail "leaving dev failed" "$(<"$boundary_tmp/output")"
 assert_scoped_channel "dev to stable"
 pass "leaving dev preserves no-update sudo through unlink and the packaged update"
+
+# A packaged destination that predates the wrapper cannot be checked before its
+# package is installed. Its updater authenticates without --no-update, so the
+# switch must not launch it: it stops at a consistent point with instructions.
+reset_boundary
+mv "$SUDO_TEST_ROOT/default/omarchy/sudo-no-update/sudo" "$boundary_tmp/saved-package-wrapper"
+mv "$SUDO_TEST_ROOT/bin/omarchy-update" "$boundary_tmp/saved-package-update"
+ln -s test-step "$SUDO_TEST_ROOT/bin/omarchy-update"
+if OMARCHY_PATH="$SUDO_TEST_HOME/omarchy" run_channel stable; then fail "an older packaged destination was updated with ordinary sudo" "$(<"$SUDO_TEST_LOG")"; fi
+grep -q "predates command-scoped sudo" "$boundary_tmp/output" || fail "an older packaged destination was not reported" "$(<"$boundary_tmp/output")"
+grep -q "Run 'omarchy update' from a new terminal to finish" "$boundary_tmp/output" || fail "an older packaged destination lacks recovery guidance" "$(<"$boundary_tmp/output")"
+grep -Fxq 'step:omarchy-dev-unlink --no-reboot' "$SUDO_TEST_LOG" || fail "the package switch was not completed before stopping" "$(<"$SUDO_TEST_LOG")"
+grep -Fxq 'step:omarchy-state set reboot-required' "$SUDO_TEST_LOG" || fail "leaving dev for an older release did not mark the reboot" "$(<"$SUDO_TEST_LOG")"
+if grep -q '^step:omarchy-update ' "$SUDO_TEST_LOG"; then fail "an older packaged updater was launched from the hardened switch" "$(<"$SUDO_TEST_LOG")"; fi
+grep -q 'The channel switch did not complete' "$boundary_tmp/output" && fail "the stop was reported as an error needing a rerun" "$(<"$boundary_tmp/output")"
+assert_boundary_cold "older packaged destination"
+rm "$SUDO_TEST_ROOT/bin/omarchy-update"
+mv "$boundary_tmp/saved-package-update" "$SUDO_TEST_ROOT/bin/omarchy-update"
+mv "$boundary_tmp/saved-package-wrapper" "$SUDO_TEST_ROOT/default/omarchy/sudo-no-update/sudo"
+pass "an older packaged destination stops the switch cold with instructions instead of running its updater"
+
+# A package-backed source can be downgraded by its own transaction to a release
+# without the wrapper. From then on a bare sudo would be the real one, so no
+# privileged step may follow either transaction without checking first. A decoy
+# sudo in the package bin catches any such call instead of reaching the host.
+cat >"$SUDO_TEST_ROOT/bin/sudo" <<'STUB'
+#!/bin/bash
+printf 'unwrapped-sudo %s\n' "$*" >>"$SUDO_TEST_LOG"
+exit 97
+STUB
+chmod +x "$SUDO_TEST_ROOT/bin/sudo"
+cp "$SUDO_TEST_ROOT/default/omarchy/sudo-no-update/sudo" "$boundary_tmp/saved-package-wrapper"
+for pattern in 'pacman -Syyuu*' 'pacman -S --needed*'; do
+  reset_boundary
+  export SUDO_TEST_REMOVE_WRAPPER_STEP=$pattern
+  if run_channel rc; then fail "a downgrade during '$pattern' was not detected" "$(<"$SUDO_TEST_LOG")"; fi
+  unset SUDO_TEST_REMOVE_WRAPPER_STEP
+  grep -q "predates command-scoped sudo" "$boundary_tmp/output" || fail "downgrade during '$pattern' was not reported" "$(<"$boundary_tmp/output")"
+  if grep -q '^unwrapped-sudo ' "$SUDO_TEST_LOG"; then fail "downgrade during '$pattern' reached ordinary sudo" "$(<"$SUDO_TEST_LOG")"; fi
+  if grep -q '^step:omarchy-dev-unlink' "$SUDO_TEST_LOG"; then fail "downgrade during '$pattern' still unlinked" "$(<"$SUDO_TEST_LOG")"; fi
+  if grep -q '^step:omarchy-update ' "$SUDO_TEST_LOG"; then fail "downgrade during '$pattern' still updated" "$(<"$SUDO_TEST_LOG")"; fi
+  python3 - "$SUDO_TEST_LOG" "$pattern" <<'PY'
+import sys
+events = open(sys.argv[1]).read().splitlines()
+transactions = [e for e in events if e.startswith('step:pacman ')]
+assert len(transactions) == (1 if sys.argv[2].startswith('pacman -Syyuu') else 2), events
+assert all(e in ('sudo -h', 'sudo -k') or e.startswith('sudo -N ') for e in events if e.startswith('sudo ')), events
+PY
+  assert_boundary_cold "downgrade during $pattern"
+  cp "$boundary_tmp/saved-package-wrapper" "$SUDO_TEST_ROOT/default/omarchy/sudo-no-update/sudo"
+  pass "a transaction that removes the wrapper stops the switch before any further sudo ($pattern)"
+done
+rm "$SUDO_TEST_ROOT/bin/sudo"
 
 mkdir "$boundary_tmp/user tools"
 cat >"$boundary_tmp/user tools/channel-user-tool" <<'STUB'
@@ -110,8 +167,8 @@ for step in pacman omarchy-update-system-pkgs omarchy-hook; do
   reset_boundary
   if SUDO_TEST_FAIL_STEP="$step" run_channel stable; then fail "$step failure was ignored"; fi
   assert_boundary_cold "$step failure"
-  if grep -q '^step:omarchy-hook pre-refresh-pacman$' "$SUDO_TEST_LOG"; then fail "$step failure reached the deferred hook"; fi
-  pass "$step failure exits cold without the deferred hook"
+  if grep -q '^step:omarchy-hook post-update$' "$SUDO_TEST_LOG"; then fail "$step failure reached the post-update hook"; fi
+  pass "$step failure exits cold without the post-update hook"
 done
 
 for signal in HUP INT TERM; do
@@ -123,7 +180,7 @@ kill -s "$SUDO_TEST_CHANNEL_SIGNAL" "$PPID"
 STUB
   if SUDO_TEST_CHANNEL_SIGNAL="$signal" run_channel stable; then fail "$signal was ignored"; fi
   assert_boundary_cold "$signal"
-  if grep -q '^step:omarchy-hook ' "$SUDO_TEST_LOG"; then fail "$signal reached an update hook"; fi
+  if grep -q '^step:omarchy-hook post-update$' "$SUDO_TEST_LOG"; then fail "$signal reached the post-update hook"; fi
   pass "$signal stops the channel transition and revokes authorization"
 done
 

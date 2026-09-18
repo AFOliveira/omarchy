@@ -24,9 +24,9 @@ for args in '-y' ''; do
   python3 - "$SUDO_TEST_LOG" <<'PY'
 import sys
 s=open(sys.argv[1]).read().splitlines()
-positions=[next(i for i,line in enumerate(s) if line.startswith(prefix)) for prefix in ['step:omarchy-update-restart --services-only','step:omarchy-update-stay-awake stop','step:yay','step:omarchy-hook post-update','step:omarchy-update-mise','step:omarchy-update-restart --reboot-only']]
+positions=[next(i for i,line in enumerate(s) if line.startswith(prefix)) for prefix in ['step:omarchy-update-restart --services-only','step:yay','step:omarchy-hook post-update','step:omarchy-update-mise','step:omarchy-update-stay-awake stop','step:omarchy-update-restart --reboot-only']]
 assert positions==sorted(positions), s
-assert not any(line.startswith('sudo -N ') for line in s[positions[3]:]), s
+assert not any(line.startswith('sudo -N ') for line in s[positions[2]:]), s
 PY
   pass "update $args runs privileged phases before hooks and exits cold"
 done
@@ -63,21 +63,20 @@ if run_update -y; then fail "unsupported sudo must prevent mixed-trust work"; fi
 assert_boundary_cold "unsupported sudo"
 pass "unsupported sudo fails without running update steps"
 
-for mode in normal defer-hook run-deferred; do
-  reset_boundary
-  "$SUDO_TEST_ROOT/bin/omarchy-refresh-pacman" stable "$mode" >"$boundary_tmp/output" 2>&1 || fail "refresh $mode failed" "$(<"$boundary_tmp/output")"
-  assert_boundary_cold "refresh $mode"
-  python3 - "$SUDO_TEST_LOG" "$mode" <<'PY'
+reset_boundary
+"$SUDO_TEST_ROOT/bin/omarchy-refresh-pacman" stable >"$boundary_tmp/output" 2>&1 || fail "refresh failed" "$(<"$boundary_tmp/output")"
+assert_boundary_cold "refresh"
+python3 - "$SUDO_TEST_LOG" <<'PY'
 import sys
-s=open(sys.argv[1]).read().splitlines();mode=sys.argv[2]
-hooks=[i for i,l in enumerate(s) if l.startswith('step:omarchy-hook')]
-priv=[i for i,l in enumerate(s) if l.startswith('sudo -N ')]
-assert bool(hooks)==(mode!='defer-hook'), s
-assert bool(priv)==(mode!='run-deferred'), s
-if hooks: assert not any(i>hooks[0] for i in priv),s
+s=open(sys.argv[1]).read().splitlines()
+hook=next(i for i,l in enumerate(s) if l=='step:omarchy-hook pre-refresh-pacman')
+copies=[i for i,l in enumerate(s) if l.startswith('sudo -N cp ')]
+transaction=next(i for i,l in enumerate(s) if l.startswith('step:pacman '))
+assert len(copies)==4 and max(copies) < hook < transaction, s
+assert s[hook-1]=='sudo -k' and s[hook+1]=='sudo -k', s
+assert all(l in ('sudo -h','sudo -k') or l.startswith('sudo -N ') for l in s if l.startswith('sudo ')), s
 PY
-  pass "refresh $mode preserves the final cold hook boundary"
-done
+pass "refresh runs the hook cold between the config re-sync and the transaction"
 
 for step in pacman omarchy-hook; do
   reset_boundary

@@ -20,8 +20,10 @@ omarchy_security_require_source_root "$0"
 # Preserve the caller's path only for the later unprivileged hook/mise phases.
 user_path=${OMARCHY_UPDATE_USER_PATH:-$PATH}
 unset OMARCHY_UPDATE_USER_PATH
-omarchy_security_revoke_sudo_timestamp || exit 1
+# Traps first, so a signal or failure during the entry revocation still
+# exits through the cleanup path.
 omarchy_security_install_sudo_cleanup_traps
+omarchy_security_revoke_sudo_timestamp || exit 1
 omarchy_security_enable_no_update_sudo
 
 update_stay_awake_stopped=0
@@ -94,15 +96,9 @@ if [[ ${1:-} == "-y" ]] || omarchy-update-confirm; then
   # update tooling; the reboot-only phase below performs no privileged work.
   omarchy-update-restart --services-only
 
-  # Release update-owned inhibitors before offering a reboot. A confirmed
-  # reboot can terminate this process before its EXIT trap gets a chance to
-  # remove the persistent Stay Awake marker.
-  omarchy_security_revoke_sudo_timestamp
-  omarchy-update-stay-awake stop
-  update_stay_awake_stopped=1
-
   # AUR package installation must also use the no-update wrapper. Finish
   # update-owned system work before build code, hooks, or mise can run.
+  omarchy_security_revoke_sudo_timestamp
   omarchy-update-aur-pkgs
   omarchy_security_revoke_sudo_timestamp
 
@@ -113,6 +109,14 @@ if [[ ${1:-} == "-y" ]] || omarchy-update-confirm; then
   omarchy_security_revoke_sudo_timestamp
   PATH="$OMARCHY_PATH/default/omarchy/sudo-no-update:$user_path" "$OMARCHY_PATH/bin/omarchy-update-mise"
   omarchy_security_revoke_sudo_timestamp
+
+  # The sleep inhibitor covers AUR builds, hooks and mise as well; releasing it
+  # needs no privilege because the held command already dropped to this user.
+  # Release it before offering a reboot: a confirmed reboot can terminate this
+  # process before its EXIT trap gets a chance to remove the persistent Stay
+  # Awake marker.
+  omarchy-update-stay-awake stop
+  update_stay_awake_stopped=1
 
   "$OMARCHY_PATH/bin/omarchy-update-restart" --reboot-only
 fi
