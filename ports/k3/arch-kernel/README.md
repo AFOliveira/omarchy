@@ -119,7 +119,10 @@ That package was cross-built on an x86_64 machine with
 the same versions Arch RISC-V builds with natively; the only config line that
 differs is `CONFIG_CC_VERSION_TEXT`. A cross build only makes the kernel
 package, since the headers package carries host tools. The recipe in the repo
-is the native one.
+is the native one, and it also built on the board itself (2026-09-19, about
+2.5 hours of compiling on its 8 cores): `linux-k3` and `linux-k3-headers`,
+whose build tools are RISC-V binaries; a test module builds against those
+headers with the `7.2.6-arch2-1-k3` vermagic.
 
 glmark2 needs no VNC viewer attached: with the provider's display preview
 connected, `wayvnc` copies every frame and the same kernel scores 291.
