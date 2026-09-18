@@ -194,7 +194,7 @@ echo "sudo \$*" >>"$m/calls"
 [[ \$1 == -k ]] || exit 1
 if [[ -e $m/revoked-once ]]; then
   echo "\$PPID" >"$m/migration.pid"
-  if [[ \${REVOKE_HANG:-0} == 1 ]]; then [[ \${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; echo \$\$ >>"$m/hang.pids"; sleep 30 & echo \$! >>"$m/hang.pids"; wait \$!; fi
+  if [[ \${REVOKE_HANG:-0} == 1 ]]; then [[ \${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & echo \$! >>"$m/hang.pids"; wait \$!; fi
   sleep 1; echo revoked >>"$m/calls"
 else
   echo "\$PPID" >"$m/revoked-once"
@@ -209,6 +209,10 @@ kill -TERM "$(<"$m/migration.pid")" 2>/dev/null || true
 if wait "$runner" 2>/dev/null; then fail "a migration whose machine phase failed reported success"; fi
 grep -qx revoked "$m/calls" || fail "a TERM to the migration interrupted its exit revocation" "$(cat "$m/calls")"
 [[ $(<"$m/migration.pid") == "$(<"$m/revoked-once")" ]] || fail "the exit revocation ran under a different parent than the entry revocation"
+# Without descriptors for its pipe, the exit revocation still runs.
+: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
+if bash -c 'ulimit -n 10 && exec bash -euo pipefail "$1"' _ "$m/migration" >/dev/null 2>&1; then fail "a migration whose machine phase failed reported success"; fi
+grep -qx revoked "$m/calls" || fail "the exit revocation did not run without descriptors for its pipe" "$(cat "$m/calls")"
 pass "a TERM during the exit revocation does not stop it"
 
 # An exit revocation that hangs is bounded, retried, and fails the migration.

@@ -69,7 +69,7 @@ if [[ ${1:-} == -k ]]; then
   if [[ -e $STATE/k-seen ]]; then
     echo "$PPID" >"$STATE/setup.pid"; echo "$PPID" >>"$STATE/final-k.ppid"
     if [[ ${REVOKE_SLOW:-0} == 1 ]]; then touch "$STATE/revoking"; sleep 1; echo revoked >>"$EVENTS"; fi
-    if [[ ${REVOKE_HANG:-0} == 1 ]]; then [[ ${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; echo $$ >>"$STATE/hang.pids"; sleep 30 & echo $! >>"$STATE/hang.pids"; wait $!; fi
+    if [[ ${REVOKE_HANG:-0} == 1 ]]; then [[ ${REVOKE_IGNORE_TERM:-0} != 1 ]] || trap '' TERM; sleep 30 >/dev/null & echo $! >>"$STATE/hang.pids"; wait $!; fi
   else
     echo "$PPID" >"$STATE/k-seen"
   fi

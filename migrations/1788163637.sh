@@ -26,38 +26,64 @@ else
   # timestamp_type=ppid, and without a terminal, sudo keys the cached
   # authorization by its parent. Its stdout is a pipe only it holds, so its
   # exit arrives as end-of-file and read's own timeout bounds it, with no
-  # watchdog process to lose or leave behind. At the deadline it is killed only
-  # while /proc still shows it as this shell's live child. A failed attempt,
-  # such as one a signal to the whole group killed, is retried.
+  # watchdog process to lose or leave behind. A failed attempt, such as one a
+  # signal to the whole group killed, is retried.
   ssh_migration_cleaning=false
   handle_ssh_migration_signal() {
     [[ $ssh_migration_cleaning == "true" ]] && return
     ssh_migration_cleaning=true
     exit "$1"
   }
+  wait_for_ssh_migration_revoke() {
+    local status
+    while :; do
+      wait "$1" && status=0 || status=$?
+      kill -0 "$1" 2>/dev/null || break
+    done
+    return "$status"
+  }
+  revoke_pipe_closed() {
+    local started=$SECONDS status
+    while (( SECONDS - started < $2 )); do
+      read -r -t 1 -u "$1" _ && continue
+      status=$?
+      (( status > 128 )) || return 0
+    done
+    return 1
+  }
   revoke_ssh_migration_sudo_once() {
-    local bound=30 pipe reader writer revoke started status stat state ppid
-    exec {pipe}<> <(:)
-    exec {reader}<"/dev/fd/$pipe" {writer}>"/dev/fd/$pipe" {pipe}>&-
+    local bound=30 pipe="" reader="" writer="" revoke
+    # Without descriptors for the pipe, revoke unbounded rather than not at all.
+    if ! { exec {pipe}<> <(:); } 2>/dev/null; then
+      /usr/bin/sudo -k >/dev/null 2>&1
+      return
+    fi
+    { exec {reader}<"/dev/fd/$pipe"; } 2>/dev/null || reader=""
+    [[ -z $reader ]] || { exec {writer}>"/dev/fd/$pipe"; } 2>/dev/null || writer=""
+    exec {pipe}>&-
+    if [[ -z $reader || -z $writer ]]; then
+      [[ -z $reader ]] || exec {reader}<&-
+      /usr/bin/sudo -k >/dev/null 2>&1
+      return
+    fi
     /usr/bin/sudo -k 2>/dev/null >&"$writer" {reader}<&- &
     revoke=$!
     exec {writer}>&-
-    started=$SECONDS
-    while (( SECONDS - started < bound )); do
-      read -r -t 1 -u "$reader" _ && continue
-      status=$?
-      (( status > 128 )) || break
-    done
-    exec {reader}<&-
-    if read -r stat 2>/dev/null <"/proc/$revoke/stat"; then
-      read -r state ppid _ <<<"${stat##*) }"
-      [[ $state == "Z" || $ppid != "$$" ]] || kill -KILL "$revoke" 2>/dev/null || true
+    if revoke_pipe_closed "$reader" "$bound"; then
+      exec {reader}<&-
+      wait_for_ssh_migration_revoke "$revoke"
+      return
     fi
-    while :; do
-      wait "$revoke" && status=0 || status=$?
-      kill -0 "$revoke" 2>/dev/null || break
-    done
-    return "$status"
+    # The pipe is still open, so its only holder is alive and the PID its own.
+    kill -KILL "$revoke" 2>/dev/null || true
+    # A revoker that does not go even then is abandoned, not waited on forever.
+    if revoke_pipe_closed "$reader" 2; then
+      exec {reader}<&-
+      wait_for_ssh_migration_revoke "$revoke" || true
+    else
+      exec {reader}<&-
+    fi
+    return 1
   }
   cleanup_ssh_migration_sudo() {
     local status=$ssh_migration_status attempt revoked=false
