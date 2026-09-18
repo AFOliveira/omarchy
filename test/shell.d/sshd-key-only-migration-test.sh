@@ -12,7 +12,7 @@ cat >"$b/systemctl" <<'SH'
 echo "systemctl $*" >>"$EVENTS"
 case $1 in
 is-active) [[ ${ACTIVE_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo inactive; exit 4; }; [[ -e $STATE/active ]] && { echo active; exit 0; } || { echo inactive; exit 3; };;
-is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo not-found; exit 4; }; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; };;
+is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo not-found; exit 4; }; [[ ! -e $STATE/enabled || ! -e $STATE/masked-runtime ]] || { echo masked-runtime; exit 1; }; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; };;
 reload) if [[ ${SLOW_RELOAD:-0} == 1 ]]; then mkdir "$STATE/held" 2>/dev/null || touch "$STATE/overlap"; sleep .15; rmdir "$STATE/held" 2>/dev/null || true; fi; [[ ${RELOAD_FAIL:-0} != 1 ]];;
 disable) if [[ ${2:-} == --now ]]; then rm -f "$STATE/active" "$STATE/enabled"; else [[ ${DISABLE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/enabled"; fi;;
 start) [[ ${START_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/active";;
@@ -155,6 +155,10 @@ grep -qxF 'AuthenticationMethods publickey' "$t/bare-keyed/root/etc/ssh/sshd_con
   { echo "an exposed keyed daemon was not made key-only" >&2; exit 1; }
 prepare bare-keyless; rm -f "$t/bare-keyless/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-keyless/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-keyless/state/enabled"; run bare-keyless
 [[ ! -e $t/bare-keyless/state/enabled && ! -e $t/bare-keyless/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] || { echo "an exposed keyless daemon was not disabled" >&2; exit 1; }
+# A runtime mask over a persistent enablement is not idle: at the next boot
+# the mask is gone. A keyless one is disabled, removing the enablement.
+prepare bare-masked; rm -f "$t/bare-masked/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-masked/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-masked/state/"{enabled,masked-runtime}; run bare-masked
+[[ ! -e $t/bare-masked/state/enabled ]] && grep -q '^systemctl disable --now' "$t/bare-masked/events" || { echo "a runtime-masked, persistently enabled daemon was left enabled" >&2; exit 1; }
 prepare bare-idle; rm -f "$t/bare-idle/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; run bare-idle
 [[ ! -e $t/bare-idle/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] && ! grep -qv '^systemctl is-' "$t/bare-idle/events" || { echo "an unexposed daemon was changed" >&2; exit 1; }
 prepare bare-query; rm -f "$t/bare-query/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; touch "$t/bare-query/state/"{active,enabled}
@@ -389,7 +393,7 @@ bash -euo pipefail "$m/migration" >/dev/null || fail "a converted machine blocks
 pass "later accounts complete without privileges once the legacy file is gone"
 # With no Omarchy file, only a daemon that may be exposed reaches the machine
 # phase; an unknown service state counts as exposed.
-for state in enabled:inactive disabled:active static:inactive unknown:unknown; do
+for state in enabled:inactive disabled:active static:inactive masked-runtime:inactive unknown:unknown; do
   : >"$m/calls"
   SSHD_ENABLED_STATE=${state%%:*} SSHD_ACTIVE_STATE=${state##*:} bash -euo pipefail "$m/migration" >/dev/null || fail "an exposed daemon's migration failed"
   [[ $(<"$m/calls") == "sudo -N -- $m/helper" ]] || fail "a daemon that may be exposed ($state) skipped the machine phase" "$(cat "$m/calls")"

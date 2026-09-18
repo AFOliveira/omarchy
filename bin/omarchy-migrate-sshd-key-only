@@ -91,9 +91,11 @@ service_enabled_state() {
   local state
   state=$(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) || true
   case "$state" in
-    enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient) return 0 ;;
+    # A runtime mask hides a persistent enablement that returns at boot, so
+    # it counts as enabled; disabling it leaves the mask and removes the rest.
+    enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient | masked-runtime) return 0 ;;
     # A missing unit, for example after openssh was removed, is not enabled.
-    disabled | masked | masked-runtime | not-found) return 1 ;;
+    disabled | masked | not-found) return 1 ;;
     *) return 2 ;;
   esac
 }
