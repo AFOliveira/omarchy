@@ -16,21 +16,30 @@ tiny_dfr_installed() {
   [[ $'\n'$packages$'\n' == *$'\ntiny-dfr\n'* ]]
 }
 
-# Only active lines count: a commented-out parameter is not configured.
+# Only active lines count: a commented-out parameter is not configured. A
+# read error is reported as such rather than as an empty configuration.
 limine_active_lines() {
-  /usr/bin/grep -v '^[[:space:]]*#' "$limine_conf" || (( $? == 1 ))
+  local status=0
+  /usr/bin/grep -v '^[[:space:]]*#' "$limine_conf" || status=$?
+  (( status <= 1 )) || return 2
 }
 
-limine_has_new_parameters() {
-  local active
-  active=$(limine_active_lines) || return 1
-  [[ $active == *pm_async=off* && $active == *mem_sleep_default=deep* ]]
-}
-
-limine_has_old_parameter() {
-  local active
-  active=$(limine_active_lines) || return 1
-  [[ $active == *pcie_ports=compat* ]]
+# 0 when every given parameter is an exact command-line token, 1 when one is
+# not, 2 when the drop-in cannot be read. Tokens are delimited by whitespace
+# and quotes, as in KERNEL_CMDLINE[default]+=" ... pm_async=off ...".
+limine_has_tokens() {
+  local active wanted token found
+  local -a tokens
+  active=$(limine_active_lines) || return 2
+  active=${active//[\"\']/ }
+  read -r -a tokens <<<"${active//$'\n'/ }"
+  for wanted in "$@"; do
+    found=1
+    for token in "${tokens[@]}"; do
+      [[ $token == "$wanted" ]] && { found=0; break; }
+    done
+    (( found == 0 )) || return 1
+  done
 }
 
 # Decide without privileges whether any repair remains, so a later account
@@ -48,7 +57,9 @@ needs_machine_repair() {
   if [[ -e $limine_conf && ! -r $limine_conf ]] || [[ -e $fan_conf && ! -r $fan_conf ]]; then
     return 0
   fi
-  if [[ -f $limine_conf ]] && limine_has_old_parameter; then return 0; fi
+  if [[ -f $limine_conf ]]; then
+    limine_has_tokens pcie_ports=compat && return 0 || { status=$?; (( status == 1 )) || return 2; }
+  fi
   if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then return 0; fi
   if tiny_dfr_installed; then
     return 0
@@ -58,7 +69,9 @@ needs_machine_repair() {
   fi
   # The marker records a successful rebuild of the new parameters and nothing
   # else, so a rebuild is pending only while they are configured without it.
-  if [[ -f $limine_conf ]] && [[ ! -e $repair_marker ]] && limine_has_new_parameters; then return 0; fi
+  if [[ -f $limine_conf ]] && [[ ! -e $repair_marker ]]; then
+    limine_has_tokens pm_async=off mem_sleep_default=deep && return 0 || { status=$?; (( status == 1 )) || return 2; }
+  fi
   return 1
 }
 
@@ -73,9 +86,14 @@ repair_machine() {
     echo "Could not inspect T2 hardware or packages; leaving the repair pending." >&2
     return 1
   fi
-  if [[ -f $limine_conf ]] && limine_has_old_parameter; then
-    /usr/bin/sed -i '/^[[:space:]]*#/!s/pcie_ports=compat/pm_async=off mem_sleep_default=deep/' "$limine_conf" || return 1
-    rebuild=1
+  if [[ -f $limine_conf ]]; then
+    if limine_has_tokens pcie_ports=compat; then
+      /usr/bin/sed -E -i '/^[[:space:]]*#/!s/(^|[[:space:]"'"'"'])pcie_ports=compat($|[[:space:]"'"'"'])/\1pm_async=off mem_sleep_default=deep\2/g' "$limine_conf" || return 1
+      rebuild=1
+    else
+      status=$?
+      (( status == 1 )) || return 1
+    fi
   fi
   if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then
     /usr/bin/tee -a "$fan_conf" >/dev/null <<'EOF' || return 1
@@ -97,12 +115,20 @@ EOF
       return 1
     fi
   fi
-  if [[ -f $limine_conf ]] && [[ ! -e $repair_marker ]] && limine_has_new_parameters; then rebuild=1; fi
-  # Publish completion only for a rebuild that succeeded. Without the new
-  # parameters there is nothing to rebuild, and a marker would stop a later
+  if [[ -f $limine_conf ]] && [[ ! -e $repair_marker ]]; then
+    if limine_has_tokens pm_async=off mem_sleep_default=deep; then
+      rebuild=1
+    else
+      status=$?
+      (( status == 1 )) || return 1
+    fi
+  fi
+  # Publish completion only for a successful rebuild of the new parameters.
+  # Without them there is nothing to certify, and a marker would stop a later
   # run from rebuilding once they are configured.
   if (( rebuild )); then
     /usr/bin/limine-mkinitcpio || return 1
+    limine_has_tokens pm_async=off mem_sleep_default=deep || return 1
     /usr/bin/install -Dm644 /dev/null "$repair_marker" || return 1
   fi
 }

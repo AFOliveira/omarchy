@@ -117,9 +117,13 @@ SH
 chmod +x "$t2_bin"/*
 t2_body="$tmp/t2-body.sh"; script_copy 1785944594 "$t2_body"
 sed -i -e "s|/usr/bin/lspci|$t2_bin/lspci|g" -e "s|/usr/bin/pacman|$t2_bin/pacman|g" -e "s|/usr/bin/systemctl|$t2_bin/systemctl|g" -e "s|/usr/bin/limine-mkinitcpio|$t2_bin/limine|g" -e "s|/var/lib/omarchy/migrations/1785944594|$tmp/t2.marker|g" -e "s|/etc/limine-entry-tool.d/t2-mac.conf|$tmp/t2.conf|g" -e "s|/etc/t2fand.conf|$tmp/fan.conf|g" -e "s|/proc/cmdline|$tmp/cmdline|g" "$t2_body"
+# A copy whose Limine reader can be made to fail with an I/O-style status.
+printf '#!/bin/bash\n[[ ${T2_GREP_FAIL:-0} != 1 ]] || exit 2\nexec /usr/bin/grep "$@"\n' >"$t2_bin/grep"; chmod +x "$t2_bin/grep"
+t2_grep_body="$tmp/t2-grep-body.sh"; sed -e "s|/usr/bin/grep -v|$t2_bin/grep -v|" "$t2_body" >"$t2_grep_body"
+grep -qF "$t2_bin/grep -v" "$t2_grep_body" || fail "test could not redirect the Limine reader"
 if T2_QUERY_STATUS=7 root_run "$t2_body" --machine; then fail "T2 discovery error is treated as inapplicable"; fi
 [[ ! -e $tmp/t2.marker ]] || fail "T2 discovery error publishes completion"
-printf 'options=pcie_ports=compat\n' >"$tmp/t2.conf"; printf '[Fan1]\n' >"$tmp/fan.conf"; : >"$tmp/cmdline"; : >"$tmp/t2.log"
+printf 'KERNEL_CMDLINE[default]+=" intel_iommu=on pcie_ports=compat"\n' >"$tmp/t2.conf"; printf '[Fan1]\n' >"$tmp/fan.conf"; : >"$tmp/cmdline"; : >"$tmp/t2.log"
 if T2_PRESENT=1 TINY_DFR=1 LIMINE_FAIL=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine; then fail "T2 rebuild failure publishes completion"; fi
 [[ ! -e $tmp/t2.marker ]] || fail "T2 mutation failure is not retryable"
 T2_PRESENT=1 TINY_DFR=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
@@ -146,7 +150,18 @@ for commented in '# options=pm_async=off mem_sleep_default=deep' '#options=pcie_
   [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 treated a commented parameter as configured: $commented"
   grep -qxF "$commented" "$tmp/t2.conf" || fail "T2 rewrote a commented parameter: $commented"
 done
-printf 'options=pm_async=off mem_sleep_default=deep\n' >"$tmp/t2.conf"
+# Near-miss tokens are not the parameters, and are never rewritten.
+for near in 'KERNEL_CMDLINE[default]+=" not_pm_async=off mem_sleep_default=deepfake"' 'KERNEL_CMDLINE[default]+=" xpcie_ports=compat"'; do
+  rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf '%s\n' "$near" >"$tmp/t2.conf"
+  T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
+  [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 treated a near-miss token as a parameter: $near"
+  grep -qxF "$near" "$tmp/t2.conf" || fail "T2 rewrote a near-miss token: $near"
+done
+# A drop-in that cannot be read is neither configured nor unconfigured.
+rm -f "$tmp/t2.marker"; printf 'KERNEL_CMDLINE[default]+=" pcie_ports=compat"\n' >"$tmp/t2.conf"
+if T2_PRESENT=1 T2_GREP_FAIL=1 T2_LOG="$tmp/t2.log" root_run "$t2_grep_body" --machine; then fail "a Limine read error was treated as nothing to repair"; fi
+[[ ! -e $tmp/t2.marker ]] || fail "a Limine read error published completion"
+printf 'KERNEL_CMDLINE[default]+=" intel_iommu=on pm_async=off mem_sleep_default=deep"\n' >"$tmp/t2.conf"
 T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
 [[ -e $tmp/t2.marker && $(grep -c '^rebuild$' "$tmp/t2.log") == 1 ]] || fail "T2 parameters configured later were not rebuilt"
 pass "T2 machine body preserves discovery and rebuild failures, completes a retry, and replays without mutation"
@@ -155,7 +170,7 @@ t2_dispatch="$tmp/t2-dispatch.sh"; script_copy 1785944594 "$t2_dispatch"
 t2_dispatch_marker="$tmp/t2-dispatch.marker"; t2_dispatch_lock="$tmp/t2-dispatch.lock"; t2_dispatch_log="$tmp/t2-dispatch.log"
 t2_dispatch_conf="$tmp/t2-dispatch.conf"; t2_dispatch_fan="$tmp/t2-dispatch-fan.conf"; t2_dispatch_cmdline="$tmp/t2-dispatch-cmdline"
 t2_dispatch_lspci="$tmp/t2-dispatch-lspci"; t2_dispatch_pacman="$tmp/t2-dispatch-pacman"; t2_dispatch_limine="$tmp/t2-dispatch-limine"; t2_dispatch_sudo="$tmp/t2-dispatch-sudo"
-printf 'options=pm_async=off mem_sleep_default=deep\n' >"$t2_dispatch_conf"
+printf 'KERNEL_CMDLINE[default]+=" intel_iommu=on pm_async=off mem_sleep_default=deep"\n' >"$t2_dispatch_conf"
 printf '[Fan2]\n' >"$t2_dispatch_fan"
 printf 'quiet pm_async=off mem_sleep_default=deep\n' >"$t2_dispatch_cmdline"
 touch "$tmp/t2-fail-once"
