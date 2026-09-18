@@ -35,10 +35,17 @@ cat >"$bt_bin/power" <<'SH'
 [[ ${BT_POWER_FAIL:-0} == 0 ]] || exit 19
 echo "$1" >>"$BT_LOG"
 SH
+# bluetooth.service as systemctl reports it: 0 active, 3 inactive, 4 no such
+# unit, anything else an error.
+cat >"$bt_bin/systemctl" <<'SH'
+#!/bin/bash
+[[ $1 == is-active ]] || exit 2
+exit "${BT_DAEMON_STATUS:-0}"
+SH
 chmod +x "$bt_bin"/*
 bt_body="$tmp/bt-body.sh"; bt_marker="$tmp/bt.marker"; bt_conf="$tmp/main.conf"; printf 'AutoEnable=false\n' >"$bt_conf"
 script_copy 1786380259 "$bt_body"
-sed -i -e "s|/usr/bin/timeout|$bt_bin/timeout|g" -e "s|/usr/bin/bluetoothctl|$bt_bin/bluetoothctl|g" -e "s|/usr/bin/omarchy-bluetooth-power|$bt_bin/power|g" -e "s|/var/lib/omarchy/migrations/1786380259|$bt_marker|g" -e "s|/etc/bluetooth/main.conf|$bt_conf|g" "$bt_body"
+sed -i -e "s|/usr/bin/timeout|$bt_bin/timeout|g" -e "s|/usr/bin/bluetoothctl|$bt_bin/bluetoothctl|g" -e "s|/usr/bin/omarchy-bluetooth-power|$bt_bin/power|g" -e "s|/usr/bin/systemctl|$bt_bin/systemctl|g" -e "s|/var/lib/omarchy/migrations/1786380259|$bt_marker|g" -e "s|/etc/bluetooth/main.conf|$bt_conf|g" "$bt_body"
 BT_LOG="$tmp/bt.log" BT_POWER=yes root_run "$bt_body" --machine
 [[ $(cat "$tmp/bt.log") == on && -e $bt_marker ]] || fail "Bluetooth machine body loses powered-on state"
 BT_LOG="$tmp/bt.log" BT_QUERY_FAIL=1 root_run "$bt_body" --machine
@@ -57,7 +64,19 @@ if BT_LOG="$tmp/bt.log" BT_POWER_FAIL=1 root_run "$bt_body" --machine; then fail
 BT_LOG="$tmp/bt.log" BT_POWER=yes root_run "$bt_body" --machine
 [[ -e $bt_marker && $(cat "$tmp/bt.log") == on ]] || fail "Bluetooth power failure retry did not complete"
 [[ $(cat "$bt_conf") == '#AutoEnable=true' ]] || fail "Bluetooth repair did not update the fixed configuration"
-pass "Bluetooth machine body preserves on/off state, replays safely, and retries discovery and mutation failures"
+# No bluetoothd to ask, as on a machine without an adapter or with the service
+# off, means the adapter has been off: that completes as off without asking
+# (the query stand-in would fail if asked). An unknown service state stays
+# pending.
+for daemon in 3 4; do
+  rm -f "$bt_marker"; : >"$tmp/bt.log"
+  BT_LOG="$tmp/bt.log" BT_DAEMON_STATUS=$daemon BT_QUERY_FAIL=1 root_run "$bt_body" --machine || fail "Bluetooth without a daemon ($daemon) did not complete"
+  [[ $(cat "$tmp/bt.log") == off && -e $bt_marker ]] || fail "Bluetooth without a daemon ($daemon) was not kept off"
+done
+rm -f "$bt_marker"; : >"$tmp/bt.log"
+if BT_LOG="$tmp/bt.log" BT_DAEMON_STATUS=1 root_run "$bt_body" --machine; then fail "an unknown bluetooth.service state completed the migration"; fi
+[[ ! -e $bt_marker && ! -s $tmp/bt.log ]] || fail "an unknown bluetooth.service state changed policy"
+pass "Bluetooth machine body preserves on/off state, keeps a machine without bluetoothd off, replays safely, and retries discovery and mutation failures"
 
 bt_dispatch="$tmp/bt-dispatch.sh"; script_copy 1786380259 "$bt_dispatch"
 bt_dispatch_marker="$tmp/bt-dispatch.marker"; bt_dispatch_lock="$tmp/bt-dispatch.lock"; bt_dispatch_log="$tmp/bt-dispatch.log"
@@ -77,6 +96,7 @@ cat >"$bt_dispatch_timeout" <<'SH'
 shift
 exec "$@"
 SH
+printf '#!/bin/bash\nexit 0\n' >"$tmp/bt-dispatch-systemctl"; chmod +x "$tmp/bt-dispatch-systemctl"
 cat >"$bt_dispatch_sudo" <<'SH'
 #!/bin/bash
 [[ $1 == -N && $2 == -- ]] || exit 90
@@ -84,7 +104,7 @@ shift 2
 exec "$@"
 SH
 chmod +x "$bt_dispatch_power" "$bt_dispatch_ctl" "$bt_dispatch_timeout" "$bt_dispatch_sudo"
-sed -i -e "s|/usr/bin/timeout|$bt_dispatch_timeout|g" -e "s|/usr/bin/bluetoothctl|$bt_dispatch_ctl|g" -e "s|/usr/bin/omarchy-bluetooth-power|$bt_dispatch_power|g" -e "s|/usr/bin/sudo|$bt_dispatch_sudo|g" -e "s|/run/omarchy-bluetooth-state-migration.lock|$bt_dispatch_lock|g" -e "s|/usr/share/omarchy/migrations/1786380259.sh|$bt_dispatch|g" -e "s|/var/lib/omarchy/migrations/1786380259|$bt_dispatch_marker|g" -e "s|/etc/bluetooth/main.conf|$tmp/no-bt-conf|g" "$bt_dispatch"
+sed -i -e "s|/usr/bin/timeout|$bt_dispatch_timeout|g" -e "s|/usr/bin/bluetoothctl|$bt_dispatch_ctl|g" -e "s|/usr/bin/omarchy-bluetooth-power|$bt_dispatch_power|g" -e "s|/usr/bin/sudo|$bt_dispatch_sudo|g" -e "s|/usr/bin/systemctl|$tmp/bt-dispatch-systemctl|g" -e "s|/run/omarchy-bluetooth-state-migration.lock|$bt_dispatch_lock|g" -e "s|/usr/share/omarchy/migrations/1786380259.sh|$bt_dispatch|g" -e "s|/var/lib/omarchy/migrations/1786380259|$bt_dispatch_marker|g" -e "s|/etc/bluetooth/main.conf|$tmp/no-bt-conf|g" "$bt_dispatch"
 root_run "$bt_dispatch" & bt_pid_one=$!
 root_run "$bt_dispatch" & bt_pid_two=$!
 wait "$bt_pid_one"; wait "$bt_pid_two"
@@ -289,9 +309,13 @@ fi
 SH
 cat >"$cups_bin/systemctl" <<'SH'
 #!/bin/bash
-[[ $1 == is-active ]] && exit 3
+# cups-browsed is not installed by default: systemctl then reports no such
+# unit, 4 from is-active and not-found from is-enabled.
+if [[ $1 == is-active ]]; then
+  case ${CUPS_BROWSED_STATE:-not-found} in not-found) exit 4 ;; error) exit 1 ;; *) exit 3 ;; esac
+fi
 if [[ $1 == is-enabled ]]; then
-  case ${CUPS_BROWSED_STATE:-disabled} in disabled) echo disabled; exit 1 ;; *) echo "$CUPS_BROWSED_STATE"; exit 0 ;; esac
+  case ${CUPS_BROWSED_STATE:-not-found} in not-found) echo not-found; exit 4 ;; disabled) echo disabled; exit 1 ;; *) echo "$CUPS_BROWSED_STATE"; exit 0 ;; esac
 fi
 [[ -z ${CUPS_LOG:-} ]] || echo "systemctl $*" >>"$CUPS_LOG"
 [[ ${CUPS_MUTATE_FAIL:-0} == 0 ]] || exit 23
@@ -317,6 +341,14 @@ for state in static indirect alias enabled; do
     fail "a $state cups-browsed was restarted as if it were enabled"
   fi
 done
+# The default install has no cups-browsed unit at all; that completes. A
+# service query that fails outright stays pending.
+rm -f "$tmp/cups.marker"; : >"$tmp/cups.log"
+CUPS_BROWSED_STATE=not-found CUPS_LOG="$tmp/cups.log" root_run "$cups_body" --machine || fail "CUPS hardening failed without a cups-browsed unit"
+[[ -e $tmp/cups.marker ]] && ! grep -q 'cups-browsed' "$tmp/cups.log" || fail "CUPS hardening without cups-browsed did not complete cleanly"
+rm -f "$tmp/cups.marker"
+if CUPS_BROWSED_STATE=error root_run "$cups_body" --machine; then fail "an unknown cups-browsed state completed CUPS hardening"; fi
+[[ ! -e $tmp/cups.marker ]] || fail "an unknown cups-browsed state published completion"
 pass "CUPS NSS and service mutation failures remain pending, retry successfully, and replay without querying NSS"
 
 for transformed in "$fido_body" "$bt_body" "$t2_body" "$cups_body"; do

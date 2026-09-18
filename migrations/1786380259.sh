@@ -4,13 +4,23 @@ marker=/var/lib/omarchy/migrations/1786380259
 main_conf=/etc/bluetooth/main.conf
 
 repair_machine() {
-  local controllers controller details powered=0
+  local controllers="" controller details powered=0 daemon
   [[ ! -e $marker ]] || return 0
 
-  controllers=$(/usr/bin/timeout 2s /usr/bin/bluetoothctl list) || {
-    echo "Could not read Bluetooth power state; leaving the migration pending." >&2
+  # bluetoothd runs only with an adapter present and the service allowed.
+  # With no daemon to ask, which is inactive (3) or no such unit (4), the
+  # adapter has been off, and that is the state to keep. A running daemon
+  # that cannot be asked, or an unknown service state, stays pending.
+  /usr/bin/systemctl is-active --quiet bluetooth.service 2>/dev/null && daemon=0 || daemon=$?
+  if (( daemon == 0 )); then
+    controllers=$(/usr/bin/timeout 2s /usr/bin/bluetoothctl list) || {
+      echo "Could not read Bluetooth power state; leaving the migration pending." >&2
+      return 1
+    }
+  elif (( daemon != 3 && daemon != 4 )); then
+    echo "Could not inspect bluetooth.service; leaving the migration pending." >&2
     return 1
-  }
+  fi
   while read -r _ controller _; do
     [[ -n ${controller:-} ]] || continue
     details=$(/usr/bin/timeout 2s /usr/bin/bluetoothctl show "$controller") || {

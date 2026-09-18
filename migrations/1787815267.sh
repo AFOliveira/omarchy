@@ -29,7 +29,8 @@ unit_active() {
   local status
   /usr/bin/systemctl is-active --quiet "$1" 2>/dev/null && return 0
   status=$?
-  (( status == 3 )) && return 1
+  # 3 is inactive, 4 no such unit: cups-browsed is not installed by default.
+  (( status == 3 || status == 4 )) && return 1
   echo "Could not inspect whether $1 is active; leaving CUPS hardening pending." >&2
   return 2
 }
