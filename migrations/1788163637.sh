@@ -21,18 +21,27 @@ fi
 if ((EUID == 0)); then
   /usr/bin/omarchy-migrate-sshd-key-only
 else
+  # Once cleanup starts, a signal is held rather than acted on: the exit
+  # revocation must finish, and timeout bounds it instead. timeout runs sudo
+  # in its own process group, and an attempt that fails anyway is retried.
+  ssh_migration_cleaning=false
+  handle_ssh_migration_signal() {
+    [[ $ssh_migration_cleaning == "true" ]] && return
+    ssh_migration_cleaning=true
+    exit "$1"
+  }
   cleanup_ssh_migration_sudo() {
-    local status=$? revoke revoke_status
+    local status=$? attempt revoke revoke_status=1
+    ssh_migration_cleaning=true
     trap - EXIT
-    # A second signal must not interrupt the revocation. It is forwarded to
-    # the revoking sudo instead, which runs as a waited-on background child so
-    # a signal sent only to this shell still reaches it.
-    /usr/bin/sudo -k >/dev/null 2>&1 &
-    revoke=$!
-    trap 'kill -TERM "$revoke" 2>/dev/null || true' HUP INT TERM
-    while :; do
-      wait "$revoke" && revoke_status=0 || revoke_status=$?
-      kill -0 "$revoke" 2>/dev/null || break
+    for attempt in 1 2 3; do
+      /usr/bin/timeout -k 5 30 /usr/bin/sudo -k >/dev/null 2>&1 &
+      revoke=$!
+      while :; do
+        wait "$revoke" && revoke_status=0 || revoke_status=$?
+        kill -0 "$revoke" 2>/dev/null || break
+      done
+      (( revoke_status != 0 )) || break
     done
     (( revoke_status == 0 )) || status=1
     exit "$status"
@@ -40,9 +49,9 @@ else
   # Traps first, so a failure or signal during the entry revocation still
   # revokes on the way out.
   trap cleanup_ssh_migration_sudo EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'handle_ssh_migration_signal 129' HUP
+  trap 'handle_ssh_migration_signal 130' INT
+  trap 'handle_ssh_migration_signal 143' TERM
   /usr/bin/sudo -k
   /usr/bin/sudo -N -- /usr/bin/omarchy-migrate-sshd-key-only
   /usr/bin/sudo -k
