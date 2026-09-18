@@ -1,6 +1,7 @@
 echo "Disable SSH password authentication, or sshd itself when no key is authorized"
 
 config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf
+key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf
 authorized_keys="$HOME/.ssh/authorized_keys"
 
 as_root() {
@@ -22,7 +23,9 @@ skip() {
 
 # The fixed setup command writes this file itself. Its presence is also the
 # machine-wide completion state, so migrations run by another account no-op.
-if [[ -e $config || -L $config ]]; then
+# Current setup and the key-only migration replace it with the key-only file,
+# which completes this repair the same way for every later account.
+if [[ -e $config || -L $config || -e $key_only_config || -L $key_only_config ]]; then
   exit 0
 fi
 

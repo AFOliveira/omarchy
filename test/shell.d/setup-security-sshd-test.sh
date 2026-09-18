@@ -31,7 +31,8 @@ SH
 cat >"$stub/omarchy-pkg-add" <<'SH'
 #!/bin/bash
 echo "package $*" >>"$EVENTS"
-[[ ${PACKAGE_FAIL:-0} != 1 ]]
+[[ ${PACKAGE_FAIL:-0} != 1 ]] || exit 1
+rm -f "$STATE/no-unit"
 SH
 cat >"$stub/omarchy-cmd-missing" <<'SH'
 #!/bin/bash
@@ -63,8 +64,8 @@ case $1 in
 systemctl)
   a=$2
   case $a in
-  is-active) [[ ${ACTIVE_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ -e $STATE/active ]] && { echo active; exit 0; } || { echo inactive; exit 3; } ;;
-  is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; } ;;
+  is-active) [[ ${ACTIVE_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ! -e $STATE/no-unit ]] || { echo inactive; exit 4; }; [[ -e $STATE/active ]] && { echo active; exit 0; } || { echo inactive; exit 3; } ;;
+  is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ! -e $STATE/no-unit ]] || { echo not-found; exit 4; }; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; } ;;
   start) [[ ${START_PARTIAL:-0} != 1 ]] || { touch "$STATE/active"; exit 1; }; [[ ${START_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/active" ;;
   enable) [[ ${ENABLE_PARTIAL:-0} != 1 ]] || { touch "$STATE/enabled"; exit 1; }; [[ ${ENABLE_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/enabled" ;;
   stop) [[ ${STOP_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/active" ;;
@@ -98,6 +99,7 @@ chmod +x "$stub"/*
 mapped_root="$tmp/omarchy"
 mkdir -p "$mapped_root/bin"
 sed "s#/usr/bin/sudo#$stub/sudo#g" "$ROOT/bin/omarchy-security-functions" >"$mapped_root/bin/omarchy-security-functions"
+cp "$ROOT/bin/omarchy-sshd-functions" "$mapped_root/bin/omarchy-sshd-functions"
 mapped_sshd="$mapped_root/bin/omarchy-setup-security-sshd"
 sed \
   -e "s#/usr/bin/getent#$stub/getent#g" \
@@ -123,6 +125,7 @@ run() {
   [[ ${PRE_ACTIVE:-0} != 1 ]] || touch "$d/state/active"
   [[ ${PRE_ENABLED:-0} != 1 ]] || touch "$d/state/enabled"
   [[ ${PRE_RULE:-0} != 1 ]] || touch "$d/state/rule"
+  [[ ${UNIT_MISSING:-0} != 1 ]] || touch "$d/state/no-unit"
   env HOME="$d/home" PATH="$stub:/usr/bin" OMARCHY_PATH="$mapped_root" FAKE_ROOT="$d/root" STATE="$d/state" EVENTS="$d/events" USER=audit TEST_UID="$test_uid" \
     TEST_ACCOUNT="${TEST_ACCOUNT:-audit}" TEST_GROUPS="${TEST_GROUPS:-audit sshers}" ACCOUNT_STATUS="${ACCOUNT_STATUS:-P}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" \
     PACKAGE_FAIL="${PACKAGE_FAIL:-0}" GH_FAIL="${GH_FAIL:-0}" GH_KEYS="${GH_KEYS:-}" GUM_CHOICE="${GUM_CHOICE:-}" GUM_INPUT="${GUM_INPUT:-}" GUM_CANCEL="${GUM_CANCEL:-0}" \
@@ -155,6 +158,23 @@ prev=0
 for e in authorized-key installed-hardening host-keygen sshd-t sshd-T 'sudo systemctl start' 'sudo systemctl enable' 'sudo ufw limit'; do n=$(grep -nF "$e" "$tmp/fresh/events"|head -1|cut -d: -f1); [[ -n $n && $prev -lt $n ]] || fail "unsafe fresh order at $e"; prev=$n; done
 grep -qxF 'AuthenticationMethods publickey' "$tmp/fresh/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"
 pass "fresh SSH is key-authorized and validated before publication"
+
+# Without the package the unit does not exist, so its state cannot be recorded
+# until openssh is installed; installing it first lets setup proceed.
+UNIT_MISSING=1 run unit-missing "--key=$key" >/dev/null || fail "setup fails when openssh is not installed yet" "$(cat "$tmp/unit-missing/events")"
+p=$(grep -nF 'package openssh' "$tmp/unit-missing/events" | head -1 | cut -d: -f1); q=$(grep -nF 'sudo systemctl is-' "$tmp/unit-missing/events" | head -1 | cut -d: -f1)
+[[ -n $p && -n $q ]] && (( p < q )) || fail "openssh is not installed before the service state is recorded" "$(cat "$tmp/unit-missing/events")"
+pass "setup installs openssh before recording the service state"
+
+# ssh-keygen -lf accepts restricted lines; none of them proves a usable login.
+n=0
+for opt in 'cert-authority' 'command="false"' 'from="!*,*"' 'expiry-time="20200101"' 'restrict' 'no-pty'; do
+  n=$((n+1))
+  if run "restricted-$n" "--key=$opt $key" >/dev/null 2>&1; then fail "restricted key accepted: $opt"; fi
+  no_publish "restricted-$n"; [[ ! -e $tmp/restricted-$n/home/.ssh/authorized_keys ]] || fail "restricted key was authorized: $opt"
+done
+run flags "--key=no-agent-forwarding,no-port-forwarding $key" >/dev/null || fail "flag-only options that keep the login usable were refused"
+pass "restricted key options are refused before any authorization or publication"
 
 for c in hostkey syntax dump pass kbd methods pubkey keysfile matched; do case $c in hostkey) HOSTKEY_FAIL=1;; syntax) T_FAIL=1;; dump) DUMP_FAIL=1;; pass) PASS_AUTH=yes;; kbd) KBD_AUTH=yes;; methods) AUTH_METHODS=any;; pubkey) PUBKEY_AUTH=no;; keysfile) AUTHORIZED_KEYS_SETTING=/etc/ssh/admin_keys;; matched) MATCH_PASS_AUTH=yes;; esac; if run "$c" "--key=$key" >/dev/null 2>&1; then fail "$c succeeds"; fi; no_publish "$c"; rolled_back "$c"; unset HOSTKEY_FAIL T_FAIL DUMP_FAIL PASS_AUTH KBD_AUTH AUTH_METHODS PUBKEY_AUTH AUTHORIZED_KEYS_SETTING MATCH_PASS_AUTH; done
 pass "host-key, syntax, and effective-policy failures are pre-publication"
