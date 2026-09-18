@@ -50,6 +50,15 @@ cat >"$b/omarchy-cmd-missing" <<'SH'
 #!/bin/bash
 [[ ${UFW_MISSING:-0} == 1 ]]
 SH
+# MARKER_LOOKUP_FAIL makes looking up the completion marker fail with an I/O
+# error rather than report it present or absent.
+cat >"$b/stat" <<'SH'
+#!/bin/bash
+if [[ ${MARKER_LOOKUP_FAIL:-0} == 1 && ${1:-} == -c && ${2:-} == %F && ${*: -1} == */1788163637 ]]; then
+  echo "stat: cannot statx '${*: -1}': Input/output error" >&2; exit 1
+fi
+exec /usr/bin/stat "$@"
+SH
 # MARKER_SIGNAL delivers TERM the moment the completion marker is renamed
 # into place, after the commit.
 cat >"$b/mv" <<'SH'
@@ -95,7 +104,7 @@ sed -e 's#^root_prefix=""$#root_prefix=$TEST_ROOT#' \
  -e "s#-- /run#-- $t/run#g" -e "s#-L /run#-L $t/run#g" -e "s#== /run#== $t/run#g" \
  -e "s#/usr/bin/systemctl#$b/systemctl#g" -e "s#/usr/bin/ssh-keygen#$b/ssh-keygen#g" -e "s#/usr/bin/sshd#$b/sshd#g" \
  -e "s#/usr/bin/passwd#$b/passwd#g" -e "s#/usr/bin/id#$b/id#g" -e "s#/usr/bin/getent#$b/getent#g" -e "s#/usr/bin/setpriv#$b/setpriv#g" \
- -e "s#/usr/bin/omarchy-pkg-add#$b/omarchy-pkg-add#g" -e "s#/usr/bin/omarchy-cmd-missing#$b/omarchy-cmd-missing#g" -e "s#/usr/bin/ufw#$b/ufw#g" -e "s#/usr/bin/mv#$b/mv#g" \
+ -e "s#/usr/bin/omarchy-pkg-add#$b/omarchy-pkg-add#g" -e "s#/usr/bin/omarchy-cmd-missing#$b/omarchy-cmd-missing#g" -e "s#/usr/bin/ufw#$b/ufw#g" -e "s#/usr/bin/mv#$b/mv#g" -e "s#/usr/bin/stat#$b/stat#g" \
  "$repo/bin/omarchy-migrate-sshd-key-only" >"$mapped/bin/omarchy-migrate-sshd-key-only"; chmod 0755 "$mapped/bin/"*
 grep -qx 'root_prefix=$TEST_ROOT' "$mapped/bin/omarchy-migrate-sshd-key-only" || { echo "test could not redirect the machine paths" >&2; exit 1; }
 /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/key"; key=$(<"$t/key.pub")
@@ -123,6 +132,9 @@ for error in passwd groups; do prepare "admission-error-$error"; touch "$t/admis
 prepare query-error; touch "$t/query-error/state/"{active,enabled}; ACTIVE_QUERY_ERROR=1; if run query-error; then exit 1; fi; unset ACTIVE_QUERY_ERROR; [[ -e $t/query-error/state/active && -e $t/query-error/state/enabled && ! -e $t/query-error/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf && -e $t/query-error/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]]
 prepare unsafe-query-error; rm "$t/unsafe-query-error/root/home/keyed/.ssh/authorized_keys"; touch "$t/unsafe-query-error/state/"{active,enabled}; ENABLED_QUERY_ERROR=1; if run unsafe-query-error; then exit 1; fi; unset ENABLED_QUERY_ERROR; [[ -e $t/unsafe-query-error/state/active && -e $t/unsafe-query-error/state/enabled ]]
 prepare symlink-key; mv "$t/symlink-key/root/home/keyed/.ssh/authorized_keys" "$t/symlink-key/root/home/key"; ln -s ../key "$t/symlink-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/symlink-key/state/"{active,enabled}; run symlink-key; [[ ! -e $t/symlink-key/state/active ]]
+# A configuration anyone but root can write proves nothing about the policy
+# the daemon will read, so the migration disables rather than trusts it.
+prepare writable-config; chmod 0666 "$t/writable-config/root/etc/ssh/sshd_config"; touch "$t/writable-config/state/"{active,enabled}; run writable-config; [[ ! -e $t/writable-config/state/active ]] || { echo "a writable sshd_config was trusted" >&2; exit 1; }
 # Drop-ins are read in byte order: "0-admin.conf" comes before Omarchy's file
 # even in a locale whose collation would ignore the dash.
 prepare dropin-first; echo 'PasswordAuthentication yes' >"$t/dropin-first/root/etc/ssh/sshd_config.d/0-admin.conf"; touch "$t/dropin-first/state/"{active,enabled}; LC_ALL=en_US.UTF-8 run dropin-first; [[ ! -e $t/dropin-first/state/active ]] || { echo "a drop-in read before Omarchy's was not seen" >&2; exit 1; }
@@ -187,7 +199,7 @@ if /usr/bin/bash "$mapped/bin/omarchy-migrate-sshd-key-only" -p >/dev/null 2>&1;
 # ---- Setup's machine phase: --setup UID -- KEY... ----
 /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$t/other"; other=$(<"$t/other.pub")
 sprep() { prepare "$1"; rm -f "$t/$1/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; echo 'nologin:x:1002:1002::/home/nologin:/usr/bin/nologin' >>"$t/$1/root/etc/passwd"; }
-srun() { local name=$1; shift; env -u SUDO_UID TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
+srun() { local name=$1; shift; env -u SUDO_UID TEST_ROOT="$t/$name/root" STATE="$t/$name/state" EVENTS="$t/$name/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" T_FAIL="${T_FAIL:-0}" START_FAIL="${START_FAIL:-0}" ENABLE_FAIL="${ENABLE_FAIL:-0}" STOP_FAIL="${STOP_FAIL:-0}" STOP_SIGNAL="${STOP_SIGNAL:-0}" LIMIT_FAIL="${LIMIT_FAIL:-0}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" UFW_RELOAD_SIGNAL="${UFW_RELOAD_SIGNAL:-0}" MARKER_SIGNAL="${MARKER_SIGNAL:-0}" MARKER_LOOKUP_FAIL="${MARKER_LOOKUP_FAIL:-0}" PACKAGE_FAIL="${PACKAGE_FAIL:-0}" ${CALLER_UID:+SUDO_UID=$CALLER_UID} "$mapped/bin/omarchy-migrate-sshd-key-only" "$@"; }
 cfg() { printf '%s' "$t/$1/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; }
 marker() { printf '%s' "$t/$1/root/var/lib/omarchy/migrations/1788163637"; }
 untouched() { [[ ! -e $(cfg "$1") && ! -e $t/$1/state/active && ! -e $t/$1/state/enabled && ! -e $t/$1/state/rule && ! -e $(marker "$1") ]] || { echo "$1 changed the machine" >&2; exit 1; }; }
@@ -217,6 +229,19 @@ sprep s-symlink; mv "$t/s-symlink/root/home/keyed/.ssh/authorized_keys" "$t/s-sy
 if srun s-symlink --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup trusted a symlinked authorized_keys" >&2; exit 1; fi; untouched s-symlink
 sprep s-marker; mkdir -p "$t/s-marker/root/var/lib/omarchy/migrations"; ln -s /dev/null "$(marker s-marker)"
 if srun s-marker --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup accepted a symlinked marker" >&2; exit 1; fi; [[ ! -e $(cfg s-marker) && -L $(marker s-marker) ]]
+# Every configuration file sshd reads must be one only root can write, or it
+# could change between the proof and the reload.
+sprep s-cfg-writable; chmod 0666 "$t/s-cfg-writable/root/etc/ssh/sshd_config"
+sprep s-cfg-symlink; mv "$t/s-cfg-symlink/root/etc/ssh/sshd_config" "$t/s-cfg-symlink/root/etc/ssh/real_config"; ln -s real_config "$t/s-cfg-symlink/root/etc/ssh/sshd_config"
+sprep s-cfg-dropin; echo 'Port 22' >"$t/s-cfg-dropin/root/etc/ssh/sshd_config.d/20-other.conf"; chmod 0666 "$t/s-cfg-dropin/root/etc/ssh/sshd_config.d/20-other.conf"
+sprep s-cfg-include; echo 'Include extra.conf' >>"$t/s-cfg-include/root/etc/ssh/sshd_config"; echo 'Include nested/*.conf' >"$t/s-cfg-include/root/etc/ssh/extra.conf"; mkdir -p "$t/s-cfg-include/root/etc/ssh/nested"; echo 'Port 22' >"$t/s-cfg-include/root/etc/ssh/nested/a.conf"; chmod 0664 "$t/s-cfg-include/root/etc/ssh/nested/a.conf"
+for c in s-cfg-writable s-cfg-symlink s-cfg-dropin s-cfg-include; do
+  if srun "$c" --setup 1000 -- "$key" >"$t/$c.out" 2>&1; then echo "setup trusted an untrusted configuration: $c" >&2; exit 1; fi
+  untouched "$c"; grep -q 'is not a root-owned file only root can write' "$t/$c.out" || { echo "$c was refused for another reason" >&2; cat "$t/$c.out" >&2; exit 1; }
+done
+# The same nested include, only root-writable, is accepted.
+sprep s-cfg-nested-ok; echo 'Include extra.conf' >>"$t/s-cfg-nested-ok/root/etc/ssh/sshd_config"; echo 'Include nested/*.conf' >"$t/s-cfg-nested-ok/root/etc/ssh/extra.conf"; mkdir -p "$t/s-cfg-nested-ok/root/etc/ssh/nested"; echo 'Port 22' >"$t/s-cfg-nested-ok/root/etc/ssh/nested/a.conf"
+srun s-cfg-nested-ok --setup 1000 -- "$key" >/dev/null || { echo "setup refused a trusted nested include" >&2; exit 1; }
 sprep s-query; UFW_QUERY_ERROR=1 srun s-query --setup 1000 -- "$key" >/dev/null 2>&1 && exit 1; untouched s-query
 echo 'ok-root - setup refuses bad requests, other accounts, unsafe files and unknown firewall state before any change'
 
@@ -251,6 +276,11 @@ echo 'ok-root - setup rolls back every armed change on failure, restores adminis
 sprep s-before; if UFW_RELOAD_SIGNAL=1 srun s-before --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi; rolled s-before
 sprep s-after; if MARKER_SIGNAL=1 srun s-after --setup 1000 -- "$key" >/dev/null 2>&1; then echo "a signalled setup reported success" >&2; exit 1; fi
 grep -qxF 'AuthenticationMethods publickey' "$(cfg s-after)" && [[ -e $t/s-after/state/active && -e $t/s-after/state/rule && $(<"$(marker s-after)") == "omarchy-setup-security-sshd "* ]] || { echo "a committed setup was rolled back" >&2; exit 1; }
+# Once the commit was attempted, a marker that cannot be looked up is not
+# proof the commit failed: nothing is rolled back and the doubt is reported.
+sprep s-lookup; if MARKER_SIGNAL=1 MARKER_LOOKUP_FAIL=1 srun s-lookup --setup 1000 -- "$key" >"$t/s-lookup.out" 2>&1; then exit 1; fi
+grep -qxF 'AuthenticationMethods publickey' "$(cfg s-lookup)" && [[ -e $t/s-lookup/state/active && -e $t/s-lookup/state/rule && -e $(marker s-lookup) ]] || { echo "a marker lookup error rolled back a committed setup" >&2; exit 1; }
+grep -q 'could not establish whether SSH setup completed' "$t/s-lookup.out" || { echo "an unknown commit outcome was not reported" >&2; exit 1; }
 sprep s-cleanup; if LIMIT_FAIL=1 STOP_SIGNAL=1 srun s-cleanup --setup 1000 -- "$key" >/dev/null 2>&1; then exit 1; fi; rolled s-cleanup
 echo 'ok-root - the marker is the commit point, and a signal during rollback does not abandon it'
 
