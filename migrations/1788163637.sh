@@ -21,13 +21,23 @@ fi
 if ((EUID == 0)); then
   /usr/bin/omarchy-migrate-sshd-key-only
 else
-  # Once cleanup starts, a signal is held rather than acted on: the exit
-  # revocation must finish. It stays a direct child of this shell, since under
+  # The final revocation stays a direct child of this shell: under
   # timestamp_type=ppid, and without a terminal, sudo keys the cached
-  # authorization by its parent. Its stdout is a pipe only it holds, so its
-  # exit arrives as end-of-file and read's own timeout bounds it, with no
-  # watchdog process to lose or leave behind. A failed attempt, such as one a
-  # signal to the whole group killed, is retried.
+  # authorization by its parent, so an intermediary would revoke some other
+  # record and still succeed. Job control gives it a process group of its own
+  # in the same session, so a signal to this shell's group does not reach it,
+  # and the group ID stays reserved while it or anything it started lives.
+  # The wait is bounded by polling that group, pausing on a descriptor
+  # reserved before the first privileged call; no watchdog process is involved.
+  # A failed attempt is retried. Running out of descriptors for that pause
+  # leaves the migration pending instead of its revocation unbounded.
+  ssh_migration_clock=""
+  if ! { exec {ssh_migration_clock}<> <(:); } 2>/dev/null; then
+    echo "Could not reserve a descriptor for the SSH migration's cleanup." >&2
+    exit 1
+  fi
+  # Once cleanup starts, a signal is held rather than acted on: the exit
+  # revocation must finish.
   ssh_migration_cleaning=false
   handle_ssh_migration_signal() {
     [[ $ssh_migration_cleaning == "true" ]] && return
@@ -42,48 +52,28 @@ else
     done
     return "$status"
   }
-  revoke_pipe_closed() {
-    local started=$SECONDS status
-    while (( SECONDS - started < $2 )); do
-      read -r -t 1 -u "$1" _ && continue
-      status=$?
-      (( status > 128 )) || return 0
-    done
-    return 1
+  # Pauses up to a second, or until a signal arrives, without a child process.
+  ssh_migration_pause() {
+    read -r -t 1 -u "$ssh_migration_clock" _ || true
   }
   revoke_ssh_migration_sudo_once() {
-    local bound=30 pipe="" reader="" writer="" revoke
-    # Without descriptors for the pipe, revoke unbounded rather than not at all.
-    if ! { exec {pipe}<> <(:); } 2>/dev/null; then
-      /usr/bin/sudo -k >/dev/null 2>&1
-      return
-    fi
-    { exec {reader}<"/dev/fd/$pipe"; } 2>/dev/null || reader=""
-    [[ -z $reader ]] || { exec {writer}>"/dev/fd/$pipe"; } 2>/dev/null || writer=""
-    exec {pipe}>&-
-    if [[ -z $reader || -z $writer ]]; then
-      [[ -z $reader ]] || exec {reader}<&-
-      /usr/bin/sudo -k >/dev/null 2>&1
-      return
-    fi
-    /usr/bin/sudo -k 2>/dev/null >&"$writer" {reader}<&- &
+    local bound=30 revoke started
+    set -m
+    /usr/bin/sudo -k >/dev/null 2>&1 &
     revoke=$!
-    exec {writer}>&-
-    if revoke_pipe_closed "$reader" "$bound"; then
-      exec {reader}<&-
-      wait_for_ssh_migration_revoke "$revoke"
-      return
+    set +m
+    started=$SECONDS
+    while kill -0 -- "-$revoke" 2>/dev/null && (( SECONDS - started < bound )); do ssh_migration_pause; done
+    if kill -0 -- "-$revoke" 2>/dev/null; then
+      # A live group keeps its ID reserved, so this reaches only the revoker
+      # and anything it left behind. One that survives even this is abandoned
+      # rather than waited on forever.
+      kill -KILL -- "-$revoke" 2>/dev/null || true
+      started=$SECONDS
+      while kill -0 -- "-$revoke" 2>/dev/null && (( SECONDS - started < 2 )); do ssh_migration_pause; done
+      ! kill -0 -- "-$revoke" 2>/dev/null || return 1
     fi
-    # The pipe is still open, so its only holder is alive and the PID its own.
-    kill -KILL "$revoke" 2>/dev/null || true
-    # A revoker that does not go even then is abandoned, not waited on forever.
-    if revoke_pipe_closed "$reader" 2; then
-      exec {reader}<&-
-      wait_for_ssh_migration_revoke "$revoke" || true
-    else
-      exec {reader}<&-
-    fi
-    return 1
+    wait_for_ssh_migration_revoke "$revoke"
   }
   cleanup_ssh_migration_sudo() {
     local status=$ssh_migration_status attempt revoked=false
