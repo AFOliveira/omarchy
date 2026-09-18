@@ -12,13 +12,12 @@ cat >"$b/systemctl" <<'SH'
 echo "systemctl $*" >>"$EVENTS"
 case $1 in
 is-active) [[ ${ACTIVE_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo inactive; exit 4; }; [[ -e $STATE/active ]] && { echo active; exit 0; } || { echo inactive; exit 3; };;
-is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo not-found; exit 4; }; [[ ! -e $STATE/enabled || ! -e $STATE/masked-runtime ]] || { echo masked-runtime; exit 1; }; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; };;
+is-enabled) [[ ${ENABLED_QUERY_ERROR:-0} != 1 ]] || exit 2; [[ ${UNIT_MISSING:-0} != 1 ]] || { echo not-found; exit 4; }; [[ ! -e $STATE/masked ]] || { echo masked; exit 1; }; [[ ! -e $STATE/enabled || ! -e $STATE/masked-runtime ]] || { echo masked-runtime; exit 1; }; [[ -e $STATE/enabled ]] && { echo enabled; exit 0; } || { echo disabled; exit 1; };;
 reload) if [[ ${SLOW_RELOAD:-0} == 1 ]]; then mkdir "$STATE/held" 2>/dev/null || touch "$STATE/overlap"; sleep .15; rmdir "$STATE/held" 2>/dev/null || true; fi; [[ ${RELOAD_FAIL:-0} != 1 ]];;
-disable) [[ ${DISABLE_FAIL:-0} != 1 ]] || exit 1; [[ ${2:-} != --now ]] || rm -f "$STATE/active"; if [[ -e $STATE/masked-runtime ]]; then echo "Unit sshd.service is masked, ignoring." >&2; else rm -f "$STATE/enabled"; fi;;
-unmask) [[ ${2:-} == --runtime ]] || exit 2; [[ ${UNMASK_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/masked-runtime"; [[ ${UNMASK_KILL:-0} != 1 ]] || kill -KILL "$PPID";;
-mask) [[ ${2:-} == --runtime ]] || exit 2; if [[ ${MASK_FAIL_ONCE:-0} == 1 && ! -e $STATE/mask-failed ]]; then touch "$STATE/mask-failed"; exit 1; fi; touch "$STATE/masked-runtime"; [[ ${MASK_SIGNAL:-0} != 1 || -e $STATE/mask-signalled ]] || { touch "$STATE/mask-signalled"; kill -TERM "$PPID"; };;
-start) [[ ${START_FAIL:-0} != 1 ]] || exit 1; [[ ! -e $TEST_ROOT/etc/systemd/system/sshd.service.d/50-omarchy-disabling.conf ]] || exit 1; touch "$STATE/active";;
-daemon-reload) ;;
+disable) [[ ${DISABLE_FAIL:-0} != 1 ]] || exit 1; [[ ${2:-} != --now ]] || rm -f "$STATE/active"; [[ ${DISABLE_NOOP:-0} != 1 ]] || exit 0; if [[ -e $STATE/masked-runtime ]]; then echo "Unit sshd.service is masked, ignoring." >&2; else rm -f "$STATE/enabled"; fi;;
+unmask) exit 2;;
+mask) [[ ${2:-} != --runtime ]] || exit 2; [[ ${MASK_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/masked";;
+start) [[ ${START_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/active";;
 enable) [[ ${ENABLE_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/enabled";;
 stop) [[ ${STOP_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; [[ ${STOP_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/active";; esac
 SH
@@ -132,7 +131,7 @@ later:x:1001:1001:Later:$d/root/home/later:/usr/bin/bash
 daemon:x:2:2:Daemon:/sbin:/usr/bin/nologin
 EOF
  echo 'UID_MIN 1000' >"$d/root/etc/login.defs"; echo 'Include /etc/ssh/sshd_config.d/*.conf' >"$d/root/etc/ssh/sshd_config"; printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >"$d/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; : >"$d/events"; }
-run() { DISABLE_FAIL="${DISABLE_FAIL:-0}" UNMASK_FAIL="${UNMASK_FAIL:-0}" UNMASK_KILL="${UNMASK_KILL:-0}" MASK_FAIL_ONCE="${MASK_FAIL_ONCE:-0}" MASK_SIGNAL="${MASK_SIGNAL:-0}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" FORCE_COMMAND="${FORCE_COMMAND:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" REQUIRED_RSA_SIZE="${REQUIRED_RSA_SIZE:-}" REVOKED_KEYS="${REVOKED_KEYS:-}" UNIT_MISSING="${UNIT_MISSING:-0}" TEST_ROOT="$t/$1/root" STATE="$t/$1/state" EVENTS="$t/$1/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" LOCKED_USER="${LOCKED_USER:-}" PASSWD_QUERY_ERROR="${PASSWD_QUERY_ERROR:-0}" GROUP_QUERY_ERROR="${GROUP_QUERY_ERROR:-0}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" SLOW_RELOAD="${SLOW_RELOAD:-0}" RELOAD_FAIL="${RELOAD_FAIL:-0}" HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" "$mapped/bin/omarchy-migrate-sshd-key-only"; }
+run() { DISABLE_FAIL="${DISABLE_FAIL:-0}" DISABLE_NOOP="${DISABLE_NOOP:-0}" MASK_FAIL="${MASK_FAIL:-0}" REFUSE_CONNECTION="${REFUSE_CONNECTION:-}" FORCE_COMMAND="${FORCE_COMMAND:-}" ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" REQUIRED_RSA_SIZE="${REQUIRED_RSA_SIZE:-}" REVOKED_KEYS="${REVOKED_KEYS:-}" UNIT_MISSING="${UNIT_MISSING:-0}" TEST_ROOT="$t/$1/root" STATE="$t/$1/state" EVENTS="$t/$1/events" MATCH_BAD_USER="${MATCH_BAD_USER:-}" ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" LOCKED_USER="${LOCKED_USER:-}" PASSWD_QUERY_ERROR="${PASSWD_QUERY_ERROR:-0}" GROUP_QUERY_ERROR="${GROUP_QUERY_ERROR:-0}" ACTIVE_QUERY_ERROR="${ACTIVE_QUERY_ERROR:-0}" ENABLED_QUERY_ERROR="${ENABLED_QUERY_ERROR:-0}" SLOW_RELOAD="${SLOW_RELOAD:-0}" RELOAD_FAIL="${RELOAD_FAIL:-0}" HOSTKEY_FAIL="${HOSTKEY_FAIL:-0}" T_FAIL="${T_FAIL:-0}" "$mapped/bin/omarchy-migrate-sshd-key-only"; }
 prepare shared; touch "$t/shared/state/"{active,enabled}; run shared; run shared; [[ -e $t/shared/state/active ]]; ! grep -q 'systemctl disable' "$t/shared/events"
 [[ -f $t/shared/root/var/lib/omarchy/migrations/1788163637 ]] || { echo "a validated conversion did not record completion" >&2; exit 1; }
 prepare no-key; rm "$t/no-key/root/home/keyed/.ssh/authorized_keys"; touch "$t/no-key/state/"{active,enabled}; run no-key; [[ ! -e $t/no-key/state/active ]]
@@ -159,36 +158,18 @@ grep -qxF 'AuthenticationMethods publickey' "$t/bare-keyed/root/etc/ssh/sshd_con
 prepare bare-keyless; rm -f "$t/bare-keyless/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-keyless/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-keyless/state/enabled"; run bare-keyless
 [[ ! -e $t/bare-keyless/state/enabled && ! -e $t/bare-keyless/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] || { echo "an exposed keyless daemon was not disabled" >&2; exit 1; }
 # A runtime mask over a persistent enablement is not idle: at the next boot
-# the mask is gone. A keyless one is disabled, removing the enablement.
-prepare bare-masked; rm -f "$t/bare-masked/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-masked/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-masked/state/"{enabled,masked-runtime}; run bare-masked
-[[ ! -e $t/bare-masked/state/enabled && -e $t/bare-masked/state/masked-runtime ]] && grep -q '^systemctl disable --now' "$t/bare-masked/events" || { echo "a runtime-masked, persistently enabled daemon was left enabled, or lost its mask" >&2; exit 1; }
-# systemctl disable reporting success is not taken as proof; a disable that
-# leaves the unit enabled keeps the migration pending. A failure while the
-# mask is lifted puts it back.
-prepare bare-unmask-fail; rm -f "$t/bare-unmask-fail/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-unmask-fail/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-unmask-fail/state/"{enabled,masked-runtime}
-if UNMASK_FAIL=1 run bare-unmask-fail; then echo "a runtime mask that could not be lifted completed the migration" >&2; exit 1; fi
-[[ -e $t/bare-unmask-fail/state/enabled && -e $t/bare-unmask-fail/state/masked-runtime ]] || { echo "a failed unmask changed the unit" >&2; exit 1; }
-prepare bare-disable-fail; rm -f "$t/bare-disable-fail/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-disable-fail/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-disable-fail/state/"{enabled,masked-runtime}
-if DISABLE_FAIL=1 run bare-disable-fail; then echo "a failed disable completed the migration" >&2; exit 1; fi
-[[ -e $t/bare-disable-fail/state/masked-runtime ]] || { echo "a failed disable left the runtime mask lifted" >&2; exit 1; }
-# Restoring the mask is retried when it fails, survives a signal while it
-# runs, and a SIGKILL while the mask is lifted leaves a key-only guard, so a
-# daemon started at the next boot takes no passwords.
+# the mask is gone. systemctl disable would ignore the masked unit, and
+# lifting the mask would expose it, so a keyless one is masked persistently
+# on top, never unmasked, and the result is checked.
 masked_bare() { prepare "$1"; rm -f "$t/$1/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/$1/root/home/keyed/.ssh/authorized_keys"; touch "$t/$1/state/"{enabled,masked-runtime}; }
-masked_bare bare-mask-retry; if MASK_FAIL_ONCE=1 run bare-mask-retry; then echo "a failed mask restore completed the migration" >&2; exit 1; fi
-[[ -e $t/bare-mask-retry/state/masked-runtime ]] || { echo "a failed mask restore was not retried" >&2; exit 1; }
-masked_bare bare-mask-signal; if MASK_SIGNAL=1 run bare-mask-signal; then echo "a signalled migration reported success" >&2; exit 1; fi
-[[ -e $t/bare-mask-signal/state/masked-runtime && ! -e $t/bare-mask-signal/state/enabled ]] || { echo "a signal while restoring the mask left it lifted" >&2; exit 1; }
-# The guard is a systemd drop-in, so it holds whatever the SSH configuration
-# is, here a key-only path that is only a symlink to /dev/null.
-masked_bare bare-mask-kill; ln -s /dev/null "$t/bare-mask-kill/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"; if UNMASK_KILL=1 run bare-mask-kill; then exit 1; fi
-guard="$t/bare-mask-kill/root/etc/systemd/system/sshd.service.d/50-omarchy-disabling.conf"
-grep -qxF 'ExecStartPre=/usr/bin/false' "$guard" && [[ $(stat -c '%u %a' "$guard") == "0 644" ]] || { echo "a SIGKILL with the mask lifted left no start guard" >&2; exit 1; }
-n=$(grep -n '^systemctl daemon-reload' "$t/bare-mask-kill/events" | head -1 | cut -d: -f1); u=$(grep -n '^systemctl unmask' "$t/bare-mask-kill/events" | head -1 | cut -d: -f1)
-[[ -n $n && -n $u ]] && (( n < u )) || { echo "the start guard was not loaded before the mask was lifted" >&2; exit 1; }
-# The next run completes the disable and removes the guard.
-touch "$t/bare-mask-kill/state/masked-runtime"; run bare-mask-kill; [[ ! -e $guard && ! -e $t/bare-mask-kill/state/enabled ]] || { echo "a later disable did not clear the start guard" >&2; exit 1; }
-[[ ! -e $t/bare-masked/root/etc/systemd/system/sshd.service.d/50-omarchy-disabling.conf ]] || { echo "a completed disable left its start guard" >&2; exit 1; }
+masked_bare bare-masked; run bare-masked
+[[ -e $t/bare-masked/state/masked && -e $t/bare-masked/state/masked-runtime ]] && ! grep -q '^systemctl unmask' "$t/bare-masked/events" || { echo "a runtime-masked, persistently enabled daemon was not masked persistently" >&2; exit 1; }
+masked_bare bare-mask-fail; if MASK_FAIL=1 run bare-mask-fail; then echo "a failed persistent mask completed the migration" >&2; exit 1; fi
+[[ ! -e $t/bare-mask-fail/state/masked && -e $t/bare-mask-fail/state/masked-runtime ]] || { echo "a failed persistent mask changed the unit" >&2; exit 1; }
+# A disable systemctl reports as done but that leaves the unit able to start
+# keeps the migration pending.
+prepare bare-noop; rm -f "$t/bare-noop/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" "$t/bare-noop/root/home/keyed/.ssh/authorized_keys"; touch "$t/bare-noop/state/enabled"
+if DISABLE_NOOP=1 run bare-noop; then echo "a disable that left sshd enabled completed the migration" >&2; exit 1; fi
 prepare bare-idle; rm -f "$t/bare-idle/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; run bare-idle
 [[ ! -e $t/bare-idle/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf ]] && ! grep -qv '^systemctl is-' "$t/bare-idle/events" || { echo "an unexposed daemon was changed" >&2; exit 1; }
 prepare bare-query; rm -f "$t/bare-query/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"; touch "$t/bare-query/state/"{active,enabled}
@@ -381,10 +362,6 @@ echo 'ok-root - the marker is the commit point, and a signal during rollback doe
 
 # Setup shares the migration's lock and fails rather than waits while it is
 # held; nothing changes, and a retry succeeds.
-# Setup clears a start guard an interrupted disable left behind.
-sprep s-guard; mkdir -p "$t/s-guard/root/etc/systemd/system/sshd.service.d"; printf '[Service]\nExecStartPre=/usr/bin/false\n' >"$t/s-guard/root/etc/systemd/system/sshd.service.d/50-omarchy-disabling.conf"
-srun s-guard --setup 1000 -- "$key" >/dev/null || { echo "setup failed with a stale start guard" >&2; exit 1; }
-[[ -e $t/s-guard/state/active && ! -e $t/s-guard/root/etc/systemd/system/sshd.service.d/50-omarchy-disabling.conf ]] || { echo "setup did not clear a stale start guard" >&2; exit 1; }
 sprep s-busy; exec {held}>"$t/run/lock"; flock -n "$held"
 if srun s-busy --setup 1000 -- "$key" >/dev/null 2>&1; then echo "setup ran while the machine lock was held" >&2; exit 1; else status=$?; fi
 exec {held}>&-; (( status == 75 )); untouched s-busy; [[ ! -s $t/s-busy/events ]]
