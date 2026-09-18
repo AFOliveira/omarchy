@@ -105,6 +105,8 @@ omarchy_sshd_key_not_revoked() {
   # knows and whether each line parses, as sshd itself does.
   known_types=$(/usr/bin/ssh -Q key 2>/dev/null) || return 1
   while IFS= read -r line; do
+    # sshd accepts CRLF line endings; the key data must not keep the CR.
+    line=${line%$'\r'}
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
     read -r -a fields <<<"$line"
     [[ -n ${fields[0]:-} && $'\n'$known_types$'\n' == *$'\n'"${fields[0]}"$'\n'* ]] || return 1

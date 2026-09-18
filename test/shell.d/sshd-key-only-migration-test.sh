@@ -114,6 +114,10 @@ prepare unrevoked-text; touch "$t/unrevoked-text/state/"{active,enabled}; REVOKE
 # so such a list proves no login either.
 printf 'this-is-not-a-key\n' >"$t/malformed-revoked.txt"; printf 'restrict %s\n' "$(<"$t/rsa.pub")" >"$t/options-revoked.txt"
 printf 'ssh-ed25519 AAAA\n' >"$t/baddata-revoked.txt"
+# CRLF endings are valid for sshd; the listed key is still revoked.
+read -r key_type key_data _ <<<"$key"; printf '%s %s\r\n' "$key_type" "$key_data" >"$t/crlf-listed.txt"
+prepare crlf-revoked; touch "$t/crlf-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/crlf-listed.txt" run crlf-revoked
+[[ ! -e $t/crlf-revoked/state/active ]] || { echo "a CRLF revocation list did not revoke its key" >&2; exit 1; }
 for list in malformed options baddata; do
   prepare "$list-revoked"; touch "$t/$list-revoked/state/"{active,enabled}; REVOKED_KEYS="$t/$list-revoked.txt" run "$list-revoked"
   [[ ! -e $t/$list-revoked/state/active ]] || { echo "a $list revocation list was treated as revoking nothing" >&2; exit 1; }
@@ -178,3 +182,18 @@ printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\nif [[ $1 == -k && ! -e %s/revo
 if bash -euo pipefail "$m/migration" >/dev/null 2>&1; then fail "a failed entry revocation was ignored"; fi
 [[ $(grep -c '^sudo -k$' "$m/calls") == 2 ]] || fail "a failed entry revocation did not revoke again on exit" "$(cat "$m/calls")"
 pass "a failed entry revocation still revokes on exit"
+
+# A TERM sent only to the migration while its exit revocation hangs reaches
+# that sudo, so the migration still ends.
+: >"$m/calls"; rm -f "$m/revoked-once" "$m/migration.pid"
+printf '#!/bin/bash\necho "sudo $*" >>"%s/calls"\nif [[ $1 == -k && -e %s/revoked-once ]]; then echo "$PPID" >%s/migration.pid; sleep 30 & wait $!; fi\n[[ $1 == -k ]] && touch %s/revoked-once\n[[ $1 == -k ]]\n' "$m" "$m" "$m" "$m" >"$m/sudo"
+printf 'PasswordAuthentication no\n' >"$m/etc/10-omarchy-hardening.conf"
+bash -euo pipefail "$m/migration" >/dev/null 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -s $m/migration.pid ]] && break; sleep 0.05; done
+[[ -s $m/migration.pid ]] || fail "the migration never reached its exit revocation"
+kill -TERM "$(<"$m/migration.pid")" 2>/dev/null || true
+for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$runner" 2>/dev/null; then pkill -KILL -f "sleep 30" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a TERM to the migration did not reach its hung exit revocation"; fi
+wait "$runner" 2>/dev/null || true
+rm -f "$m/etc/10-omarchy-hardening.conf"
+pass "a TERM during the exit revocation reaches the revoking command"

@@ -76,7 +76,7 @@ ufw)
   shift
   if [[ $1 == show ]]; then [[ ${UFW_QUERY_ERROR:-0} != 1 ]] || exit 1; [[ -e $STATE/rule && ${VERIFY_MISS:-0} != 1 ]] && echo "ufw limit 22/tcp comment 'omarchy-sshd'"; exit 0
   elif [[ $1 == limit ]]; then [[ ${LIMIT_PARTIAL:-0} != 1 ]] || { touch "$STATE/rule"; exit 1; }; [[ ${LIMIT_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/rule"; [[ ${LIMIT_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"
-  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; if [[ ${DELETE_HANG:-0} == 1 ]]; then sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
+  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; if [[ ${DELETE_HANG:-0} == 1 ]]; then echo "$PPID" >"$STATE/setup.pid"; sleep 30 & echo $! >"$STATE/hang.pid"; wait $! || true; fi; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
   elif [[ $1 == reload ]]; then n=0; [[ ! -e $STATE/ufw-reloads ]] || read -r n <"$STATE/ufw-reloads"; n=$((n+1)); echo "$n" >"$STATE/ufw-reloads"; [[ ${UFW_RELOAD_ALWAYS_FAIL:-0} != 1 && (${UFW_RELOAD_ONCE:-0} != 1 || $n != 1) ]]
   fi ;;
 test) p=$(map "$3"); case $2 in -e) [[ -e $p ]] ;; -L) [[ -L $p ]] ;; -f) [[ -f $p ]] ;; esac ;;
@@ -216,18 +216,23 @@ if run rollback-signal "--key=$key" >/dev/null 2>&1; then fail "a failed setup r
 rolled_back rollback-signal
 [[ $(tail -n1 "$tmp/rollback-signal/events") == 'sudo -k' ]] || fail "a signal during rollback skipped the final revocation" "$(tail -n3 "$tmp/rollback-signal/events")"
 unset UFW_RELOAD_ONCE DELETE_SIGNAL
-# A command that hangs during rollback must still die on TERM, so rollback
-# can go on: cleanup handles further signals rather than ignoring them, and an
-# ignored disposition would be inherited by the command.
+# A command that hangs during rollback must not hold rollback forever: a TERM
+# sent only to the setup process, as \`kill $pid\` or timeout --foreground do,
+# is forwarded to that command and rollback goes on with its remaining steps.
 UFW_RELOAD_ONCE=1 DELETE_HANG=1
-run rollback-hang "--key=$key" >/dev/null 2>&1 & runner=$!
-for (( i = 0; i < 200; i++ )); do [[ -s $tmp/rollback-hang/state/hang.pid ]] && break; sleep 0.05; done
-[[ -s $tmp/rollback-hang/state/hang.pid ]] || fail "the rollback never reached the hanging firewall command"
-kill -TERM "$(<"$tmp/rollback-hang/state/hang.pid")" 2>/dev/null || true
+run rollback-hang "--key=$key" >"$tmp/rollback-hang.out" 2>&1 & runner=$!
+for (( i = 0; i < 200; i++ )); do [[ -s $tmp/rollback-hang/state/setup.pid ]] && break; sleep 0.05; done
+[[ -s $tmp/rollback-hang/state/setup.pid ]] || fail "the rollback never reached the hanging firewall command"
+kill -TERM "$(<"$tmp/rollback-hang/state/setup.pid")" 2>/dev/null || true
 for (( i = 0; i < 100; i++ )); do kill -0 "$runner" 2>/dev/null || break; sleep 0.05; done
-if kill -0 "$runner" 2>/dev/null; then kill -KILL "$(<"$tmp/rollback-hang/state/hang.pid")" 2>/dev/null; wait "$runner" 2>/dev/null || true; fail "a hung rollback command ignored TERM"; fi
+kill -KILL "$(<"$tmp/rollback-hang/state/hang.pid")" 2>/dev/null || true
+if kill -0 "$runner" 2>/dev/null; then wait "$runner" 2>/dev/null || true; fail "a TERM to setup did not reach its hung rollback command"; fi
 wait "$runner" 2>/dev/null || true
-rolled_back rollback-hang
+# The stopped delete did not remove the rule, so rollback must say so, and
+# still restore everything else and revoke.
+[[ ! -e $tmp/rollback-hang/state/active && ! -e $tmp/rollback-hang/state/enabled && ! -e $tmp/rollback-hang/home/.ssh/authorized_keys ]] ||
+  fail "rollback did not restore the service and keys after its hung command was stopped"
+grep -q 'CRITICAL: SSH setup rollback was incomplete' "$tmp/rollback-hang.out" || fail "an interrupted rollback step was not reported" "$(cat "$tmp/rollback-hang.out")"
 [[ $(tail -n1 "$tmp/rollback-hang/events") == 'sudo -k' ]] || fail "rollback did not finish after its hung command was stopped"
 unset UFW_RELOAD_ONCE DELETE_HANG
 # The completion certificate never outlives an incomplete setup: an earlier

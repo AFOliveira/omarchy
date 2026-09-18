@@ -159,52 +159,73 @@ sshd_enabled_state() {
   esac
 }
 
+# Cleanup must finish even when a further signal arrives, yet a command it runs
+# must not become impossible to stop: a signal sent only to this shell would
+# otherwise wait behind a hung child. Each cleanup command runs as a background
+# child that the shell waits on; wait is interruptible, so a signal is
+# forwarded to that child and cleanup then continues with the next step.
+CLEANUP_CHILD=""
+forward_cleanup_signal() {
+  [[ -z $CLEANUP_CHILD ]] || kill -TERM "$CLEANUP_CHILD" 2>/dev/null || true
+}
+run_cleanup() {
+  local status
+  "$@" &
+  CLEANUP_CHILD=$!
+  while :; do
+    wait "$CLEANUP_CHILD" && status=0 || status=$?
+    kill -0 "$CLEANUP_CHILD" 2>/dev/null || break
+  done
+  CLEANUP_CHILD=""
+  return "$status"
+}
+
 rollback_setup() {
   local exit_status=$?
   local rollback_failed=false config_restored=false
   trap - EXIT
-  # A second signal must not abort restoration or the final revocation. A
-  # handler rather than an ignored disposition, so the commands run below stay
-  # interruptible: exec resets handled signals but inherits ignored ones.
-  trap ':' HUP INT TERM
+  # A second signal must not abort restoration or the final revocation; it is
+  # forwarded to the running cleanup command instead. A handler rather than an
+  # ignored disposition, since exec inherits ignored signals.
+  trap forward_cleanup_signal HUP INT TERM
 
   [[ -z $AUTHORIZED_KEYS_TEMP ]] || /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP"
 
   if [[ $SETUP_COMPLETE != "true" ]]; then
     # First, so nothing below can leave a certification of a restored config.
     if [[ $COMPLETION_MARKER_ARMED == "true" ]]; then
-      /usr/bin/sudo rm -f "$COMPLETION_MARKER" >/dev/null 2>&1 || rollback_failed=true
+      run_cleanup /usr/bin/sudo rm -f "$COMPLETION_MARKER" >/dev/null 2>&1 || rollback_failed=true
     fi
     if [[ $FIREWALL_RULE_ADDED == "true" ]]; then
       # Armed before the mutation, so a signal cannot leave our rule behind.
       # The rule was proven absent beforehand, so deleting it is always ours to
       # do; a failed delete only counts when UFW does not then show it gone,
       # as happens when the signal arrived before the rule was added.
-      if ! /usr/bin/sudo ufw --force delete limit 22/tcp comment "omarchy-sshd" >/dev/null 2>&1; then
+      if ! run_cleanup /usr/bin/sudo ufw --force delete limit 22/tcp comment "omarchy-sshd" >/dev/null 2>&1; then
         local firewall_status
-        omarchy_firewall_rule_state && firewall_status=0 || firewall_status=$?
+        run_cleanup omarchy_firewall_rule_state && firewall_status=0 || firewall_status=$?
         (( firewall_status == 1 )) || rollback_failed=true
       fi
-      /usr/bin/sudo ufw reload >/dev/null 2>&1 || rollback_failed=true
+      run_cleanup /usr/bin/sudo ufw reload >/dev/null 2>&1 || rollback_failed=true
     fi
     if [[ $SERVICE_ENABLED == "true" && $SERVICE_WAS_ENABLED != "true" ]]; then
-      /usr/bin/sudo systemctl disable sshd.service >/dev/null 2>&1 || rollback_failed=true
+      run_cleanup /usr/bin/sudo systemctl disable sshd.service >/dev/null 2>&1 || rollback_failed=true
     fi
     if [[ $SERVICE_STARTED == "true" && $SERVICE_WAS_ACTIVE != "true" ]]; then
-      /usr/bin/sudo systemctl stop sshd.service >/dev/null 2>&1 || rollback_failed=true
+      run_cleanup /usr/bin/sudo systemctl stop sshd.service >/dev/null 2>&1 || rollback_failed=true
     fi
     if [[ $HARDENING_TOUCHED == "true" ]]; then
       if [[ -n $HARDENING_BACKUP ]]; then
         # The backup is in the same root-owned directory, so rename restores
         # the administrator's exact owner/group/mode atomically.
-        if /usr/bin/sudo mv -fT -- "$HARDENING_BACKUP" "$HARDENING_CONFIG" >/dev/null 2>&1; then
+        if run_cleanup /usr/bin/sudo mv -fT -- "$HARDENING_BACKUP" "$HARDENING_CONFIG" >/dev/null 2>&1; then
           HARDENING_BACKUP=""
           config_restored=true
         else
           rollback_failed=true
         fi
       elif [[ $HARDENING_WAS_PRESENT != "true" ]]; then
-        if /usr/bin/sudo rm -f "$HARDENING_CONFIG" >/dev/null 2>&1; then
+        if run_cleanup /usr/bin/sudo rm -f "$HARDENING_CONFIG" >/dev/null 2>&1; then
           config_restored=true
         else
           rollback_failed=true
@@ -214,8 +235,8 @@ rollback_setup() {
       # restored, validated administrator config. If it is no longer valid,
       # leave the already-running key-only policy in memory (fail secure).
       if [[ $SERVICE_WAS_ACTIVE == "true" && $config_restored == "true" ]]; then
-        if /usr/bin/sudo sshd -t >/dev/null 2>&1; then
-          /usr/bin/sudo systemctl reload sshd.service >/dev/null 2>&1 || rollback_failed=true
+        if run_cleanup /usr/bin/sudo sshd -t >/dev/null 2>&1; then
+          run_cleanup /usr/bin/sudo systemctl reload sshd.service >/dev/null 2>&1 || rollback_failed=true
         else
           rollback_failed=true
         fi
@@ -223,7 +244,7 @@ rollback_setup() {
     fi
     if [[ $HARDENING_TOUCHED != "true" && -n $HARDENING_BACKUP ]]; then
       # Interrupted between taking the backup and replacing the config.
-      /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || rollback_failed=true
+      run_cleanup /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || rollback_failed=true
       HARDENING_BACKUP=""
     fi
     if [[ $AUTHORIZED_KEYS_TOUCHED == "true" ]]; then
@@ -241,7 +262,7 @@ rollback_setup() {
       AUTHORIZED_KEYS_BACKUP=""
     fi
   elif [[ -n $HARDENING_BACKUP ]]; then
-    /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || {
+    run_cleanup /usr/bin/sudo rm -f "$HARDENING_BACKUP" >/dev/null 2>&1 || {
       echo "WARNING: SSH setup succeeded but could not remove $HARDENING_BACKUP" >&2
     }
   fi
@@ -255,7 +276,7 @@ rollback_setup() {
     ((exit_status != 0)) || exit_status=1
   fi
 
-  if ! /usr/bin/sudo -k >/dev/null 2>&1; then
+  if ! run_cleanup /usr/bin/sudo -k >/dev/null 2>&1; then
     echo "CRITICAL: SSH setup could not invalidate cached sudo authorization." >&2
     ((exit_status != 0)) || exit_status=1
   fi

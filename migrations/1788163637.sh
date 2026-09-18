@@ -22,12 +22,19 @@ if ((EUID == 0)); then
   /usr/bin/omarchy-migrate-sshd-key-only
 else
   cleanup_ssh_migration_sudo() {
-    local status=$?
+    local status=$? revoke revoke_status
     trap - EXIT
-    # A second signal must not interrupt the revocation; a handler rather than
-    # an ignored disposition keeps sudo itself interruptible.
-    trap ':' HUP INT TERM
-    /usr/bin/sudo -k >/dev/null 2>&1 || status=1
+    # A second signal must not interrupt the revocation. It is forwarded to
+    # the revoking sudo instead, which runs as a waited-on background child so
+    # a signal sent only to this shell still reaches it.
+    /usr/bin/sudo -k >/dev/null 2>&1 &
+    revoke=$!
+    trap 'kill -TERM "$revoke" 2>/dev/null || true' HUP INT TERM
+    while :; do
+      wait "$revoke" && revoke_status=0 || revoke_status=$?
+      kill -0 "$revoke" 2>/dev/null || break
+    done
+    (( revoke_status == 0 )) || status=1
     exit "$status"
   }
   # Traps first, so a failure or signal during the entry revocation still
