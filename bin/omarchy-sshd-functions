@@ -84,6 +84,40 @@ omarchy_sshd_key_line_accepted() {
 
   revoked=$(/usr/bin/awk 'tolower($1) == "revokedkeys" { print $2; exit }' <<<"$dump")
   if [[ -n $revoked && ${revoked,,} != none ]]; then
-    $runner /usr/bin/ssh-keygen -Q -f "$revoked" /dev/stdin <<<"$type $key" >/dev/null 2>&1 || return 1
+    omarchy_sshd_key_not_revoked "$revoked" "$type" "$key" "$runner" || return 1
   fi
+}
+
+# RevokedKeys is either an OpenSSH KRL or a text list of public keys; only the
+# KRL form is understood by ssh-keygen -Q. Any read or parse error fails closed.
+omarchy_sshd_key_not_revoked() {
+  local file=$1 type=$2 key=$3 runner=${4:-} magic listing line
+  local -a fields
+  magic=$($runner /usr/bin/head -c 6 -- "$file" 2>/dev/null) || return 1
+  if [[ $magic == SSHKRL ]]; then
+    $runner /usr/bin/ssh-keygen -Q -f "$file" /dev/stdin <<<"$type $key" >/dev/null 2>&1
+    return
+  fi
+  listing=$($runner /usr/bin/cat -- "$file" 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    read -r -a fields <<<"$line"
+    if omarchy_sshd_is_key_type "${fields[0]:-}"; then
+      [[ ${fields[0]} == "$type" && ${fields[1]:-} == "$key" ]] && return 1
+    else
+      [[ ${fields[1]:-} == "$type" && ${fields[2]:-} == "$key" ]] && return 1
+    fi
+  done <<<"$listing"
+  return 0
+}
+
+# An admitted account can still be refused outright by RefuseConnection, or
+# given a forced command instead of a login; neither proves administrative
+# access. OpenSSH releases without these keywords simply omit them.
+omarchy_sshd_policy_allows_login() {
+  local dump=$1 value
+  value=$(/usr/bin/awk 'tolower($1) == "refuseconnection" { print tolower($2); exit }' <<<"$dump")
+  [[ -z $value || $value == no ]] || return 1
+  value=$(/usr/bin/awk 'tolower($1) == "forcecommand" { print tolower($2); exit }' <<<"$dump")
+  [[ -z $value || $value == none ]]
 }

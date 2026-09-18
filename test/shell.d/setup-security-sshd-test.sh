@@ -59,7 +59,7 @@ cat >"$stub/sudo" <<'SH'
 set -euo pipefail
 echo "sudo $*" >>"$EVENTS"
 [[ ${1:-} != -k ]] || exit 0
-map() { [[ $1 == /etc/* ]] && printf '%s%s' "$FAKE_ROOT" "$1" || printf %s "$1"; }
+map() { [[ $1 == /etc/* || $1 == /var/* ]] && printf '%s%s' "$FAKE_ROOT" "$1" || printf %s "$1"; }
 case $1 in
 systemctl)
   a=$2
@@ -76,19 +76,19 @@ ufw)
   shift
   if [[ $1 == show ]]; then [[ ${UFW_QUERY_ERROR:-0} != 1 ]] || exit 1; [[ -e $STATE/rule && ${VERIFY_MISS:-0} != 1 ]] && echo "ufw limit 22/tcp comment 'omarchy-sshd'"; exit 0
   elif [[ $1 == limit ]]; then [[ ${LIMIT_PARTIAL:-0} != 1 ]] || { touch "$STATE/rule"; exit 1; }; [[ ${LIMIT_FAIL:-0} != 1 ]] || exit 1; touch "$STATE/rule"; [[ ${LIMIT_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"
-  elif [[ $1 == --force ]]; then [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
+  elif [[ $1 == --force ]]; then [[ ${DELETE_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID"; [[ ${DELETE_FAIL:-0} != 1 ]] || exit 1; rm -f "$STATE/rule"
   elif [[ $1 == reload ]]; then n=0; [[ ! -e $STATE/ufw-reloads ]] || read -r n <"$STATE/ufw-reloads"; n=$((n+1)); echo "$n" >"$STATE/ufw-reloads"; [[ ${UFW_RELOAD_ALWAYS_FAIL:-0} != 1 && (${UFW_RELOAD_ONCE:-0} != 1 || $n != 1) ]]
   fi ;;
 test) p=$(map "$3"); case $2 in -e) [[ -e $p ]] ;; -L) [[ -L $p ]] ;; -f) [[ -f $p ]] ;; esac ;;
 mktemp) p=$(map "$2"); mkdir -p "${p%/*}"; /usr/bin/mktemp "$p" ;;
 cp) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); /usr/bin/cp -a "$s" "$d"; [[ ${BACKUP_SIGNAL:-0} != 1 ]] || kill -TERM "$PPID" ;;
-install) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); mkdir -p "${d%/*}"; /usr/bin/install -m0644 "$s" "$d"; echo installed-hardening >>"$EVENTS" ;;
+install) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); mkdir -p "${d%/*}"; /usr/bin/install -m0644 "$s" "$d"; if [[ $d == *.conf ]]; then echo installed-hardening; else echo installed-marker; fi >>"$EVENTS" ;;
 /usr/bin/awk) x=("$@"); x[-1]=$(map "${x[-1]}"); exec "${x[@]}" ;;
 /usr/bin/find) x=("$@"); x[1]=$(map "${x[1]}"); exec "${x[@]}" ;;
 ssh-keygen) echo host-keygen >>"$EVENTS"; [[ ${HOSTKEY_FAIL:-0} != 1 ]] || exit 1; touch "$FAKE_ROOT/etc/ssh/ssh_host_key" ;;
 sshd)
   if [[ $2 == -t ]]; then echo sshd-t >>"$EVENTS"; [[ ${T_FAIL:-0} != 1 ]]
-  else echo sshd-T >>"$EVENTS"; [[ ${DUMP_FAIL:-0} != 1 ]] || exit 1; if [[ " $* " == *' -C '* ]]; then echo "PasswordAuthentication ${MATCH_PASS_AUTH:-${PASS_AUTH:-no}}"; echo "KbdInteractiveAuthentication ${MATCH_KBD_AUTH:-${KBD_AUTH:-no}}"; echo "AuthenticationMethods ${MATCH_AUTH_METHODS:-${AUTH_METHODS:-publickey}}"; echo "PubkeyAuthentication ${MATCH_PUBKEY_AUTH:-${PUBKEY_AUTH:-yes}}"; echo "AuthorizedKeysFile ${MATCH_KEYS_SETTING:-${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}}"; echo "PubkeyAcceptedAlgorithms ${ACCEPTED_ALGORITHMS:-ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256}"; echo "RequiredRSASize 1024"; [[ -z ${ALLOW_USERS:-} ]] || echo "AllowUsers $ALLOW_USERS"; [[ -z ${DENY_USERS:-} ]] || echo "DenyUsers $DENY_USERS"; [[ -z ${ALLOW_GROUPS:-} ]] || echo "AllowGroups $ALLOW_GROUPS"; [[ -z ${DENY_GROUPS:-} ]] || echo "DenyGroups $DENY_GROUPS"; else echo "PasswordAuthentication ${PASS_AUTH:-no}"; echo "KbdInteractiveAuthentication ${KBD_AUTH:-no}"; echo "AuthenticationMethods ${AUTH_METHODS:-publickey}"; echo "PubkeyAuthentication ${PUBKEY_AUTH:-yes}"; echo "AuthorizedKeysFile ${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}"; fi; fi ;;
+  else echo sshd-T >>"$EVENTS"; [[ ${DUMP_FAIL:-0} != 1 ]] || exit 1; if [[ " $* " == *' -C '* ]]; then echo "PasswordAuthentication ${MATCH_PASS_AUTH:-${PASS_AUTH:-no}}"; echo "KbdInteractiveAuthentication ${MATCH_KBD_AUTH:-${KBD_AUTH:-no}}"; echo "AuthenticationMethods ${MATCH_AUTH_METHODS:-${AUTH_METHODS:-publickey}}"; echo "PubkeyAuthentication ${MATCH_PUBKEY_AUTH:-${PUBKEY_AUTH:-yes}}"; echo "AuthorizedKeysFile ${MATCH_KEYS_SETTING:-${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}}"; echo "PubkeyAcceptedAlgorithms ${ACCEPTED_ALGORITHMS:-ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256}"; echo "RequiredRSASize 1024"; echo "RefuseConnection ${MATCH_REFUSE:-no}"; echo "ForceCommand ${MATCH_FORCE:-none}"; [[ -z ${ALLOW_USERS:-} ]] || echo "AllowUsers $ALLOW_USERS"; [[ -z ${DENY_USERS:-} ]] || echo "DenyUsers $DENY_USERS"; [[ -z ${ALLOW_GROUPS:-} ]] || echo "AllowGroups $ALLOW_GROUPS"; [[ -z ${DENY_GROUPS:-} ]] || echo "DenyGroups $DENY_GROUPS"; else echo "PasswordAuthentication ${PASS_AUTH:-no}"; echo "KbdInteractiveAuthentication ${KBD_AUTH:-no}"; echo "AuthenticationMethods ${AUTH_METHODS:-publickey}"; echo "PubkeyAuthentication ${PUBKEY_AUTH:-yes}"; echo "AuthorizedKeysFile ${AUTHORIZED_KEYS_SETTING:-.ssh/authorized_keys}"; fi; fi ;;
 mv) s=$(map "${*: -2:1}"); d=$(map "${*: -1}"); /usr/bin/mv -fT "$s" "$d" ;;
 rm) [[ ${CONFIG_RM_FAIL:-0} != 1 ]] || exit 1; /usr/bin/rm -f "$(map "${*: -1}")" ;;
 *) exec "$@" ;;
@@ -134,6 +134,7 @@ run() {
     MATCH_PASS_AUTH="${MATCH_PASS_AUTH:-}" MATCH_KBD_AUTH="${MATCH_KBD_AUTH:-}" MATCH_AUTH_METHODS="${MATCH_AUTH_METHODS:-}" MATCH_PUBKEY_AUTH="${MATCH_PUBKEY_AUTH:-}" MATCH_KEYS_SETTING="${MATCH_KEYS_SETTING:-}" \
     ALLOW_USERS="${ALLOW_USERS:-}" DENY_USERS="${DENY_USERS:-}" ALLOW_GROUPS="${ALLOW_GROUPS:-}" DENY_GROUPS="${DENY_GROUPS:-}" \
     ACCEPTED_ALGORITHMS="${ACCEPTED_ALGORITHMS:-}" UFW_QUERY_ERROR="${UFW_QUERY_ERROR:-0}" LIMIT_SIGNAL="${LIMIT_SIGNAL:-0}" BACKUP_SIGNAL="${BACKUP_SIGNAL:-0}" \
+    MATCH_REFUSE="${MATCH_REFUSE:-}" MATCH_FORCE="${MATCH_FORCE:-}" DELETE_SIGNAL="${DELETE_SIGNAL:-0}" \
     LIMIT_FAIL="${LIMIT_FAIL:-0}" LIMIT_PARTIAL="${LIMIT_PARTIAL:-0}" VERIFY_MISS="${VERIFY_MISS:-0}" UFW_RELOAD_ONCE="${UFW_RELOAD_ONCE:-0}" UFW_RELOAD_ALWAYS_FAIL="${UFW_RELOAD_ALWAYS_FAIL:-0}" DELETE_FAIL="${DELETE_FAIL:-0}" CONFIG_RM_FAIL="${CONFIG_RM_FAIL:-0}" \
     "$mapped_sshd" "$@"
 }
@@ -158,7 +159,10 @@ run fresh "--key=$key" >/dev/null
 prev=0
 for e in authorized-key installed-hardening host-keygen sshd-t sshd-T 'sudo systemctl start' 'sudo systemctl enable' 'sudo ufw limit'; do n=$(grep -nF "$e" "$tmp/fresh/events"|head -1|cut -d: -f1); [[ -n $n && $prev -lt $n ]] || fail "unsafe fresh order at $e"; prev=$n; done
 grep -qxF 'AuthenticationMethods publickey' "$tmp/fresh/root/etc/ssh/sshd_config.d/00-omarchy-key-only.conf"
-pass "fresh SSH is key-authorized and validated before publication"
+[[ -f $tmp/fresh/root/var/lib/omarchy/migrations/1788163637 ]] || fail "a published setup did not certify its conversion"
+n=$(grep -n 'installed-marker' "$tmp/fresh/events" | head -1 | cut -d: -f1); r=$(grep -n 'sudo ufw limit' "$tmp/fresh/events" | head -1 | cut -d: -f1)
+[[ -n $n && -n $r ]] && (( r < n )) || fail "the conversion was certified before it was published" "$(cat "$tmp/fresh/events")"
+pass "fresh SSH is key-authorized and validated before publication, and certified only after it"
 
 # Without the package the unit does not exist, so its state cannot be recorded
 # until openssh is installed; installing it first lets setup proceed.
@@ -181,7 +185,13 @@ pass "restricted key options are refused before any authorization or publication
 ACCEPTED_ALGORITHMS=ecdsa-sha2-nistp256,rsa-sha2-512
 if run algorithm "--key=$key" >/dev/null 2>&1; then fail "a key whose algorithm sshd refuses was published"; fi
 no_publish algorithm; rolled_back algorithm; unset ACCEPTED_ALGORITHMS
-pass "setup refuses a key the account's effective policy would not accept"
+[[ ! -e $tmp/algorithm/root/var/lib/omarchy/migrations/1788163637 ]] || fail "a failed setup certified a conversion"
+for c in refuse force; do
+  if [[ $c == refuse ]]; then MATCH_REFUSE=yes; else MATCH_FORCE=/usr/bin/false; fi
+  if run "login-$c" "--key=$key" >/dev/null 2>&1; then fail "setup published for an account sshd would $c"; fi
+  no_publish "login-$c"; rolled_back "login-$c"; unset MATCH_REFUSE MATCH_FORCE
+done
+pass "setup refuses a key the account's effective policy would not accept, refuse, or force"
 
 # An unanswered UFW query must not read as "no rule": rollback would then
 # delete the administrator's existing rule.
@@ -200,7 +210,13 @@ if run "$name" "--key=$key" >/dev/null 2>&1; then fail "setup interrupted after 
 ! compgen -G "$tmp/$name/root/etc/ssh/sshd_config.d/.00-omarchy-key-only.backup.*" >/dev/null || fail "an interrupted setup left its config backup behind"
 [[ $(<"$cfg") == ADMIN ]] || fail "an interrupted setup changed the existing config"
 unset BACKUP_SIGNAL
-pass "firewall query errors and signals during firewall or backup changes roll back cleanly"
+# A second signal arriving while rollback runs must not abort it.
+UFW_RELOAD_ONCE=1 DELETE_SIGNAL=1
+if run rollback-signal "--key=$key" >/dev/null 2>&1; then fail "a failed setup reported success"; fi
+rolled_back rollback-signal
+[[ $(tail -n1 "$tmp/rollback-signal/events") == 'sudo -k' ]] || fail "a signal during rollback skipped the final revocation" "$(tail -n3 "$tmp/rollback-signal/events")"
+unset UFW_RELOAD_ONCE DELETE_SIGNAL
+pass "firewall query errors and signals during firewall, backup or rollback changes roll back cleanly"
 
 for c in hostkey syntax dump pass kbd methods pubkey keysfile matched; do case $c in hostkey) HOSTKEY_FAIL=1;; syntax) T_FAIL=1;; dump) DUMP_FAIL=1;; pass) PASS_AUTH=yes;; kbd) KBD_AUTH=yes;; methods) AUTH_METHODS=any;; pubkey) PUBKEY_AUTH=no;; keysfile) AUTHORIZED_KEYS_SETTING=/etc/ssh/admin_keys;; matched) MATCH_PASS_AUTH=yes;; esac; if run "$c" "--key=$key" >/dev/null 2>&1; then fail "$c succeeds"; fi; no_publish "$c"; rolled_back "$c"; unset HOSTKEY_FAIL T_FAIL DUMP_FAIL PASS_AUTH KBD_AUTH AUTH_METHODS PUBKEY_AUTH AUTHORIZED_KEYS_SETTING MATCH_PASS_AUTH; done
 pass "host-key, syntax, and effective-policy failures are pre-publication"

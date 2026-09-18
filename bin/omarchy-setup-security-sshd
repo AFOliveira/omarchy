@@ -92,6 +92,7 @@ SERVICE_ENABLED=false
 FIREWALL_RULE_WAS_PRESENT=false
 FIREWALL_RULE_ADDED=false
 HARDENING_CONFIG=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf
+COMPLETION_MARKER=/var/lib/omarchy/migrations/1788163637
 HARDENING_BACKUP=""
 HARDENING_WAS_PRESENT=false
 HARDENING_TOUCHED=false
@@ -161,6 +162,8 @@ rollback_setup() {
   local exit_status=$?
   local rollback_failed=false config_restored=false
   trap - EXIT
+  # A second signal must not abort restoration or the final revocation.
+  trap '' HUP INT TERM
 
   [[ -z $AUTHORIZED_KEYS_TEMP ]] || /usr/bin/rm -f -- "$AUTHORIZED_KEYS_TEMP"
 
@@ -567,6 +570,10 @@ CONF
     echo -e "\e[31msshd did not apply the password-authentication restrictions; removing the ineffective config.\e[0m" >&2
     return 1
   fi
+  if ! omarchy_sshd_policy_allows_login "$matched_config"; then
+    echo -e "\e[31msshd refuses or forces a command for $account_name; removing the config.\e[0m" >&2
+    return 1
+  fi
   if ! collected_key_accepted "$matched_config"; then
     echo -e "\e[31msshd would not accept any of the collected keys for $account_name (key algorithm, RSA size, or revocation); removing the config.\e[0m" >&2
     return 1
@@ -631,6 +638,8 @@ record_existing_state
 disable_password_auth
 publish_sshd
 open_firewall
+# Certify the conversion for the SSH migrations only once it is published.
+/usr/bin/sudo install -D -o root -g root -m 0644 /dev/null "$COMPLETION_MARKER"
 
 SETUP_COMPLETE=true
 

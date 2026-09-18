@@ -31,6 +31,7 @@ dropin_dir=/etc/ssh/sshd_config.d
 passwd_file=/etc/passwd
 login_defs=/etc/login.defs
 machine_lock=/run/omarchy-sshd-key-only-migration.lock
+completion_marker=/var/lib/omarchy/migrations/1788163637
 eligible_names=()
 keyed_names=()
 declare -A keyed_homes=()
@@ -249,7 +250,7 @@ effective_is_key_only() {
     dump=$(/usr/bin/sshd -T -C "user=$name,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22") || return 1
     dump_is_key_only "$dump" || return 1
     for keyed in "${keyed_names[@]}"; do
-      if [[ $keyed == "$name" ]] && account_is_admitted "$name" "$dump" &&
+      if [[ $keyed == "$name" ]] && account_is_admitted "$name" "$dump" && omarchy_sshd_policy_allows_login "$dump" &&
         account_has_accepted_key "${keyed_homes[$name]}" "$dump"; then admitted_key=1; fi
     done
   done
@@ -311,3 +312,7 @@ fi
 if legacy_is_omarchy_managed; then
   /usr/bin/rm -f -- "$legacy_config"
 fi
+# Only a validated, loaded conversion certifies completion. The key-only file
+# alone does not: setup installs it before validating it, so an interrupted
+# setup can leave one behind.
+/usr/bin/install -D -o root -g root -m 0644 /dev/null "$completion_marker"
