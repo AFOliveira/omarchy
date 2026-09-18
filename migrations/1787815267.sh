@@ -34,11 +34,15 @@ unit_active() {
   return 2
 }
 
+# systemctl is-enabled exits 0 for static, indirect, generated, transient and
+# alias units as well, so the state, not the status, says whether it is enabled.
 unit_enabled() {
-  local state status
-  state=$(/usr/bin/systemctl is-enabled "$1" 2>/dev/null) && status=0 || status=$?
-  if (( status == 0 )); then return 0; fi
-  case $state in disabled|masked|masked-runtime|static|indirect|generated|transient|alias|linked|linked-runtime) return 1 ;; esac
+  local state
+  state=$(/usr/bin/systemctl is-enabled "$1" 2>/dev/null) || true
+  case $state in
+    enabled|enabled-runtime) return 0 ;;
+    disabled|masked|masked-runtime|static|indirect|generated|transient|alias|linked|linked-runtime|not-found) return 1 ;;
+  esac
   echo "Could not inspect whether $1 is enabled; leaving CUPS hardening pending." >&2
   return 2
 }

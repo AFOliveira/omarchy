@@ -138,6 +138,14 @@ for layout in missing unrelated; do
   T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
   [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 $layout drop-in published completion without a rebuild"
 done
+# Commented-out parameters are not configured: no rebuild, no marker, and a
+# commented old parameter is not rewritten.
+for commented in '# options=pm_async=off mem_sleep_default=deep' '#options=pcie_ports=compat'; do
+  rm -f "$tmp/t2.marker"; : >"$tmp/t2.log"; printf '%s\noptions=quiet\n' "$commented" >"$tmp/t2.conf"
+  T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
+  [[ ! -e $tmp/t2.marker && ! -s $tmp/t2.log ]] || fail "T2 treated a commented parameter as configured: $commented"
+  grep -qxF "$commented" "$tmp/t2.conf" || fail "T2 rewrote a commented parameter: $commented"
+done
 printf 'options=pm_async=off mem_sleep_default=deep\n' >"$tmp/t2.conf"
 T2_PRESENT=1 T2_LOG="$tmp/t2.log" root_run "$t2_body" --machine
 [[ -e $tmp/t2.marker && $(grep -c '^rebuild$' "$tmp/t2.log") == 1 ]] || fail "T2 parameters configured later were not rebuilt"
@@ -217,7 +225,10 @@ SH
 cat >"$cups_bin/systemctl" <<'SH'
 #!/bin/bash
 [[ $1 == is-active ]] && exit 3
-[[ $1 == is-enabled ]] && { echo disabled; exit 1; }
+if [[ $1 == is-enabled ]]; then
+  case ${CUPS_BROWSED_STATE:-disabled} in disabled) echo disabled; exit 1 ;; *) echo "$CUPS_BROWSED_STATE"; exit 0 ;; esac
+fi
+[[ -z ${CUPS_LOG:-} ]] || echo "systemctl $*" >>"$CUPS_LOG"
 [[ ${CUPS_MUTATE_FAIL:-0} == 0 ]] || exit 23
 exit 0
 SH
@@ -230,6 +241,17 @@ if NSS_ENUM_STATUS=0 CUPS_MUTATE_FAIL=1 root_run "$cups_body" --machine; then fa
 NSS_ENUM_STATUS=0 root_run "$cups_body" --machine
 [[ -e $tmp/cups.marker ]] || fail "CUPS NSS enumeration failure is not retryable"
 NSS_ENUM_STATUS=8 root_run "$cups_body" --machine
+# systemctl is-enabled exits 0 for static and similar units too; only an
+# enabled cups-browsed may be restarted.
+for state in static indirect alias enabled; do
+  rm -f "$tmp/cups.marker"; : >"$tmp/cups.log"
+  CUPS_BROWSED_STATE=$state CUPS_LOG="$tmp/cups.log" root_run "$cups_body" --machine
+  if [[ $state == enabled ]]; then
+    grep -qx 'systemctl restart cups-browsed.service' "$tmp/cups.log" || fail "an enabled cups-browsed was not restarted"
+  elif grep -q 'restart cups-browsed.service' "$tmp/cups.log"; then
+    fail "a $state cups-browsed was restarted as if it were enabled"
+  fi
+done
 pass "CUPS NSS and service mutation failures remain pending, retry successfully, and replay without querying NSS"
 
 for transformed in "$fido_body" "$bt_body" "$t2_body" "$cups_body"; do

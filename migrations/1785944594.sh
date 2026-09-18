@@ -16,8 +16,21 @@ tiny_dfr_installed() {
   [[ $'\n'$packages$'\n' == *$'\ntiny-dfr\n'* ]]
 }
 
+# Only active lines count: a commented-out parameter is not configured.
+limine_active_lines() {
+  /usr/bin/grep -v '^[[:space:]]*#' "$limine_conf" || (( $? == 1 ))
+}
+
 limine_has_new_parameters() {
-  /usr/bin/grep -q 'pm_async=off' "$limine_conf" && /usr/bin/grep -q 'mem_sleep_default=deep' "$limine_conf"
+  local active
+  active=$(limine_active_lines) || return 1
+  [[ $active == *pm_async=off* && $active == *mem_sleep_default=deep* ]]
+}
+
+limine_has_old_parameter() {
+  local active
+  active=$(limine_active_lines) || return 1
+  [[ $active == *pcie_ports=compat* ]]
 }
 
 # Decide without privileges whether any repair remains, so a later account
@@ -35,7 +48,7 @@ needs_machine_repair() {
   if [[ -e $limine_conf && ! -r $limine_conf ]] || [[ -e $fan_conf && ! -r $fan_conf ]]; then
     return 0
   fi
-  if [[ -f $limine_conf ]] && /usr/bin/grep -q 'pcie_ports=compat' "$limine_conf"; then return 0; fi
+  if [[ -f $limine_conf ]] && limine_has_old_parameter; then return 0; fi
   if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then return 0; fi
   if tiny_dfr_installed; then
     return 0
@@ -60,8 +73,8 @@ repair_machine() {
     echo "Could not inspect T2 hardware or packages; leaving the repair pending." >&2
     return 1
   fi
-  if [[ -f $limine_conf ]] && /usr/bin/grep -q 'pcie_ports=compat' "$limine_conf"; then
-    /usr/bin/sed -i 's/pcie_ports=compat/pm_async=off mem_sleep_default=deep/' "$limine_conf" || return 1
+  if [[ -f $limine_conf ]] && limine_has_old_parameter; then
+    /usr/bin/sed -i '/^[[:space:]]*#/!s/pcie_ports=compat/pm_async=off mem_sleep_default=deep/' "$limine_conf" || return 1
     rebuild=1
   fi
   if [[ -f $fan_conf ]] && ! /usr/bin/grep -Eq '^[[:space:]]*\[Fan2\][[:space:]]*$' "$fan_conf"; then
