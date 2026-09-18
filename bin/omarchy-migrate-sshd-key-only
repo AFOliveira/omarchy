@@ -51,6 +51,7 @@ passwd_file=$root_prefix/etc/passwd
 login_defs=$root_prefix/etc/login.defs
 marker_dir=$root_prefix/var/lib/omarchy/migrations
 completion_marker=$marker_dir/1788163637
+start_guard=$root_prefix/etc/systemd/system/sshd.service.d/50-omarchy-disabling.conf
 machine_lock=/run/omarchy-sshd-key-only-migration.lock
 eligible_names=()
 keyed_names=()
@@ -101,13 +102,24 @@ service_enabled_state() {
 }
 
 # systemctl disable ignores a masked unit and still succeeds, so a runtime
-# mask must be lifted for the disable. While it is lifted, a key-only guard
-# keeps a daemon that starts, even after SIGKILL and a reboot, from taking
-# passwords; the mask is put back on every catchable exit, retried if that
-# fails, and a further signal during that restore is held.
+# mask must be lifted for the disable. While it is lifted, a systemd drop-in
+# that fails every start keeps sshd from running, even after SIGKILL and a
+# reboot, whatever its own configuration says; the next successful disable,
+# or setup, removes one left behind. The mask is put back on every catchable
+# exit, retried if that fails, and a further signal during that restore is
+# held.
 runtime_mask_lifted=false
 runtime_mask_cleaning=false
-runtime_mask_guard=false
+
+install_start_guard() {
+  printf '%s\n' "# Written by Omarchy while disabling sshd; removed once that finishes." "[Service]" "ExecStartPre=/usr/bin/false" |
+    /usr/bin/install -DT -o root -g root -m 0644 /dev/stdin "$start_guard" && /usr/bin/systemctl daemon-reload
+}
+
+remove_start_guard() {
+  [[ -e $start_guard || -L $start_guard ]] || return 0
+  /usr/bin/rm -f -- "$start_guard" && /usr/bin/systemctl daemon-reload
+}
 restore_runtime_mask() {
   local status=$?
   runtime_mask_cleaning=true
@@ -115,7 +127,7 @@ restore_runtime_mask() {
     if /usr/bin/systemctl mask --runtime sshd.service >/dev/null 2>&1; then
       runtime_mask_lifted=false
     else
-      echo "CRITICAL: could not restore the runtime mask on sshd.service; the key-only guard at $key_only_config stays." >&2
+      echo "CRITICAL: could not restore the runtime mask on sshd.service; $start_guard keeps it from starting." >&2
       (( status != 0 )) || status=1
     fi
   fi
@@ -142,11 +154,10 @@ disable_affected() {
     trap 'hold_runtime_mask_signal 129' HUP
     trap 'hold_runtime_mask_signal 130' INT
     trap 'hold_runtime_mask_signal 143' TERM
-    if [[ ! -e $key_only_config && ! -L $key_only_config ]]; then
-      { echo "# Written by Omarchy while disabling sshd; no account has a usable key."; key_only_policy; } |
-        /usr/bin/install -DT -o root -g root -m 0644 /dev/stdin "$key_only_config" || exit 1
-      runtime_mask_guard=true
-    fi
+    install_start_guard || {
+      echo "Could not install the start guard for sshd.service; refusing to lift its runtime mask." >&2
+      exit 1
+    }
     runtime_mask_lifted=true
     /usr/bin/systemctl unmask --runtime sshd.service || {
       echo "Could not lift the runtime mask on sshd.service to disable it; rerun omarchy-migrate with administrator privileges." >&2
@@ -167,11 +178,8 @@ disable_affected() {
     /usr/bin/systemctl mask --runtime sshd.service || exit 1
     runtime_mask_lifted=false
     trap - EXIT HUP INT TERM
-    if [[ $runtime_mask_guard == "true" ]]; then
-      /usr/bin/rm -f -- "$key_only_config" ||
-        echo "WARNING: could not remove the key-only guard at $key_only_config" >&2
-    fi
   fi
+  remove_start_guard || echo "WARNING: could not remove $start_guard; sshd cannot start until it is removed." >&2
   echo "Disabled sshd because a machine account with usable key-only access could not be proven. Run omarchy-setup-security-sshd to repair it."
 }
 
@@ -901,6 +909,8 @@ setup_machine() {
   # The account can change its own files at any time; check again right
   # before publishing that the keys proven above are still there.
   account_authorized_keys_hold
+  # A start guard left by an interrupted disable would fail the start below.
+  remove_start_guard
   publish_sshd
   open_firewall
   commit_setup_machine
