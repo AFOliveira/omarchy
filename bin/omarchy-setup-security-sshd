@@ -12,6 +12,7 @@ fi
 
 security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
 source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+source "${security_entrypoint%/*}/omarchy-sshd-functions" || exit 126
 omarchy_security_require_privileged_bash_startup || {
   echo "Refusing an unsafe Bash startup for SSH setup." >&2
   exit 126
@@ -140,7 +141,7 @@ sshd_enabled_state() {
   state=$(/usr/bin/sudo systemctl is-enabled sshd.service 2>/dev/null) || true
   case "$state" in
     enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient) return 0 ;;
-    disabled | masked | masked-runtime) return 1 ;;
+    disabled | masked | masked-runtime | not-found) return 1 ;;
     *) return 2 ;;
   esac
 }
@@ -254,7 +255,8 @@ open_firewall() {
 }
 
 valid_key() {
-  [[ $1 != *$'\n'* ]] && /usr/bin/ssh-keygen -lf /dev/stdin <<<"$1" >/dev/null 2>&1
+  [[ $1 != *$'\n'* ]] && omarchy_sshd_key_line_permits_login "$1" &&
+    /usr/bin/ssh-keygen -lf /dev/stdin <<<"$1" >/dev/null 2>&1
 }
 
 account_home_accepts_authorized_keys() {
@@ -283,7 +285,7 @@ collect_key() {
   local key="$1"
 
   if ! valid_key "$key"; then
-    echo -e "\e[31mNot a valid SSH public key: $key\e[0m" >&2
+    echo -e "\e[31mNot a usable SSH public key (options that restrict or redirect the login are refused): $key\e[0m" >&2
     return 1
   fi
 
@@ -591,8 +593,10 @@ authorize_collected_keys
 # input have already been validated, so the reusable credential needed for the
 # multi-command rollback-capable system transaction cannot be handed to a
 # downloaded tool, prompt helper, or detached child from this workflow.
-record_existing_state
+# Install first: without the package the unit does not exist yet, and its
+# state could not be recorded. Installing openssh neither enables nor starts it.
 setup_sshd_package
+record_existing_state
 disable_password_auth
 publish_sshd
 open_firewall

@@ -79,11 +79,15 @@ run_migration() {
   if [[ ${ALREADY_HARDENED:-0} == 1 ]]; then
     printf 'PasswordAuthentication no\n' >"$config"
   fi
+  if [[ ${KEY_ONLY_PRESENT:-0} == 1 ]]; then
+    printf 'PasswordAuthentication no\n' >"${config%/*}/00-omarchy-key-only.conf"
+  fi
 
   # Keep the privileged production destination fixed in the shipped migration.
   # For this isolated test only, rewrite that one assignment in the input fed to
   # bash so no scenario can touch the host's /etc.
-  sed "s|^config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf$|config=$config|" "$migration" |
+  sed -e "s|^config=/etc/ssh/sshd_config.d/10-omarchy-hardening.conf$|config=$config|" \
+    -e "s|^key_only_config=/etc/ssh/sshd_config.d/00-omarchy-key-only.conf$|key_only_config=${config%/*}/00-omarchy-key-only.conf|" "$migration" |
     HOME="$home" CALL_LOG="$test_dir/$scenario.calls" PATH="$stub_bin:$PATH" \
       SSHD_ENABLED="${SSHD_ENABLED:-0}" SSHD_ACTIVE="${SSHD_ACTIVE:-0}" \
       SSHD_SYNTAX_VALID="${SSHD_SYNTAX_VALID:-1}" \
@@ -109,6 +113,13 @@ ALREADY_HARDENED=1 SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration hardened >/dev/nul
 grep -qxF "PasswordAuthentication no" "$test_dir/hardened/root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" ||
   fail "the existing hardening config is left alone"
 pass "SSH migration no-ops when the hardening config already exists"
+
+# A second account can still have this migration pending after the first one
+# converted the machine to the key-only config and removed the file above. It
+# must treat that as complete rather than disabling sshd for a keyless account.
+KEY_ONLY_PRESENT=1 AUTHORIZED_KEY_STATE=missing SSHD_ENABLED=1 SSHD_ACTIVE=1 run_migration converted >/dev/null
+[[ ! -s $test_dir/converted.calls ]] || fail "a machine converted to key-only must not be touched by the older migration" "$(cat "$test_dir/converted.calls")"
+pass "SSH migration no-ops when the key-only config already exists"
 
 # Without a usable key, sshd only accepts password logins — the hole the old
 # setup command could leave open. The migration closes it by disabling sshd.

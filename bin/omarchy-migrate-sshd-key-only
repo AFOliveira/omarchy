@@ -10,6 +10,7 @@ fi
 
 security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
 source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+source "${security_entrypoint%/*}/omarchy-sshd-functions" || exit 126
 omarchy_security_require_privileged_bash_startup || exit 126
 set -euo pipefail
 omarchy_security_sanitize_bash_environment "$0" "$@" || exit 126
@@ -64,7 +65,8 @@ service_enabled_state() {
   state=$(/usr/bin/systemctl is-enabled sshd.service 2>/dev/null) || true
   case "$state" in
     enabled | enabled-runtime | linked | linked-runtime | alias | static | indirect | generated | transient) return 0 ;;
-    disabled | masked | masked-runtime) return 1 ;;
+    # A missing unit, for example after openssh was removed, is not enabled.
+    disabled | masked | masked-runtime | not-found) return 1 ;;
     *) return 2 ;;
   esac
 }
@@ -118,6 +120,7 @@ account_has_usable_key() {
   ! ((8#$home_mode & 022)) && ! ((8#$ssh_mode & 022)) && ! ((8#$key_mode & 022)) || return 1
   while IFS= read -r line || [[ -n $line ]]; do
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    omarchy_sshd_key_line_permits_login "$line" || continue
     /usr/bin/ssh-keygen -lf /dev/stdin <<<"$line" >/dev/null 2>&1 && return 0
   done <"$authorized_keys"
   return 1
@@ -180,12 +183,16 @@ enumerate_login_accounts() {
   [[ -z $configured_uid_min ]] || uid_min=$configured_uid_min
 
   while IFS= read -r line || [[ -n $line ]]; do
+    [[ -n $line ]] || continue
     IFS=: read -r name password uid gid gecos home shell extra <<<"$line"
-    [[ -z ${extra:-} && $uid =~ ^[0-9]+$ &&
-      $home == /* ]] || return 1
-    valid_account_name "$name" || return 1
+    # The UID and shell decide whether an entry matters, so they must parse.
+    [[ -z ${extra:-} && $uid =~ ^[0-9]+$ ]] || return 1
     (( uid == 0 || (uid >= uid_min && uid != 65534) )) || continue
     valid_login_shell "$shell" || continue
+    # Only login accounts reach sshd -T -C, so only they need names and homes
+    # it can be asked about; a system entry must not shut SSH down.
+    [[ $home == /* ]] || return 1
+    valid_account_name "$name" || return 1
     eligible_names+=("$name")
     if account_has_usable_key "$name" "$uid" "$home"; then
       keyed_names+=("$name")
