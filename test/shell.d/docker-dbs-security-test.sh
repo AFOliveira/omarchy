@@ -354,6 +354,31 @@ if main Unknown >/dev/null 2>&1; then fail "unknown database choice is accepted"
 [[ ! -e $TEST_ACCOUNT_HOME/.config/omarchy/docker-dbs ]] || fail "invalid database choice creates credential state"
 pass "database choice dispatch is single-value and allowlisted"
 
+# Run the real startup gate in isolation, ending before any sudo or Docker
+# operation even if a regression lets an unsafe interpreter through.
+startup_probe="$test_dir/startup-probe"
+sed -n '1,/^# OMARCHY_DOCKER_DBS_IMPLEMENTATION$/p' \
+  "$ROOT/bin/omarchy-install-docker-dbs" >"$startup_probe"
+printf '\nprintf "startup accepted\\n"\n' >>"$startup_probe"
+chmod +x "$startup_probe"
+[[ $("$startup_probe") == "startup accepted" ]] || fail "database shebang startup was refused"
+for interpreter in /bin/bash /usr/bin/bash; do
+  [[ $("$interpreter" -p "$startup_probe") == "startup accepted" ]] ||
+    fail "database privileged startup was refused: $interpreter"
+done
+
+assert_startup_refused() {
+  local status=0
+  "$@" >"$test_dir/startup.output" 2>&1 || status=$?
+  (( status == 126 )) || fail "database startup gate accepted an invalid interpreter" "$(<"$test_dir/startup.output")"
+  grep -q 'Refusing an unsafe Bash startup' "$test_dir/startup.output" ||
+    fail "database startup did not fail at the interpreter gate"
+}
+assert_startup_refused /usr/bin/bash -c 'exec -a not-bash /usr/bin/bash -p "$1"' _ "$startup_probe"
+cp /usr/bin/bash "$test_dir/bash-copy"
+assert_startup_refused /usr/bin/bash -c 'exec -a /usr/bin/bash "$1" -p "$2"' _ "$test_dir/bash-copy" "$startup_probe"
+pass "database startup requires the canonical executable, argv0 and privileged option"
+
 # The executable entry must suppress BASH_ENV before it can spawn a waiter for
 # the later Docker authorization. A decoy -p after the script path is not an
 # interpreter option and must not satisfy the gate.
@@ -365,11 +390,13 @@ unset BASH_ENV
 set -o privileged
 set -- MySQL
 STUB
-if BASH_ENV="$startup_bash_env" TEST_DOCKER_BASH_ENV_RAN="$startup_marker" \
-  /usr/bin/bash "$ROOT/bin/omarchy-install-docker-dbs" -p >/dev/null 2>&1; then
-  fail "database installer accepted a decoy post-script -p"
-fi
+BASH_ENV="$startup_bash_env" TEST_DOCKER_BASH_ENV_RAN="$startup_marker" \
+  assert_startup_refused /usr/bin/bash "$startup_probe" -p
 [[ -e $startup_marker ]] || fail "database startup-injection precondition was not exercised"
+rm -f "$startup_marker"
+BASH_ENV="$startup_bash_env" TEST_DOCKER_BASH_ENV_RAN="$startup_marker" \
+  "$startup_probe" >/dev/null || fail "database shebang failed with an inherited BASH_ENV"
+[[ ! -e $startup_marker ]] || fail "database privileged startup executed BASH_ENV"
 pass "database installer rejects startup injection before opening sudo"
 
 # Threat-model regression: where subordinate-id user namespaces are available,
@@ -383,6 +410,7 @@ output=$(mktemp)
 setpriv --reuid=1000 --regid=1000 --clear-groups python -u -c '
 import os, socket
 s = socket.socket()
+s.settimeout(5)
 s.bind(("127.0.0.1", 0))
 s.listen(1)
 print(s.getsockname()[1], flush=True)
@@ -391,6 +419,7 @@ c.sendall(str(os.getuid()).encode())
 c.close()
 ' >"$output" &
 server=$!
+trap 'wait "$server" 2>/dev/null || true; rm -f -- "$output"' EXIT
 for _ in {1..200}; do
   [[ -s $output ]] && break
   kill -0 "$server" 2>/dev/null || exit 2
@@ -399,15 +428,19 @@ done
 read -r port <"$output"
 reply=$(setpriv --reuid=1001 --regid=1001 --clear-groups python -c '
 import socket, sys
-s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
 print(s.recv(64).decode())
 ' "$port")
 wait "$server"
 [[ $reply == 1000 ]]
 PROBE
 chmod +x "$cross_uid_probe"
-if unshare --user --map-auto --map-root-user true 2>/dev/null &&
-  unshare --user --map-auto --map-root-user "$cross_uid_probe" 2>/dev/null; then
+namespace=(unshare --user --map-auto --map-root-user --setgroups allow)
+if "${namespace[@]}" /bin/bash -ec '
+  setpriv --reuid=1000 --regid=1000 --clear-groups true
+  setpriv --reuid=1001 --regid=1001 --clear-groups true
+' 2>/dev/null; then
+  "${namespace[@]}" "$cross_uid_probe" || fail "cross-UID loopback probe failed in an available namespace"
   pass "distinct local UIDs share loopback, so database authentication remains mandatory"
 else
   pass "subordinate-id namespace unavailable; skipping cross-UID loopback runtime probe"

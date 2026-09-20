@@ -14,9 +14,9 @@ require_privileged_bash_startup() {
     [[ $1 =~ ^[1-9][0-9]*$ ]] || exit 1
     mapfile -d "" -t argv <"/proc/$1/cmdline" || exit 1
     executable=$(/usr/bin/readlink -e -- "/proc/$1/exe") || exit 1
-    [[ $executable == /usr/bin/bash ]]
-    [[ ${argv[0]:-} == /bin/bash || ${argv[0]:-} == /usr/bin/bash ]]
-    [[ ${argv[1]:-} == -p ]]
+    [[ $executable == "/usr/bin/bash" &&
+      ( ${argv[0]:-} == "/bin/bash" || ${argv[0]:-} == "/usr/bin/bash" ) &&
+      ${argv[1]:-} == "-p" ]]
   ' omarchy-bash-startup "$$"
 }
 require_privileged_bash_startup || {
