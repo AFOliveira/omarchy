@@ -116,6 +116,12 @@ case "$step" in
   yay)
     [[ $* == *"--sudo $OMARCHY_PATH/default/omarchy/sudo-no-update/sudo"* ]] || exit 92
     [[ $* == *"--sudoloop=false"* ]] || exit 93
+    sudoflags_cleared=0; previous=""
+    for arg in "$@"; do [[ $previous != --sudoflags || -n $arg ]] || sudoflags_cleared=1; previous=$arg; done
+    (( sudoflags_cleared )) || exit 94
+    # The fixture maps /usr/bin/pacman to its mock in every copied command.
+    [[ $* == *"--pacman /usr/bin/pacman"* || $* == *"--pacman $OMARCHY_PATH/mock/pacman"* ]] || exit 95
+    [[ $* == *"--config /etc/pacman.conf"* ]] || exit 95
     ;;
 esac
 STUB
