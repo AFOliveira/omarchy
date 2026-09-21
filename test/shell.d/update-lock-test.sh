@@ -279,6 +279,37 @@ OMARCHY_UPDATE_LOGGED=1 EXPECT_STAY_AWAKE=1 run_with_lock_env "$SUDO_TEST_ROOT/b
 [[ -f $test_home/.local/state/omarchy/indicators/stay-awake ]] || fail "update preserves pre-existing Stay Awake state"
 pass "omarchy-update restores only its own Stay Awake state before restart handling"
 
+# Model package replacement while the existing updater is still running:
+# start writes the old two-field state; the transaction installs the real new
+# helper, whose stop must clean that state before reboot handling.
+cp "$stub_bin/omarchy-update-stay-awake" "$test_tmp/inhibitor-after-upgrade"
+write_stub omarchy-update-stay-awake '
+set -e
+[[ $1 == "start" ]]
+umask 022
+state="$XDG_RUNTIME_DIR/$LEGACY_STATE_NAME"
+mkdir -p "$state" "$SUDO_TEST_HOME/.local/state/omarchy/indicators"
+( exec {OMARCHY_UPDATE_LOCK_FD}>&-; exec sleep infinity ) &
+pid=$!
+printf "%s %s\n" "$pid" "$(awk '\''{ print $22 }'\'' /proc/$pid/stat)" >"$state/inhibit-pid"
+printf "%s:1:1\n" "$$" >"$state/idle-owner"
+/usr/bin/cp "$state/idle-owner" "$SUDO_TEST_HOME/.local/state/omarchy/indicators/stay-awake"'
+write_stub omarchy-update-system-pkgs '
+/usr/bin/cp "$INHIBITOR_AFTER_UPGRADE" "$OMARCHY_PATH/bin/omarchy-update-stay-awake"'
+write_stub omarchy-update-restart '
+if [[ $1 == "--reboot-only" ]]; then
+  [[ ! -e $SUDO_TEST_HOME/.local/state/omarchy/indicators/stay-awake ]] || exit 91
+  [[ ! -e $XDG_RUNTIME_DIR/$LEGACY_STATE_NAME ]] || exit 92
+  touch "$UPGRADE_RESTARTED"
+fi'
+rm -f "$test_home/.local/state/omarchy/indicators/stay-awake"
+OMARCHY_UPDATE_LOGGED=1 LEGACY_STATE_NAME="$stay_awake_dir_name" \
+  INHIBITOR_AFTER_UPGRADE="$test_tmp/inhibitor-after-upgrade" \
+  UPGRADE_RESTARTED="$test_tmp/upgrade-restarted" \
+  run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update" -y
+[[ -e $test_tmp/upgrade-restarted ]] || fail "first upgrade did not reach reboot handling"
+pass "first upgrade cleans old inhibitor state with the newly installed helper"
+
 # Stale cleanup state from a killed update must not override a Stay Awake choice
 # the user made afterward.
 stay_awake_helper_state="$runtime_dir/$stay_awake_dir_name"
@@ -295,7 +326,7 @@ run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
 pass "stale update ownership preserves a newer Stay Awake choice"
 
 # A stale PID is safe even if it has been reused by another process.
-sleep 30 &
+sleep 30 >/dev/null &
 unrelated_pid=$!
 unrelated_start_time=$(awk '{ print $22 }' "/proc/$unrelated_pid/stat")
 mkdir -m 700 -p "$stay_awake_helper_state"

@@ -38,12 +38,12 @@ Omarchy fires hooks at a handful of moments, and you can hang your own scripts o
 | ----- | ------------ |
 | `post-boot` | Right after the desktop has started |
 | `post-update` | Near the end of `omarchy update`, after packages, migrations, and service restarts, before mise tools are updated |
-| `pre-refresh-pacman` | After `omarchy refresh pacman` re-syncs the package config and finishes updating packages; during a channel switch, after the package switch and complete update finish |
+| `pre-refresh-pacman` | After `omarchy refresh pacman` re-syncs the package config, before it updates packages; a channel switch runs it during that same refresh step |
 | `theme-set` | After a theme change (theme name in `$1`) |
 | `font-set` | After a font change (font name in `$1`) |
 | `battery-low` | When the battery gets low (percentage in `$1`) |
 
-The `pre-refresh-pacman` name is kept for compatibility. Its edits to the refreshed package config apply to future package operations, after the current transaction has finished. Both update-related hooks run as your user after Omarchy clears its cached sudo authorization, so a hook that uses `sudo` needs its own authorization and may ask for your password.
+The `pre-refresh-pacman` hook is where custom repositories or `IgnorePkg` lines belong, since it runs before the package transaction. Both update-related hooks run as your user after Omarchy clears its cached sudo authorization, so a hook that uses `sudo` needs its own authorization and may ask for your password.
 
 Each of those directories already holds a `.sample` file showing the shape of a hook — drop the `.sample` from the name to put it to work. To install a script you've written elsewhere, use `omarchy hook install post-boot ~/my-hook`, which copies it in and makes it executable.
 

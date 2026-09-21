@@ -181,6 +181,12 @@ else
   [[ ! -f $OMARCHY_TEST_NOTIFICATION_CHECKS ]] || read -r checks <"$OMARCHY_TEST_NOTIFICATION_CHECKS"
   (( checks += 1 ))
   printf '%s\n' "$checks" >"$OMARCHY_TEST_NOTIFICATION_CHECKS"
+  # The service was running before the restart and, when asked to, never
+  # comes back afterwards.
+  if [[ ${OMARCHY_TEST_NOTIFICATIONS_DIE:-0} == 1 ]]; then
+    (( checks == 1 )) && echo 'b true' || echo 'b false'
+    exit 0
+  fi
   if (( checks == 1 || checks >= 4 )); then
     echo 'b true'
   else
@@ -285,3 +291,35 @@ restart_pid_one=""
 grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "dead-lock recovery re-acquires the session lock"
 grep -F "ipc -n -p $restart_root/shell call -- lock status" "$ipc_log" >/dev/null || fail "dead-lock recovery waits for the lock to become secure"
 pass "restart recovers a locked session whose lock client died"
+
+# Lock recovery must not wait on the notification plugin: a stranded user gets
+# the lock back even when notifications never return, and the restart then
+# reports the missing service rather than claiming success.
+sleep 30 &
+restart_pid_one=$!
+printf '%s\n' "$restart_pid_one" >"$restart_state"
+rm -f "$restart_state.locked" "$test_tmp/notification-checks"
+: >"$restart_log"
+: >"$ipc_log"
+
+if PATH="$restart_bin:$PATH" \
+  OMARCHY_PATH="$restart_root" \
+  XDG_RUNTIME_DIR="$runtime_dir" \
+  OMARCHY_TEST_SESSION_LOCKED=1 \
+  OMARCHY_TEST_QS_STATE="$restart_state" \
+  OMARCHY_TEST_QS_LOG="$restart_log" \
+  OMARCHY_TEST_QS_ENV_LOG="$restart_env_log" \
+  OMARCHY_TEST_DISPATCH_LOG="$dispatch_log" \
+  OMARCHY_TEST_IPC_LOG="$ipc_log" \
+  OMARCHY_TEST_SESSION_PATH="$restart_root" \
+  OMARCHY_TEST_NOTIFICATION_CHECKS="$test_tmp/notification-checks" \
+  OMARCHY_TEST_NOTIFICATIONS_DIE=1 \
+  timeout 10 "$ROOT/bin/omarchy-restart-shell" >"$test_tmp/dead-notifications.out" 2>&1; then
+  fail "a restart whose notification service never returns must not report success"
+fi
+wait "$restart_pid_one" 2>/dev/null || true
+restart_pid_one=""
+grep -F "ipc -n -p $restart_root/shell call -- lock lock" "$ipc_log" >/dev/null || fail "lock recovery waited on the notification service" "$(cat "$ipc_log")"
+[[ -f $restart_state.locked ]] || fail "lock recovery did not re-secure the session without notifications"
+grep -q "notification service did not become ready" "$test_tmp/dead-notifications.out" || fail "a missing notification service is not reported" "$(cat "$test_tmp/dead-notifications.out")"
+pass "restart recovers the lock even when the notification service never returns"

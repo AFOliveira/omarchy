@@ -14,36 +14,37 @@ omarchy_security_require_privileged_bash_startup || exit 126
 set -e
 omarchy_security_sanitize_bash_environment "$0" "$@"
 omarchy_security_require_source_root "$0"
-user_path=$PATH
-omarchy_security_revoke_sudo_timestamp || exit 1
+# Channel switching calls this behind its own sanitized PATH and hands the
+# caller's original path over the same way the updater receives it.
+user_path=${OMARCHY_UPDATE_USER_PATH:-$PATH}
+unset OMARCHY_UPDATE_USER_PATH
+# Traps first, so a signal or failure during the entry revocation still
+# exits through the cleanup path.
 omarchy_security_install_sudo_cleanup_traps
+omarchy_security_revoke_sudo_timestamp || exit 1
 omarchy_security_enable_no_update_sudo
 
 channel="${1:-stable}"
-hook_mode="${2:-normal}"
 if [[ $channel != "stable" && $channel != "rc" && $channel != "edge" ]]; then
   echo "Invalid channel: $channel" >&2
   exit 2
 fi
-if [[ $hook_mode != "normal" && $hook_mode != "defer-hook" && $hook_mode != "run-deferred" ]]; then
-  echo "Invalid refresh hook mode: $hook_mode" >&2
-  exit 2
-fi
 
-if [[ $hook_mode != "run-deferred" ]]; then
-  sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
-  sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
-  echo "Setting channel to $channel"
-  sudo cp -f "$OMARCHY_PATH/default/pacman/pacman-$channel.conf" /etc/pacman.conf
-  sudo cp -f "$OMARCHY_PATH/default/pacman/mirrorlist-$channel" /etc/pacman.d/mirrorlist
-  # Reset all package DBs and then update
-  omarchy-update-pacman -Syyuu --noconfirm
-fi
+sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
+sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
+echo "Setting channel to $channel"
+sudo cp -f "$OMARCHY_PATH/default/pacman/pacman-$channel.conf" /etc/pacman.conf
+sudo cp -f "$OMARCHY_PATH/default/pacman/mirrorlist-$channel" /etc/pacman.d/mirrorlist
 
-# Keep the historical hook name, but finish every privileged refresh operation
-# before running user code. Callers with later root work can defer the hook.
-if [[ $hook_mode != "defer-hook" ]]; then
-  omarchy_security_revoke_sudo_timestamp
-  PATH="$OMARCHY_PATH/default/omarchy/sudo-no-update:$user_path" \
-    "$OMARCHY_PATH/bin/omarchy-hook" pre-refresh-pacman
-fi
+# Allow user customization of /etc/pacman.conf before the upgrade runs, so
+# custom repositories and IgnorePkg entries shape the downgrade-capable
+# transaction below. The hook is user code: it runs cold behind the no-update
+# wrapper, and the timestamp is revoked again afterwards so any authorization
+# the hook obtained for itself cannot carry into the transaction.
+omarchy_security_revoke_sudo_timestamp
+PATH="$OMARCHY_PATH/default/omarchy/sudo-no-update:$user_path" \
+  "$OMARCHY_PATH/bin/omarchy-hook" pre-refresh-pacman
+omarchy_security_revoke_sudo_timestamp
+
+# Reset all package DBs and then update
+omarchy-update-pacman -Syyuu --noconfirm

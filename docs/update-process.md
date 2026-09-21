@@ -140,11 +140,10 @@ omarchy-update
   ├─ omarchy-update-status
   │    └─ refresh or clear the shell update indicator
   ├─ restart marked services and the shell
+  ├─ invalidate sudo credentials, then update AUR packages
+  ├─ invalidate again, run the post-update hook, invalidate again, then update mise tools
   ├─ omarchy-update-stay-awake stop
   │    └─ release the sleep inhibitor and restore shell idle state, if changed
-  ├─ update AUR packages
-  ├─ invalidate sudo credentials
-  ├─ run the post-update hook, invalidate again, then update mise tools
   └─ offer the unprivileged reboot prompt
 ```
 
@@ -159,7 +158,7 @@ Important behavior:
 - User-controlled post-update hooks and mise tools run only after every sudo-capable update stage. Omarchy invalidates its sudo timestamp before each boundary and on every exit; detached children therefore have no later reusable update authorization to wait for.
 - This lifecycle controls authorization created by the protected workflow. `sudo -N` prevents cache updates but can use an existing valid credential, and `sudo -k` revokes the current session's timestamp. It does not isolate the account from unrelated concurrent authentication in another workflow.
 - Sleep inhibition authenticates before detaching, drops the held command back to the caller, and closes both update lock descriptors before the persistent process starts. Cleanup accepts only caller-owned, mode-0600, single-link state and revalidates the recorded PID, process start time, owner, and random token immediately before every signal.
-- Channel switching establishes the same boundary before dev link/unlink, refresh and package operations. It keeps the wrapper first when changing source roots, carries the original user PATH into update hooks and mise, and runs the deferred refresh hook only after the full update succeeds and authorization is revoked again. Failed and interrupted channel switches revoke on exit.
+- Channel switching establishes the same boundary before dev link/unlink, refresh and package operations. It keeps the wrapper first when changing source roots, carries the original user PATH into update hooks and mise, and checks after each package transaction that the wrapper still exists before any further privileged step, since a transaction can replace the running tree with a release that predates it; when it is gone, or the destination otherwise lacks it, the switch stops after the package switch with instructions to run that release's update from a fresh session rather than letting a bare `sudo` or an updater that authenticates without `--no-update` publish a timestamp. Failed and interrupted channel switches revoke on exit.
 - `-y` exports `OMARCHY_UPDATE_UNATTENDED=1` and suppresses Omarchy confirmation prompts. Interactive review steps (orphan removal, conflict handoff) report and skip instead of blocking. Privileged commands still require sudo authorization, and command-scoped authentication can prompt separately for each command.
 - The free-space requirement uses a 10 GiB threshold and stops the update before
   confirmation when it is not met. If free space cannot be determined, the
@@ -272,9 +271,9 @@ which pacman repo the mirrorlist points at (and swap between the `omarchy` and
 `omarchy-dev` packages through a guard-allowed pacman run), while `dev` links
 the runtime to a git checkout via the dev-link mechanism, after which
 `omarchy update` fast-forwards that checkout instead of upgrading a package.
-Channel switching defers the legacy `pre-refresh-pacman` hook across the package
-swap and the complete update. The hook runs exactly once at the final cold
-credential boundary; it is skipped if the composite operation fails earlier.
+Channel switching runs the `pre-refresh-pacman` hook once, during its refresh
+step: cold, behind the no-update wrapper, after the package config is re-synced
+and before the refresh transaction. It does not run if the switch fails earlier.
 
 There is no version file at runtime. `omarchy-version` derives the version from
 `pacman -Q` on whichever package is installed, or reports `dev (<hash>)` for a

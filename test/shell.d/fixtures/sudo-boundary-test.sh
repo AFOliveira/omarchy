@@ -92,6 +92,11 @@ fi
 if [[ $step == "omarchy-hook" || $step == "omarchy-update-mise" ]]; then
   [[ ! -e $SUDO_TEST_CACHE ]] || exit 91
 fi
+if [[ -n ${SUDO_TEST_REMOVE_WRAPPER_STEP:-} && "$step $*" == $SUDO_TEST_REMOVE_WRAPPER_STEP ]]; then
+  # Model a package transaction replacing the running tree with a release
+  # that predates the wrapper.
+  /usr/bin/rm -f "$OMARCHY_PATH/default/omarchy/sudo-no-update/sudo"
+fi
 if [[ ${SUDO_TEST_FAIL_STEP:-} == "$step" ]]; then
   # Model a misbehaving child leaving state behind, then failing. Cleanup must
   # still revoke it. This never invokes real sudo or exercises a privilege flaw.
@@ -123,7 +128,7 @@ ln -s ../bin/test-step "$SUDO_TEST_ROOT/mock/pacman"
 reset_boundary() {
   : >"$SUDO_TEST_LOG"
   /usr/bin/rm -f "$SUDO_TEST_CACHE"
-  unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED
+  unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED SUDO_TEST_REMOVE_WRAPPER_STEP
 }
 assert_boundary_cold() {
   [[ ! -e $SUDO_TEST_CACHE ]] || fail "$1 left cached authorization"
