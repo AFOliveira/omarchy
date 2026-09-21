@@ -39,6 +39,7 @@ fail_state_boundary() {
 directory_is_private() {
   local directory="$1"
   local expected_owner="$2"
+  local legacy="${3:-0}"
   local canonical=""
   local owner=""
   local mode=""
@@ -47,7 +48,8 @@ directory_is_private() {
   canonical=$(readlink -e -- "$directory") || return 1
   [[ $canonical == "$directory" ]] || return 1
   read -r owner mode < <(stat -Lc '%u %a' -- "$directory") || return 1
-  [[ $owner == "$expected_owner" && $mode == "700" ]]
+  [[ $owner == "$expected_owner" ]] || return 1
+  [[ $mode == "700" ]] || (( legacy == 1 && (8#$mode & 022) == 0 ))
 }
 
 root_owned_parent_chain() {
@@ -79,6 +81,10 @@ ensure_private_directory() {
   if [[ ! -e $directory && ! -L $directory ]]; then
     mkdir -m 700 -- "$directory" 2>/dev/null || true
   fi
+  # Older helpers used mkdir -p with the caller's umask. Tighten only a
+  # canonical, caller-owned directory that other accounts cannot write.
+  directory_is_private "$directory" "$caller_uid" 1 || return 1
+  chmod 700 -- "$directory" || return 1
   directory_is_private "$directory" "$caller_uid"
 }
 
@@ -111,27 +117,30 @@ initialize_state_boundary() {
 
 state_file_is_private() {
   local state_file="$1"
+  local legacy="${2:-0}"
   local owner=""
   local mode=""
   local links=""
 
   [[ -f $state_file && ! -L $state_file ]] || return 1
   read -r owner mode links < <(stat -Lc '%u %a %h' -- "$state_file") || return 1
-  [[ $owner == "$caller_uid" && $mode == "600" && $links == "1" ]]
+  [[ $owner == "$caller_uid" && $links == "1" ]] || return 1
+  [[ $mode == "600" ]] || (( legacy == 1 && (8#$mode & 022) == 0 ))
 }
 
 read_state_record() {
   local state_file="$1"
+  local legacy="${2:-0}"
   local records=()
   local file_size=""
   local LC_ALL=C
 
-  state_file_is_private "$state_file" || return 1
+  state_file_is_private "$state_file" "$legacy" || return 1
   mapfile -t records <"$state_file" || return 1
   (( ${#records[@]} == 1 )) || return 1
   file_size=$(stat -Lc '%s' -- "$state_file") || return 1
   (( file_size == ${#records[0]} + 1 )) || return 1
-  state_file_is_private "$state_file" || return 1
+  state_file_is_private "$state_file" "$legacy" || return 1
   printf '%s\n' "${records[0]}"
 }
 
@@ -200,7 +209,9 @@ rollback_pending_launch() {
       rm -f -- "$inhibit_pid_file"
   fi
 
-  rmdir "$state_dir" 2>/dev/null || true
+  # A signal may interrupt either parent-side atomic write before its rename.
+  rm -f -- "$state_dir"/.launch-control.* "$state_dir"/.idle-owner.*
+  stop_locked || return 1
   launch_pending=0
 }
 
@@ -232,9 +243,16 @@ process_start_time() {
 
 process_owner() {
   local process_pid="$1"
+  local token="$2"
   local owner=""
 
-  owner=$(stat -Lc '%u' -- "/proc/$process_pid") || return 1
+  if [[ -n $token ]]; then
+    owner=$(stat -Lc '%u' -- "/proc/$process_pid") || return 1
+  else
+    # Legacy state can name sudo: its real UID remains the invoking account,
+    # even when /proc ownership reflects its effective root credentials.
+    owner=$(awk '/^Uid:/ { print $2; exit }' "/proc/$process_pid/status") || return 1
+  fi
   [[ $owner =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$owner"
 }
@@ -261,10 +279,10 @@ process_identity() {
   local owner_after=""
 
   start_before=$(process_start_time "$process_pid") || return 1
-  owner_before=$(process_owner "$process_pid") || return 1
-  process_has_token "$process_pid" "$token" || return 1
+  owner_before=$(process_owner "$process_pid" "$token") || return 1
+  [[ -z $token ]] || process_has_token "$process_pid" "$token" || return 1
   start_after=$(process_start_time "$process_pid") || return 1
-  owner_after=$(process_owner "$process_pid") || return 1
+  owner_after=$(process_owner "$process_pid" "$token") || return 1
   [[ $start_before == "$start_after" && $owner_before == "$owner_after" ]] || return 1
   printf '%s %s\n' "$start_before" "$owner_before"
 }
@@ -277,31 +295,6 @@ process_matches() {
   local identity=""
 
   identity=$(process_identity "$process_pid" "$token" 2>/dev/null) || return 1
-  [[ $identity == "$expected_start $expected_owner" ]]
-}
-
-process_base_identity() {
-  local process_pid="$1"
-  local start_before=""
-  local start_after=""
-  local owner_before=""
-  local owner_after=""
-
-  start_before=$(process_start_time "$process_pid") || return 1
-  owner_before=$(process_owner "$process_pid") || return 1
-  start_after=$(process_start_time "$process_pid") || return 1
-  owner_after=$(process_owner "$process_pid") || return 1
-  [[ $start_before == "$start_after" && $owner_before == "$owner_after" ]] || return 1
-  printf '%s %s\n' "$start_before" "$owner_before"
-}
-
-process_base_matches() {
-  local process_pid="$1"
-  local expected_start="$2"
-  local expected_owner="$3"
-  local identity=""
-
-  identity=$(process_base_identity "$process_pid" 2>/dev/null) || return 1
   [[ $identity == "$expected_start $expected_owner" ]]
 }
 
@@ -343,60 +336,11 @@ signal_inhibitor() {
   local recorded_owner="$3"
   local token="$4"
   local signal="$5"
-  local verified_kill=''
-
-  read -r -d '' verified_kill <<'SH' || true
-set -e
-process_pid="$1"
-expected_start="$2"
-expected_owner="$3"
-expected_argument="--why=Omarchy update in progress [$4]"
-expected_signal="$5"
-[[ $expected_signal == "TERM" || $expected_signal == "KILL" ]]
-
-process_matches() {
-  local process_stat=""
-  local stat_fields=()
-  local start_before=""
-  local start_after=""
-  local owner_before=""
-  local owner_after=""
-  local argument=""
-  local found=0
-
-  [[ -r /proc/$process_pid/stat && -r /proc/$process_pid/cmdline ]] || return 1
-  process_stat=$(</proc/"$process_pid"/stat)
-  process_stat="${process_stat##*) }"
-  read -r -a stat_fields <<<"$process_stat"
-  (( ${#stat_fields[@]} > 19 )) || return 1
-  start_before="${stat_fields[19]}"
-  owner_before=$(/usr/bin/stat -Lc '%u' -- "/proc/$process_pid") || return 1
-  while IFS= read -r -d '' argument; do
-    if [[ $argument == "$expected_argument" ]]; then
-      found=1
-      break
-    fi
-  done <"/proc/$process_pid/cmdline"
-  (( found == 1 )) || return 1
-
-  process_stat=$(</proc/"$process_pid"/stat)
-  process_stat="${process_stat##*) }"
-  read -r -a stat_fields <<<"$process_stat"
-  (( ${#stat_fields[@]} > 19 )) || return 1
-  start_after="${stat_fields[19]}"
-  owner_after=$(/usr/bin/stat -Lc '%u' -- "/proc/$process_pid") || return 1
-  [[ $start_before == "$expected_start" && $start_after == "$expected_start" ]]
-  [[ $owner_before == "$expected_owner" && $owner_after == "$expected_owner" ]]
-}
-
-process_matches
-builtin kill -s "$expected_signal" -- "$process_pid"
-SH
 
   [[ $recorded_owner == "$caller_uid" ]] || return 1
-
-  /usr/bin/env -i /usr/bin/bash --noprofile --norc -c "$verified_kill" omarchy-inhibitor-kill \
-    "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" "$signal" >/dev/null 2>&1
+  [[ $signal == "TERM" || $signal == "KILL" ]] || return 1
+  process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token" || return 1
+  builtin kill -s "$signal" -- "$inhibit_pid" 2>/dev/null
 }
 
 terminate_inhibitor() {
@@ -426,17 +370,20 @@ stop_locked() {
   local token=""
   local idle_owner=""
   local current_idle_owner=""
+  local current_start=""
   local failed=0
-  local inhibit_record_version=""
   local remove_inhibit_state=1
 
   if [[ ! -e $state_dir && ! -L $state_dir ]]; then
     return 0
   fi
-  directory_is_private "$state_dir" "$caller_uid" || fail_state_boundary
+  if ! ensure_private_directory "$state_dir"; then
+    fail_state_boundary
+    return 1
+  fi
 
   if [[ -e $idle_owner_file || -L $idle_owner_file ]]; then
-    idle_owner=$(read_state_record "$idle_owner_file" 2>/dev/null || true)
+    idle_owner=$(read_state_record "$idle_owner_file" 1 2>/dev/null || true)
     if [[ $idle_owner =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
       if [[ -f $stay_awake_state ]]; then
         current_idle_owner=$(<"$stay_awake_state")
@@ -452,28 +399,40 @@ stop_locked() {
   fi
 
   if [[ -e $inhibit_pid_file || -L $inhibit_pid_file ]]; then
-    inhibit_record=$(read_state_record "$inhibit_pid_file" 2>/dev/null || true)
-    if [[ $inhibit_record =~ ^([12])\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9]{1,10})\ ([0-9a-f]{32})$ ]]; then
-      inhibit_record_version="${BASH_REMATCH[1]}"
-      inhibit_pid="${BASH_REMATCH[2]}"
-      recorded_start_time="${BASH_REMATCH[3]}"
-      recorded_owner="${BASH_REMATCH[4]}"
-      token="${BASH_REMATCH[5]}"
+    inhibit_record=$(read_state_record "$inhibit_pid_file" 1 2>/dev/null || true)
+    if state_file_is_private "$inhibit_pid_file" &&
+      [[ $inhibit_record =~ ^1\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9]{1,10})\ ([0-9a-f]{32})$ ]]; then
+      inhibit_pid="${BASH_REMATCH[1]}"
+      recorded_start_time="${BASH_REMATCH[2]}"
+      recorded_owner="${BASH_REMATCH[3]}"
+      token="${BASH_REMATCH[4]}"
+    elif [[ $inhibit_record =~ ^([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})$ ]]; then
+      # The first update starts the old helper and installs this one before
+      # cleanup. Its protected same-account record predates launch tokens.
+      inhibit_pid="${BASH_REMATCH[1]}"
+      recorded_start_time="${BASH_REMATCH[2]}"
+      recorded_owner="$caller_uid"
+      if [[ -e /proc/$inhibit_pid && $(process_state "$inhibit_pid" 2>/dev/null || true) != "Z" ]] &&
+        ! process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" ""; then
+        current_start=$(process_start_time "$inhibit_pid" 2>/dev/null || true)
+        if [[ -z $current_start || $current_start == "$recorded_start_time" ]]; then
+          echo "Cannot verify permission to stop the legacy update inhibitor; retained its state for recovery." >&2
+          failed=1
+          remove_inhibit_state=0
+        fi
+      fi
+    else
+      echo "Ignoring unsafe Omarchy update sleep inhibitor state." >&2
+      failed=1
+    fi
+    if [[ -n $inhibit_pid ]] && (( remove_inhibit_state == 1 )); then
       if process_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token"; then
         if ! terminate_inhibitor "$inhibit_pid" "$recorded_start_time" "$recorded_owner" "$token"; then
           echo "Failed to stop the Omarchy update sleep inhibitor." >&2
           failed=1
           remove_inhibit_state=0
         fi
-      elif [[ $inhibit_record_version == "2" ]] &&
-        process_base_matches "$inhibit_pid" "$recorded_start_time" "$recorded_owner"; then
-        echo "The Omarchy update sleep inhibitor has not reached a verifiable identity yet." >&2
-        failed=1
-        remove_inhibit_state=0
       fi
-    else
-      echo "Ignoring unsafe Omarchy update sleep inhibitor state." >&2
-      failed=1
     fi
     (( remove_inhibit_state == 0 )) || rm -f -- "$inhibit_pid_file"
   fi
@@ -502,9 +461,8 @@ start_locked() {
   trap cleanup_pending_launch EXIT
   atomic_write_state "$launch_control_file" "active $token" || return 1
 
-  # The unprivileged held process writes its own private identity record. exec -a
-  # preserves the random token in its final argv without retaining an extra shell
-  # or a terminal descriptor merely to make that identity observable.
+  # The child is identifiable before it publishes state, including before exec.
+  # exec -a retains that identity without keeping an extra shell alive.
   local hold_command=(
     /usr/bin/systemd-inhibit --what=sleep:idle --who=omarchy-update
     --why="Omarchy update in progress [$token]" --mode=block
@@ -536,7 +494,7 @@ start_locked() {
       exec {control_fd}>&-
       trap - EXIT
       exec -a "$expected" /usr/bin/sleep infinity
-    ' omarchy-update-inhibitor "$state_dir" "$token" "$caller_uid" "$launch_control_file"
+    ' "--why=Omarchy update in progress [$token]" "$state_dir" "$token" "$caller_uid" "$launch_control_file"
   )
 
   if (( EUID == 0 )); then
@@ -588,29 +546,18 @@ start_locked() {
     state_file_is_private "$launch_control_file" || return 1
     rm -f -- "$launch_control_file"
   fi
-  launch_pending=0
-  omarchy_security_install_sudo_cleanup_traps
-
   if [[ ! -f $stay_awake_state ]]; then
-    if ! atomic_write_state "$idle_owner_file" "$idle_owner"; then
-      stop_locked || true
+    atomic_write_state "$idle_owner_file" "$idle_owner" || return 1
+    mkdir -p "$(dirname "$stay_awake_state")" || return 1
+    # The idle toggle uses this marker. Publish its owner in the same write so
+    # cancellation cannot leave an unowned Stay Awake setting behind.
+    if ! printf '%s\n' "$idle_owner" >"$stay_awake_state"; then
+      omarchy-toggle-idle allow-idle >/dev/null 2>&1 || true
       return 1
-    fi
-    if ! mkdir -p "$(dirname "$stay_awake_state")"; then
-      stop_locked || true
-      return 1
-    fi
-    if omarchy-toggle-idle stay-awake >/dev/null 2>&1; then
-      if ! printf '%s\n' "$idle_owner" >"$stay_awake_state"; then
-        omarchy-toggle-idle allow-idle >/dev/null 2>&1 || true
-        rm -f -- "$idle_owner_file"
-        stop_locked || true
-        return 1
-      fi
-    else
-      rm -f -- "$idle_owner_file"
     fi
   fi
+  launch_pending=0
+  omarchy_security_install_sudo_cleanup_traps
 }
 
 case "${1:-}" in
