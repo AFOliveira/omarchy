@@ -35,11 +35,18 @@ cat >"$bt_bin/power" <<'SH'
 [[ ${BT_POWER_FAIL:-0} == 0 ]] || exit 19
 echo "$1" >>"$BT_LOG"
 SH
-# bluetooth.service as systemctl reports it: 0 active, 3 inactive, 4 no such
-# unit, anything else an error.
+# Status 3 covers inactive, failed and transitional states. Missing units print
+# inactive and return 4 on the supported systemd version.
 cat >"$bt_bin/systemctl" <<'SH'
 #!/bin/bash
 [[ $1 == is-active ]] || exit 2
+if [[ -n ${BT_DAEMON_STATE:-} ]]; then
+  printf '%s\n' "$BT_DAEMON_STATE"
+elif (( ${BT_DAEMON_STATUS:-0} == 0 )); then
+  echo active
+else
+  echo inactive
+fi
 exit "${BT_DAEMON_STATUS:-0}"
 SH
 chmod +x "$bt_bin"/*
@@ -76,6 +83,15 @@ done
 rm -f "$bt_marker"; : >"$tmp/bt.log"
 if BT_LOG="$tmp/bt.log" BT_DAEMON_STATUS=1 root_run "$bt_body" --machine; then fail "an unknown bluetooth.service state completed the migration"; fi
 [[ ! -e $bt_marker && ! -s $tmp/bt.log ]] || fail "an unknown bluetooth.service state changed policy"
+for daemon_state in failed activating deactivating reloading unknown; do
+  rm -f "$bt_marker"; : >"$tmp/bt.log"
+  if BT_LOG="$tmp/bt.log" BT_DAEMON_STATUS=3 BT_DAEMON_STATE=$daemon_state root_run "$bt_body" --machine; then
+    fail "Bluetooth $daemon_state state completed as powered off"
+  fi
+  [[ ! -e $bt_marker && ! -s $tmp/bt.log ]] || fail "Bluetooth $daemon_state state changed power or completion"
+done
+BT_LOG="$tmp/bt.log" BT_POWER=yes root_run "$bt_body" --machine
+[[ $(cat "$tmp/bt.log") == on && -e $bt_marker ]] || fail "Bluetooth failed-state retry did not preserve powered-on state"
 pass "Bluetooth machine body preserves on/off state, keeps a machine without bluetoothd off, replays safely, and retries discovery and mutation failures"
 
 bt_dispatch="$tmp/bt-dispatch.sh"; script_copy 1786380259 "$bt_dispatch"
@@ -96,7 +112,7 @@ cat >"$bt_dispatch_timeout" <<'SH'
 shift
 exec "$@"
 SH
-printf '#!/bin/bash\nexit 0\n' >"$tmp/bt-dispatch-systemctl"; chmod +x "$tmp/bt-dispatch-systemctl"
+printf '#!/bin/bash\necho active\n' >"$tmp/bt-dispatch-systemctl"; chmod +x "$tmp/bt-dispatch-systemctl"
 cat >"$bt_dispatch_sudo" <<'SH'
 #!/bin/bash
 [[ $1 == -N && $2 == -- ]] || exit 90
