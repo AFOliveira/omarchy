@@ -81,6 +81,12 @@ if [[ ${1:-} == "-y" ]] || omarchy-update-confirm; then
   # them, so everything below waits on this finishing. An upgrade that stopped
   # takes the update with it rather than migrating against what is still on disk.
   omarchy-update-system-pkgs
+  # That transaction can replace this tree with one that no longer ships the
+  # command-scoped wrapper; a bare sudo after it would be the real one.
+  omarchy_security_enable_no_update_sudo || {
+    echo "The installed Omarchy no longer provides command-scoped sudo; stopping the update before any further privileged step. Run omarchy-update again." >&2
+    exit 1
+  }
 
   # Historical migrations are strictly ordered and mix user hooks/downloaded
   # tooling with privileged repairs. The no-update sudo wrapper has covered the

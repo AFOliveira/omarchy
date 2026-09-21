@@ -51,6 +51,28 @@ if run_update -y; then fail "interrupted update must fail"; fi
 assert_boundary_cold "interrupted update"
 pass "update revokes credentials on TERM"
 
+# The package transaction can replace the tree with one that lacks the
+# wrapper; the update stops there instead of letting a bare sudo reach the real
+# one. A decoy sudo in the package bin catches any such call.
+cat >"$SUDO_TEST_ROOT/bin/sudo" <<'STUB'
+#!/bin/bash
+printf 'unwrapped-sudo %s\n' "$*" >>"$SUDO_TEST_LOG"
+exit 97
+STUB
+chmod +x "$SUDO_TEST_ROOT/bin/sudo"
+cp "$SUDO_TEST_ROOT/default/omarchy/sudo-no-update/sudo" "$boundary_tmp/saved-wrapper"
+reset_boundary
+export SUDO_TEST_REMOVE_WRAPPER_AFTER_STEP='omarchy-update-system-pkgs*'
+if run_update -y; then fail "an update whose transaction removed the wrapper continued" "$(<"$SUDO_TEST_LOG")"; fi
+unset SUDO_TEST_REMOVE_WRAPPER_AFTER_STEP
+! grep -q '^unwrapped-sudo ' "$SUDO_TEST_LOG" || fail "an update reached ordinary sudo after the wrapper vanished" "$(<"$SUDO_TEST_LOG")"
+! grep -q '^step:omarchy-migrate' "$SUDO_TEST_LOG" || fail "an update migrated after the wrapper vanished" "$(<"$SUDO_TEST_LOG")"
+grep -q 'no longer provides command-scoped sudo' "$boundary_tmp/output" || fail "a vanished wrapper was not reported" "$(<"$boundary_tmp/output")"
+assert_boundary_cold "update after the wrapper vanished"
+cp "$boundary_tmp/saved-wrapper" "$SUDO_TEST_ROOT/default/omarchy/sudo-no-update/sudo"
+rm -f "$SUDO_TEST_ROOT/bin/sudo"
+pass "a transaction that removes the wrapper stops the update before any further sudo"
+
 reset_boundary
 export SUDO_TEST_REVOKE_FAIL=1
 if run_update -y; then fail "failed initial revocation must fail the update"; fi

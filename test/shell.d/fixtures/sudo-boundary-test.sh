@@ -124,6 +124,11 @@ case "$step" in
     [[ $* == *"--config /etc/pacman.conf"* ]] || exit 95
     ;;
 esac
+# A step whose own privileged work replaces the tree removes the wrapper once
+# that work is done, as a package transaction would.
+if [[ -n ${SUDO_TEST_REMOVE_WRAPPER_AFTER_STEP:-} && "$step $*" == $SUDO_TEST_REMOVE_WRAPPER_AFTER_STEP ]]; then
+  /usr/bin/rm -f "$OMARCHY_PATH/default/omarchy/sudo-no-update/sudo"
+fi
 STUB
 chmod +x "$SUDO_TEST_ROOT/bin/test-step"
 for step in omarchy-update-lock omarchy-update-requires-free-space omarchy-update-confirm omarchy-update-pkg-prune omarchy-snapshot omarchy-update-stay-awake omarchy-update-dev omarchy-update-keyring omarchy-update-system-pkgs omarchy-migrate omarchy-hook omarchy-update-aur-pkgs omarchy-update-mise omarchy-update-orphan-pkgs omarchy-update-analyze-logs omarchy-update-status omarchy-update-restart omarchy-pkg-aur-accessible omarchy-notification-dismiss pacman systemd-run cp yay; do
@@ -134,7 +139,7 @@ ln -s ../bin/test-step "$SUDO_TEST_ROOT/mock/pacman"
 reset_boundary() {
   : >"$SUDO_TEST_LOG"
   /usr/bin/rm -f "$SUDO_TEST_CACHE" "$SUDO_TEST_ROOT/revoke-fail"
-  unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED SUDO_TEST_REMOVE_WRAPPER_STEP
+  unset SUDO_TEST_FAIL_STEP SUDO_TEST_SIGNAL_STEP SUDO_TEST_SUDO_FAIL SUDO_TEST_REVOKE_FAIL SUDO_TEST_UNSUPPORTED SUDO_TEST_REMOVE_WRAPPER_STEP SUDO_TEST_REMOVE_WRAPPER_AFTER_STEP
 }
 assert_boundary_cold() {
   [[ ! -e $SUDO_TEST_CACHE ]] || fail "$1 left cached authorization"
