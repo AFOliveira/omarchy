@@ -29,6 +29,7 @@
 set -euo pipefail
 
 PROVISIONING_DIR=/var/lib/omarchy/provisioning
+PACKAGED_PATH=/usr/bin/omarchy-system-factory-reset
 OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 TOP_MNT=/run/omarchy-system-factory-reset/top
 NEXT_NAME=@omarchy-reset-next
@@ -37,9 +38,10 @@ LOG_FILE=/var/log/omarchy-system-factory-reset.log
 # Self-elevate so the menu entry (and a bare shell invocation) need no sudo
 # prefix. The caller's gum theme vars are forwarded as `env` arguments rather
 # than via `sudo -E`, so styling survives even under an env_reset sudoers.
+# Always elevate the packaged copy, including when invoked from a dev checkout.
 if (( EUID != 0 )); then
   mapfile -t gum_env < <(env | grep '^GUM_' || true)
-  exec sudo env "${gum_env[@]}" "$0" "$@"
+  exec sudo env "${gum_env[@]}" "$PACKAGED_PATH" "$@"
 fi
 
 export PATH="$OMARCHY_PATH/bin:$PATH"
