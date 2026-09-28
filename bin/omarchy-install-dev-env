@@ -53,7 +53,7 @@ omarchy_security_install_sudo_cleanup_traps
 
 finish_privileged_phase
 case "$environment" in
-  ruby|php|laravel|symfony|clojure)
+  ruby|symfony|clojure)
     omarchy_security_sudo_supports_no_update || {
       echo "This sudo does not support --no-update; refusing a mixed-trust installer." >&2
       exit 1
@@ -63,25 +63,10 @@ esac
 echo "Security note: this installer clears cached sudo authorization before running user-level tooling."
 
 install_php() {
-  local system_environment=php
-  [[ $environment != "symfony" ]] || system_environment=symfony
+  mise tool-alias set php github:nunomaduro/static-php-builds
+  mise use --global php@latest
 
-  # One fixed packaged system phase covers both packages and configuration.
-  # No user tools, paths or scripts are accepted by the privileged helper.
-  /usr/bin/sudo -N -- /usr/bin/env -i PATH=/usr/bin:/usr/sbin:/bin:/sbin \
-    /usr/bin/bash -p -- /usr/bin/omarchy-install-dev-env-system "$system_environment"
-}
-
-configure_composer_path() {
-  # This touches user-owned shell configuration only after the caller has
-  # finished and revoked the privileged phase. Never source the file here.
-  if [[ :$PATH: != *:$HOME/.config/composer/vendor/bin:* ]]; then
-    echo 'export PATH="$HOME/.config/composer/vendor/bin:$PATH"' >>"$HOME/.bashrc"
-    export PATH="$HOME/.config/composer/vendor/bin:$PATH"
-    echo "Added Composer global bin directory to PATH."
-  else
-    echo "Composer global bin directory already in PATH."
-  fi
+  mise x php -- composer global config bin-dir "$HOME/.local/bin"
 }
 
 install_node() {
@@ -119,23 +104,19 @@ go)
 php)
   echo -e "Installing PHP...\n"
   install_php
-  finish_privileged_phase
-  configure_composer_path
   ;;
 laravel)
   echo -e "Installing PHP and Laravel...\n"
   install_php
-  finish_privileged_phase
-  configure_composer_path
   install_node
-  composer global require laravel/installer
+  mise x php -- composer global require laravel/installer
   echo -e "\nYou can now run: laravel new myproject"
   ;;
 symfony)
   echo -e "Installing PHP and Symfony...\n"
-  install_php
+  install_packages symfony-cli
   finish_privileged_phase
-  configure_composer_path
+  install_php
   echo -e "\nYou can now run: symfony new --webapp myproject"
   ;;
 python)
