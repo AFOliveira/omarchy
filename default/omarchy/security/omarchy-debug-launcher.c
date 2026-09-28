@@ -188,13 +188,34 @@ static char **sudo_environment(void) {
 }
 
 static int wait_for_child(pid_t child, int *status) {
-  pid_t result;
+  siginfo_t info;
+  sigset_t blocked;
+  sigset_t previous;
+  pid_t result = -1;
+  int waited;
+  int error;
 
+  // Keep signal forwarding active while waiting, but retain the child's PID.
   do {
-    result = waitpid(child, status, 0);
-  } while (result < 0 && errno == EINTR);
+    waited = waitid(P_PID, (id_t)child, &info, WEXITED | WNOWAIT);
+  } while (waited < 0 && errno == EINTR);
+  error = waited < 0 ? errno : 0;
+
+  sigemptyset(&blocked);
+  sigaddset(&blocked, SIGHUP);
+  sigaddset(&blocked, SIGINT);
+  sigaddset(&blocked, SIGTERM);
+  if (sigprocmask(SIG_BLOCK, &blocked, &previous)) return -1;
   active_child = -1;
   child_phase = CHILD_IDLE;
+  if (!waited) {
+    do {
+      result = waitpid(child, status, 0);
+    } while (result < 0 && errno == EINTR);
+    error = result < 0 ? errno : 0;
+  }
+  if (sigprocmask(SIG_SETMASK, &previous, NULL)) return -1;
+  if (error) errno = error;
   return result == child ? 0 : -1;
 }
 
@@ -251,8 +272,14 @@ static pid_t spawn_command(char *const argv[], int stdout_fd, bool merge_stderr,
 
 static int revoke_timestamp(void) {
   char *const argv[] = {OMARCHY_SUDO_PATH, "-k", NULL};
+  int no_new_privs = prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
   int status;
-  pid_t child = spawn_command(argv, -1, false, CHILD_REVOKE);
+  pid_t child;
+
+  // An inherited restriction also prevents the collector from using setuid sudo.
+  if (no_new_privs == 1) return 0;
+  if (no_new_privs != 0) return 125;
+  child = spawn_command(argv, -1, false, CHILD_REVOKE);
 
   if (child < 0 || wait_for_child(child, &status)) return 125;
   return command_status(status);
@@ -531,7 +558,7 @@ int main(int argc, char **argv) {
     status = capture_command(help_argv, help_fd, HELP_LIMIT, true, &overflowed);
     if (caught_signal) revoke_and_exit(NULL, interrupted_status());
     if (status || overflowed || !sudo_help_supports_no_update(help_fd)) {
-      revoke_and_exit("This sudo does not support --no-update; refusing privileged debug collection.", 1);
+      revoke_and_exit("Could not verify sudo --no-update support; refusing privileged debug collection.\nRerun with --no-sudo to collect the remaining diagnostics.", 1);
     }
     close(help_fd);
     help_fd = -1;
@@ -542,7 +569,7 @@ int main(int argc, char **argv) {
       revoke_and_exit("Kernel log exceeds the safe debug collection limit.", 1);
     }
     if (status) {
-      revoke_and_exit("Could not collect the kernel log through command-scoped sudo.", 1);
+      revoke_and_exit("Could not collect the kernel log through command-scoped sudo.\nRerun with --no-sudo to collect the remaining diagnostics.", 1);
     }
   }
 
