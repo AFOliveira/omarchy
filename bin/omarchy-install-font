@@ -1,5 +1,7 @@
 #!/bin/bash -p
 
+# -p blocks BASH_ENV and exported functions before any package or sudo work.
+
 # omarchy:summary=Install a Nerd Font package and switch the system to it
 # omarchy:args=<display-name> <package> <family>
 # omarchy:examples=omarchy install font 'Cascadia Mono' ttf-cascadia-mono-nerd 'CaskaydiaMono Nerd Font'

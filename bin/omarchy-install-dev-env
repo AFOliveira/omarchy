@@ -1,5 +1,7 @@
 #!/bin/bash -p
 
+# -p blocks BASH_ENV and exported functions before any package or sudo work.
+
 # omarchy:summary=Install a supported development environment
 # omarchy:name=dev-env
 # omarchy:args=<ruby|node|bun|deno|go|laravel|symfony|php|python|elixir|phoenix|rust|java|zig|ocaml|dotnet|clojure|scala>

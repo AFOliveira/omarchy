@@ -1,5 +1,7 @@
 #!/bin/bash -p
 
+# -p blocks BASH_ENV and exported functions before any package or sudo work.
+
 # omarchy:summary=Install lib32 graphics drivers (Vulkan + NVIDIA) for any detected GPUs.
 # omarchy:group=install
 # omarchy:name=gaming gpu-lib32

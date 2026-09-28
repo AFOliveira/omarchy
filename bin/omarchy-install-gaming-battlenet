@@ -1,5 +1,7 @@
 #!/bin/bash -p
 
+# -p blocks BASH_ENV and exported functions before any package or sudo work.
+
 # omarchy:summary=Install Battle.net standalone via umu-launcher + GE-Proton (no Steam, no Lutris, no Heroic).
 # omarchy:requires-sudo=true
 

@@ -1,5 +1,7 @@
 #!/bin/bash -p
 
+# -p blocks BASH_ENV and exported functions before any package or sudo work.
+
 # omarchy:summary=Install Arch packages if they are missing
 # omarchy:args=<packages...>
 # omarchy:examples=omarchy pkg add jq ripgrep
