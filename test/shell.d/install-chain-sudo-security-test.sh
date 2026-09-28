@@ -341,14 +341,14 @@ grep -q '^UNTRUSTED:mise$' "$test_tmp/events-ruby" || fail "Ruby legitimate user
 grep -q '^DENIED$' "$test_tmp/events-ruby" || fail "Ruby tool did not receive an authentication-required result"
 pass "user-owned Ruby tooling cannot reuse the package install credential"
 
-# PHP/Laravel/Symfony now have a separate unprivileged system-phase fixture
-# in install-dev-env-system-test.sh, including total authentication counts.
+# PHP/Laravel/Symfony orchestration is covered by the benign
+# install-dev-env-orchestration-test.sh fixture.
 branches=(node bun deno go python elixir phoenix rust java zig ocaml dotnet clojure scala)
 for branch in "${branches[@]}"; do
   run_dev_env "$branch" 0
 done
 if grep -q '^UNTRUSTED:bashrc$' "$test_tmp"/events-*; then
-  fail "PHP setup executes the user-owned bashrc inside its privileged phase"
+  fail "development setup executes the user-owned bashrc inside its privileged phase"
 fi
 grep -q '^AUTH_NO_UPDATE$' "$test_tmp/events-clojure" || fail "Clojure prerequisite did not use command-scoped authentication"
 pass "all development branches keep user and downloaded code beyond the sudo boundary"

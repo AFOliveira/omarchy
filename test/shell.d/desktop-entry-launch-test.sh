@@ -70,8 +70,8 @@ sed \
   -e "s#/usr/bin/sleep#/usr/bin/true#g" \
   "$ROOT/bin/omarchy-install-font" >"$font_script"
 chmod 0755 "$font_script"
-if grep -Fq '/usr/bin/sudo' "$test_tmp/omarchy-security-functions" "$test_tmp/omarchy-install-security-functions"; then
-  fail "desktop-entry test helpers still reach host sudo"
+if grep -Fq '/usr/bin/sudo' "$font_script" "$test_tmp/omarchy-security-functions" "$test_tmp/omarchy-install-security-functions"; then
+  fail "desktop-entry test installer or sourced helpers still reach host sudo"
 fi
 pass "desktop-entry test routes installer helpers through its sudo mock"
 
@@ -188,6 +188,7 @@ pass "install-app does not run extra commands from a quote in the display name"
 "$font_script" "Cascadia Mono" "ttf-cascadia-mono-nerd" "CaskaydiaMono Nerd Font"
 [[ $(<"$OMARCHY_TEST_LOG") == "revoke" ]] || fail "font installer starts with cold authorization"
 presentation_command=$(<"$OMARCHY_TEST_PRESENTATION")
+[[ $presentation_command != *'/usr/bin/sudo'* ]] || fail "font presentation reaches host sudo"
 [[ $presentation_command == *'echo Installing\ Cascadia\ Mono...;'* ]] ||
   fail "install-font shell-quotes the display name" "$presentation_command"
 [[ $presentation_command == *'omarchy-font-set CaskaydiaMono\ Nerd\ Font'* ]] ||
