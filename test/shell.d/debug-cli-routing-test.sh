@@ -32,3 +32,25 @@ chmod +x "$test_tmp/bin/omarchy-debug"
 cp "$ROOT/default/omarchy/command-metadata/omarchy-debug" "$test_tmp/share/omarchy/command-metadata/omarchy-debug"
 check_debug_metadata "$test_tmp/bin/omarchy"
 pass "installed CLI reads debug metadata beside the native launcher"
+
+# The Bash payload is only usable through the packaged native launcher.
+# A positional -p must not be mistaken for a protected Bash startup.
+mkdir -p "$test_tmp/home" "$test_tmp/runtime" "$test_tmp/state"
+for startup in direct decoy; do
+  if [[ $startup == "direct" ]]; then
+    command=("$ROOT/bin/omarchy-debug" --print)
+  else
+    command=(/usr/bin/bash "$ROOT/bin/omarchy-debug" -p --print)
+  fi
+
+  status=0
+  output=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME="$test_tmp/home" \
+    XDG_RUNTIME_DIR="$test_tmp/runtime" XDG_STATE_HOME="$test_tmp/state" \
+    "${command[@]}" 2>&1) || status=$?
+  (( status == 126 )) || fail "debug payload refuses $startup startup"
+  [[ $output == *"Run the packaged omarchy-debug command directly"* ]] || fail "debug payload explains $startup refusal"
+  [[ ! -e $test_tmp/runtime/omarchy-debug.log &&
+    ! -e $test_tmp/state/omarchy/omarchy-debug.log &&
+    ! -e $test_tmp/home/.local/state/omarchy/omarchy-debug.log ]] || fail "refused debug payload creates no log"
+  pass "debug payload refuses $startup startup without creating a log"
+done
